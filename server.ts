@@ -2,7 +2,6 @@ import express from 'express';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 import dotenv from 'dotenv';
 import type {
@@ -1163,6 +1162,8 @@ async function startServer() {
   const distIndexHtml = path.join(distPath, 'index.html');
 
   if (process.env.NODE_ENV !== 'production' || !fs.existsSync(distIndexHtml)) {
+    const vitePkg = 'vite';
+    const { createServer: createViteServer } = await import(vitePkg);
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa'
