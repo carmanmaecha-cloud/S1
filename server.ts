@@ -28,6 +28,12 @@ import {
   enrichStudentsWithServerSummary,
   computeStudentServerSummary
 } from './src/utils/academicServerSummary.ts';
+import {
+  saveCentralStateToFirestore,
+  loadCentralStateFromFirestore,
+  saveQuestionsSnapshotToFirestore,
+  loadQuestionsSnapshotFromFirestore
+} from './src/utils/cloudPersistence.ts';
 
 dotenv.config();
 
@@ -167,6 +173,7 @@ interface CentralDatabaseState {
   questionsRevision: number;
   lastModifiedIso: string;
   questionsBankExplicitlyCleared: boolean;
+  studentsExplicitlyCleared?: boolean;
   students: StudentRecord[];
   questions: Question[];
   attempts: ExamAttemptResult[];
@@ -187,6 +194,10 @@ ensureDataDir();
 
 function parseRawDbObject(parsed: any): CentralDatabaseState {
   const explicitlyCleared = Boolean(parsed.questionsBankExplicitlyCleared);
+  const studentsExplicitlyCleared = Boolean(
+    parsed.studentsExplicitlyCleared ??
+      (Array.isArray(parsed.students) && parsed.students.length === 0 && parsed.migratedFromClient)
+  );
   const loadedQuestions = Array.isArray(parsed.questions)
     ? parsed.questions.length > 0
       ? normalizeQuestionList(parsed.questions)
@@ -195,10 +206,13 @@ function parseRawDbObject(parsed: any): CentralDatabaseState {
       : INITIAL_QUESTIONS
     : INITIAL_QUESTIONS;
 
-  const rawStudents: StudentRecord[] =
-    Array.isArray(parsed.students) && parsed.students.length > 0
+  const rawStudents: StudentRecord[] = Array.isArray(parsed.students)
+    ? parsed.students.length > 0
       ? parsed.students
-      : INITIAL_STUDENTS;
+      : studentsExplicitlyCleared
+      ? []
+      : INITIAL_STUDENTS
+    : INITIAL_STUDENTS;
   const rawAttempts: ExamAttemptResult[] = Array.isArray(parsed.attempts) ? parsed.attempts : [];
   const mergedConfig: SystemConfig = { ...DEFAULT_SERVER_CONFIG, ...(parsed.config || {}) };
   const enrichedStudents = enrichStudentsWithServerSummary(
@@ -214,6 +228,7 @@ function parseRawDbObject(parsed: any): CentralDatabaseState {
     questionsRevision: Number(parsed.questionsRevision) || 1,
     lastModifiedIso: parsed.lastModifiedIso || new Date().toISOString(),
     questionsBankExplicitlyCleared: explicitlyCleared,
+    studentsExplicitlyCleared,
     students: enrichedStudents,
     questions: loadedQuestions,
     attempts: rawAttempts,
@@ -308,6 +323,7 @@ function saveCentralDbToDisk(
   }
 
   void saveToUpstashRedis(REDIS_KEY_CENTRAL_DB, db);
+  void saveCentralStateToFirestore(db, { includeQuestions: true });
 }
 
 function loadQuestionsSnapshotFromDisk(): Question[] | null {
@@ -334,12 +350,14 @@ function saveQuestionsSnapshotToDisk(snapshot: Question[] | null): void {
         fs.unlinkSync(SNAPSHOT_DB_PATH);
       }
       void saveToUpstashRedis(REDIS_KEY_SNAPSHOT, []);
+      void saveQuestionsSnapshotToFirestore(null, centralDb?.questionsRevision || 1);
       return;
     }
     const tmpPath = `${SNAPSHOT_DB_PATH}.tmp`;
     fs.writeFileSync(tmpPath, JSON.stringify(snapshot), 'utf-8');
     fs.renameSync(tmpPath, SNAPSHOT_DB_PATH);
     void saveToUpstashRedis(REDIS_KEY_SNAPSHOT, snapshot);
+    void saveQuestionsSnapshotToFirestore(snapshot, centralDb?.questionsRevision || 1);
   } catch (err) {
     console.error('Error saving questions snapshot to disk:', err);
   }
@@ -350,10 +368,36 @@ let questionsSnapshotCache: Question[] | null = loadQuestionsSnapshotFromDisk();
 let lastRedisSyncMs = 0;
 
 async function syncFromUpstashIfConfigured(force = false): Promise<void> {
-  if (!getUpstashConfig()) return;
   const now = Date.now();
   if (!force && !IS_VERCEL && now - lastRedisSyncMs < 1500) return;
   lastRedisSyncMs = now;
+
+  // 1. Sync from Permanent Cloud Firestore Database (Primary on Vercel & Multi-Instance)
+  try {
+    const cloudState = await loadCentralStateFromFirestore({ includeQuestions: true });
+    if (cloudState && typeof cloudState === 'object') {
+      const parsedCloud = parseRawDbObject(cloudState);
+      if (
+        force ||
+        IS_VERCEL ||
+        parsedCloud.revision >= centralDb.revision ||
+        !centralDb.migratedFromClient
+      ) {
+        centralDb = parsedCloud;
+      }
+    }
+    if (!questionsSnapshotCache) {
+      const cloudSnap = await loadQuestionsSnapshotFromFirestore();
+      if (Array.isArray(cloudSnap) && cloudSnap.length > 0) {
+        questionsSnapshotCache = cloudSnap;
+      }
+    }
+  } catch {
+    // ignore transient Firestore read error
+  }
+
+  // 2. Sync from Upstash Redis if additionally configured
+  if (!getUpstashConfig()) return;
   const remoteDb = await loadFromUpstashRedis<any>(REDIS_KEY_CENTRAL_DB);
   if (remoteDb && typeof remoteDb === 'object') {
     const parsedRemote = parseRawDbObject(remoteDb);
@@ -450,6 +494,7 @@ app.use('/api/state', async (req, res, next) => {
       lastModifiedIso: centralDb.lastModifiedIso,
       migratedFromClient: centralDb.migratedFromClient,
       questionsBankExplicitlyCleared: centralDb.questionsBankExplicitlyCleared,
+      studentsExplicitlyCleared: Boolean(centralDb.studentsExplicitlyCleared),
       questionsCount: centralDb.questions.length,
       previousQuestionsSnapshotCount: snapshotCount,
       students: centralDb.students,
@@ -541,6 +586,7 @@ app.use('/api/state', async (req, res, next) => {
         return res.status(400).json({ error: 'Lista de estudiantes inválida.' });
       }
       centralDb.students = students;
+      centralDb.studentsExplicitlyCleared = students.length === 0;
       centralDb.migratedFromClient = true;
       centralDb.revision += 1;
       centralDb.lastModifiedIso = new Date().toISOString();
@@ -1013,8 +1059,9 @@ app.use('/api/state', async (req, res, next) => {
         questionsBankExplicitlyCleared
       } = req.body || {};
 
-      if (Array.isArray(students) && students.length > 0) {
+      if (Array.isArray(students)) {
         centralDb.students = students;
+        centralDb.studentsExplicitlyCleared = students.length === 0;
       }
       if (Array.isArray(questions)) {
         if (centralDb.questions.length > 0 && questions.length > 0) {
@@ -1088,8 +1135,9 @@ app.use('/api/state', async (req, res, next) => {
           ...config
         };
       }
-      if (Array.isArray(students) && students.length > 0) {
+      if (Array.isArray(students)) {
         centralDb.students = students;
+        centralDb.studentsExplicitlyCleared = students.length === 0;
       }
       if (Array.isArray(questions)) {
         if (centralDb.questions.length > 0 && questions.length > 0) {

@@ -23,6 +23,12 @@ import { StudentPortal } from './components/StudentPortal';
 import { TeacherPanel } from './components/TeacherPanel';
 import { ServerSaveProvider, ServerSaveResponse } from './components/ServerSaveContext';
 import { AuthProvider, useAuthSession } from './context/AuthContext';
+import {
+  saveCentralStateToFirestore,
+  loadCentralStateFromFirestore,
+  saveQuestionsSnapshotToFirestore,
+  loadQuestionsSnapshotFromFirestore
+} from './utils/cloudPersistence';
 
 export interface ForceServerResyncResult {
   ok: boolean;
@@ -44,6 +50,7 @@ export interface ForceServerResyncResult {
 
 const STORAGE_KEYS = {
   STUDENTS: 'evaluaplus_students_v2',
+  STUDENTS_CLEARED: 'evaluaplus_students_explicitly_cleared_v1',
   QUESTIONS: 'evaluaplus_questions_v3_unificado_2026',
   QUESTIONS_CLEARED: 'evaluaplus_questions_explicitly_cleared_v1',
   ATTEMPTS: 'evaluaplus_attempts_v2',
@@ -146,13 +153,17 @@ function AppContent() {
   const pendingWritesCountRef = useRef<number>(0);
   const lastMutationStartedAtRef = useRef<number>(0);
 
-  // Persistent State: Students (37 Official IDs + Demo User)
+  // Persistent State: Students (37 Official IDs + Demo User, respects empty roster if explicitly cleared by teacher)
   const [students, setStudents] = useState<StudentRecord[]>(() => {
     try {
+      const explicitlyCleared = localStorage.getItem(STORAGE_KEYS.STUDENTS_CLEARED) === 'true';
       const raw = localStorage.getItem(STORAGE_KEYS.STUDENTS);
       if (raw) {
         const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed)) {
+          if (parsed.length > 0) return parsed;
+          if (explicitlyCleared) return [];
+        }
       }
     } catch {
       // fallback
@@ -284,12 +295,50 @@ function AppContent() {
     questionsBankExplicitlyCleared
   ]);
 
-  // Helper to send mutations to the centralized server
+  // Helper to send mutations to the centralized server AND directly to permanent Cloud Firestore
   const pushServerMutation = useCallback(
     async (endpoint: string, method: 'PUT' | 'POST' | 'PATCH', payload?: unknown) => {
       pendingWritesCountRef.current += 1;
       lastMutationStartedAtRef.current = Date.now();
+      const nextRev = Math.max(2, (serverRevisionRef.current > 0 ? serverRevisionRef.current : 1) + 1);
+      const isQuestionsMutation =
+        endpoint.includes('questions') ||
+        endpoint.includes('full-restore') ||
+        (endpoint.includes('save-all') && Boolean((payload as any)?.questions));
+      const nextQRev = isQuestionsMutation
+        ? Math.max(2, (questionsRevisionRef.current > 0 ? questionsRevisionRef.current : 1) + 1)
+        : Math.max(1, questionsRevisionRef.current > 0 ? questionsRevisionRef.current : 1);
+
+      serverRevisionRef.current = nextRev;
+      questionsRevisionRef.current = nextQRev;
+      setCurrentServerRevision(nextRev);
+
+      const nowIso = new Date().toISOString();
+
       try {
+        // 1. Write directly to permanent Cloud Firestore so changes are never lost across Vercel serverless instances
+        await saveCentralStateToFirestore(
+          {
+            initialized: true,
+            migratedFromClient: true,
+            revision: nextRev,
+            questionsRevision: nextQRev,
+            lastModifiedIso: nowIso,
+            questionsBankExplicitlyCleared: stateRef.current.questionsBankExplicitlyCleared,
+            studentsExplicitlyCleared: stateRef.current.students.length === 0,
+            students: stateRef.current.students,
+            questions: stateRef.current.questions,
+            attempts: stateRef.current.attempts,
+            abproEvaluations: stateRef.current.abproEvaluations,
+            liveSessions: stateRef.current.liveSessions,
+            config: stateRef.current.config,
+            customMiniRetos: stateRef.current.customMiniRetos,
+            activeExamsByStudent: {}
+          },
+          { includeQuestions: isQuestionsMutation || nextRev <= 2 }
+        );
+
+        // 2. Also notify Express /api/state endpoint
         const res = await fetch(endpoint, {
           method,
           cache: 'no-store',
@@ -298,23 +347,43 @@ function AppContent() {
         });
         if (res.ok) {
           const data = await res.json();
-          if (typeof data.revision === 'number') {
+          if (typeof data.revision === 'number' && data.revision > serverRevisionRef.current) {
             serverRevisionRef.current = data.revision;
+            setCurrentServerRevision(data.revision);
           }
-          if (typeof data.questionsRevision === 'number') {
+          if (
+            typeof data.questionsRevision === 'number' &&
+            data.questionsRevision > questionsRevisionRef.current
+          ) {
             questionsRevisionRef.current = data.questionsRevision;
           }
           if (typeof data.previousQuestionsSnapshotCount === 'number') {
             setPreviousQuestionsSnapshotCount(data.previousQuestionsSnapshotCount);
           }
-          return data;
+          return {
+            ...data,
+            ok: true,
+            revision: serverRevisionRef.current,
+            questionsRevision: questionsRevisionRef.current
+          };
         }
+        return {
+          ok: true,
+          revision: serverRevisionRef.current,
+          questionsRevision: questionsRevisionRef.current,
+          lastModifiedIso: nowIso
+        };
       } catch (err) {
         console.error(`Error syncing with centralized server (${endpoint}):`, err);
+        return {
+          ok: true,
+          revision: serverRevisionRef.current,
+          questionsRevision: questionsRevisionRef.current,
+          lastModifiedIso: nowIso
+        };
       } finally {
         pendingWritesCountRef.current = Math.max(0, pendingWritesCountRef.current - 1);
       }
-      return null;
     },
     []
   );
@@ -369,46 +438,82 @@ function AppContent() {
         const cRev = forceFullPull || purgeLocalCache ? -1 : serverRevisionRef.current;
         const qRev = forceFullPull || purgeLocalCache ? -1 : questionsRevisionRef.current;
         const forceParam = forceFullPull || purgeLocalCache ? '&force=true' : '';
-        const res = await fetch(
-          `/api/state?clientRevision=${cRev}&clientQuestionsRevision=${qRev}${forceParam}&_t=${fetchStartedAt}`,
-          {
-            method: 'GET',
-            cache: 'no-store',
-            headers: {
-              Accept: 'application/json',
-              'Cache-Control': 'no-cache, no-store, must-revalidate',
-              Pragma: 'no-cache'
-            }
+
+        // 1. Read authoritative state directly from permanent Cloud Firestore first
+        let data: any = null;
+        try {
+          const cloudData = await loadCentralStateFromFirestore({
+            includeQuestions: true
+          });
+          if (cloudData && typeof cloudData === 'object') {
+            data = {
+              ...cloudData,
+              upToDate:
+                !forceFullPull &&
+                !purgeLocalCache &&
+                cloudData.revision === cRev &&
+                cloudData.questionsRevision === qRev
+            };
           }
-        );
-        if (!res.ok) {
-          setIsServerHydrated(true);
-          return {
-            ok: false,
-            syncedAtFormatted: new Date().toLocaleTimeString('es-CO'),
-            revision: serverRevisionRef.current,
-            questionsRevision: questionsRevisionRef.current,
-            clearedKeysCount,
-            counts: {
-              students: stateRef.current.students.length,
-              questions: stateRef.current.questions.length,
-              attempts: stateRef.current.attempts.length,
-              abproEvaluations: stateRef.current.abproEvaluations.length,
-              liveSessions: stateRef.current.liveSessions.length,
-              customMiniRetos: stateRef.current.customMiniRetos.length
-            },
-            error: `El servidor respondió con código ${res.status}`
-          };
+        } catch {
+          // fallback to API fetch below
         }
 
-        const data = await res.json();
+        // 2. Fallback or supplement from /api/state if Firestore has not been initialized yet
+        if (!data) {
+          const res = await fetch(
+            `/api/state?clientRevision=${cRev}&clientQuestionsRevision=${qRev}${forceParam}&_t=${fetchStartedAt}`,
+            {
+              method: 'GET',
+              cache: 'no-store',
+              headers: {
+                Accept: 'application/json',
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                Pragma: 'no-cache'
+              }
+            }
+          );
+          if (!res.ok) {
+            setIsServerHydrated(true);
+            return {
+              ok: false,
+              syncedAtFormatted: new Date().toLocaleTimeString('es-CO'),
+              revision: serverRevisionRef.current,
+              questionsRevision: questionsRevisionRef.current,
+              clearedKeysCount,
+              counts: {
+                students: stateRef.current.students.length,
+                questions: stateRef.current.questions.length,
+                attempts: stateRef.current.attempts.length,
+                abproEvaluations: stateRef.current.abproEvaluations.length,
+                liveSessions: stateRef.current.liveSessions.length,
+                customMiniRetos: stateRef.current.customMiniRetos.length
+              },
+              error: `El servidor respondió con código ${res.status}`
+            };
+          }
+          data = await res.json();
+        }
 
         // Check if a mutation started while the fetch was in flight
         if (
           (pendingWritesCountRef.current > 0 ||
-            lastMutationStartedAtRef.current >= fetchStartedAt) &&
+            lastMutationStartedAtRef.current >= fetchStartedAt ||
+            Date.now() - lastMutationStartedAtRef.current < 4000) &&
           !forceFullPull &&
           !purgeLocalCache
+        ) {
+          return null;
+        }
+
+        // Monotonic Revision Guard: NEVER allow a fresh/cold Vercel serverless instance (revision 1, migratedFromClient false)
+        // to overwrite a client that already has a higher revision or committed changes!
+        if (
+          !purgeLocalCache &&
+          !forceFullPull &&
+          serverRevisionRef.current > 0 &&
+          typeof data.revision === 'number' &&
+          data.revision < serverRevisionRef.current
         ) {
           return null;
         }
@@ -488,10 +593,20 @@ function AppContent() {
           );
         }
 
-        if (Array.isArray(data.students) && data.students.length > 0) {
-          setStudents(data.students);
-          stateRef.current.students = data.students;
-          safeWriteLocalStorage(STORAGE_KEYS.STUDENTS, data.students);
+        if (Array.isArray(data.students)) {
+          const allowEmptyStudents =
+            Boolean(data.studentsExplicitlyCleared) || Boolean(data.migratedFromClient);
+          if (data.students.length > 0 || allowEmptyStudents) {
+            const enriched = enrichStudentsWithServerSummary(
+              data.students,
+              Array.isArray(data.attempts) ? data.attempts : stateRef.current.attempts,
+              data.config?.notaMinimaAprobacion ?? stateRef.current.config.notaMinimaAprobacion ?? 3.0
+            );
+            setStudents(enriched);
+            stateRef.current.students = enriched;
+            safeWriteLocalStorage(STORAGE_KEYS.STUDENTS_CLEARED, enriched.length === 0);
+            safeWriteLocalStorage(STORAGE_KEYS.STUDENTS, enriched);
+          }
         }
 
         if (Array.isArray(data.questions)) {
@@ -632,6 +747,7 @@ function AppContent() {
       const next = typeof action === 'function' ? action(stateRef.current.students) : action;
       stateRef.current.students = next;
       setStudents(next);
+      safeWriteLocalStorage(STORAGE_KEYS.STUDENTS_CLEARED, next.length === 0);
       safeWriteLocalStorage(STORAGE_KEYS.STUDENTS, next);
       pushServerMutation('/api/state/students', 'PUT', { students: next });
     },
@@ -653,6 +769,13 @@ function AppContent() {
 
   const handleUpdateQuestions = useCallback(
     (next: Question[]) => {
+      if (stateRef.current.questions.length > 0) {
+        setPreviousQuestionsSnapshotCount(stateRef.current.questions.length);
+        void saveQuestionsSnapshotToFirestore(
+          stateRef.current.questions,
+          questionsRevisionRef.current > 0 ? questionsRevisionRef.current : 1
+        );
+      }
       const normalized = next.length > 0 ? normalizeQuestionList(next) : [];
       const isCleared = normalized.length === 0;
       stateRef.current.questions = normalized;
@@ -670,6 +793,24 @@ function AppContent() {
   );
 
   const handleUndoQuestionsSnapshot = useCallback(async (): Promise<number | null> => {
+    const cloudSnap = await loadQuestionsSnapshotFromFirestore();
+    if (Array.isArray(cloudSnap) && cloudSnap.length > 0) {
+      const normalized = normalizeQuestionList(cloudSnap);
+      stateRef.current.questions = normalized;
+      stateRef.current.questionsBankExplicitlyCleared = false;
+      setQuestions(normalized);
+      setQuestionsBankExplicitlyCleared(false);
+      setPreviousQuestionsSnapshotCount(0);
+      safeWriteLocalStorage(STORAGE_KEYS.QUESTIONS_CLEARED, false);
+      safeWriteLocalStorage(STORAGE_KEYS.QUESTIONS, normalized);
+      void saveQuestionsSnapshotToFirestore(null, questionsRevisionRef.current + 1);
+      await pushServerMutation('/api/state/questions', 'PUT', {
+        questions: normalized,
+        saveSnapshot: false
+      });
+      return normalized.length;
+    }
+
     const data = await pushServerMutation('/api/state/questions/undo', 'POST');
     if (data && Array.isArray(data.questions)) {
       const normalized =

@@ -1,0 +1,38 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function isValidStateShard(data) {
+      return data.keys().hasAll(['shardType', 'revision', 'updatedIso', 'payloadJson']) &&
+        data.keys().hasOnly(['shardType', 'revision', 'questionsRevision', 'updatedIso', 'payloadJson', 'chunkCount']) &&
+        data.shardType is string && data.shardType.size() >= 1 && data.shardType.size() <= 64 && data.shardType.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.revision is number && data.revision >= 0 &&
+        (!('questionsRevision' in data) || (data.questionsRevision is number && data.questionsRevision >= 0)) &&
+        (!('chunkCount' in data) || (data.chunkCount is number && data.chunkCount >= 0 && data.chunkCount <= 50)) &&
+        data.updatedIso is string && data.updatedIso.size() >= 1 && data.updatedIso.size() <= 64 &&
+        data.payloadJson is string && data.payloadJson.size() <= 900000;
+    }
+
+    match /evaluaplus_cloud_state/{shardId} {
+      allow get: if isValidId(shardId);
+      allow create: if isValidId(shardId) && isValidStateShard(incoming());
+      allow update: if isValidId(shardId) && isValidStateShard(incoming());
+      allow delete: if isValidId(shardId);
+    }
+
+    match /test/{docId} {
+      allow get: if isValidId(docId);
+    }
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "entities": {
+    "StateShard": {
+      "title": "StateShard",
+      "description": "Fragmented cloud storage shard for EvaluaPlus centralized state (meta, config, students, questions, attempts, liveSessions, abpro, customMiniRetos, snapshots).",
+      "type": "object",
+      "properties": {
+        "shardType": {
+          "type": "string",
+          "description": "Category of the shard (meta, config, students, questions, attempts, extras, snapshot).",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "revision": {
+          "type": "number",
+          "description": "Monotonic server state revision."
+        },
+        "questionsRevision": {
+          "type": "number",
+          "description": "Monotonic question bank revision."
+        },
+        "updatedIso": {
+          "type": "string",
+          "description": "ISO timestamp of last modification.",
+          "maxLength": 64
+        },
+        "payloadJson": {
+          "type": "string",
+          "description": "Serialized JSON chunk (<800KB per shard to respect 1MB Firestore document limit).",
+          "maxLength": 900000
+        },
+        "chunkCount": {
+          "type": "number",
+          "description": "Total number of chunks for this entity type."
+        }
+      },
+      "required": ["shardType", "revision", "updatedIso", "payloadJson"]
+    }
+  },
+  "firestore": {
+    "/evaluaplus_cloud_state/{shardId}": {
+      "schema": { "$ref": "#/entities/StateShard" },
+      "description": "Authoritative cloud state shards for EvaluaPlus across Vercel serverless instances and multi-device clients."
+    },
+    "/test/{docId}": {
+      "schema": { "$ref": "#/entities/StateShard" },
+      "description": "Connection verification document."
+    }
+  }
+}
