@@ -70,9 +70,13 @@ interface StudentPortalProps {
   onRecordRetoAttempt?: (
     studentId: string,
     retoAttempt: MiniRetoAttemptRecord,
-    updatedStudent: StudentRecord
+    updatedStudent?: StudentRecord
   ) => void;
-  onRecordAntiCheatEvent?: (studentId: string, logEntry: AntiCheatLogEntry) => void;
+  onRecordAntiCheatEvent?: (
+    studentId: string,
+    logEntry: AntiCheatLogEntry,
+    updatedStudent?: StudentRecord
+  ) => void;
   onUpdateLiveSession: (session: LiveClassroomSession | null, studentIdToRemove?: string) => void;
   onSwitchToTeacherLogin: () => void;
   onSessionActiveChange?: (active: boolean) => void;
@@ -3025,6 +3029,9 @@ export function StudentPortal({
                           const nextCount = prev + 1;
                           const willSuspend = nextCount > maxLlamadosPermitidos;
                           if (currentStudent) {
+                            const activeModInfo =
+                              activeModalityOptions.find((m) => m.id === selectedModality) ||
+                              activeModalityOptions[0];
                             const logEntry: AntiCheatLogEntry = {
                               id: `AC-BURST-${currentStudent.id}-${nowMs}-${nextCount}`,
                               fecha: new Date().toLocaleString('es-CO'),
@@ -3032,12 +3039,13 @@ export function StudentPortal({
                               studentId: currentStudent.id,
                               studentName: currentStudent.nombre,
                               origen: 'EXAMEN',
-                              modalidadOModulo: selectedModConfig.title,
+                              modalidadOModulo: activeModInfo.title,
                               tipoDeteccion: 'RAFAGA_RESPUESTA_RAPIDA_IA',
                               etiquetaDeteccion: 'Ráfaga sin Lectura (IA)',
                               descripcion:
                                 'Marcación consecutiva de 3 respuestas en menos de 2.2s por pregunta sin lectura del enunciado',
                               llamadoNumero: nextCount,
+                              numeroLlamado: nextCount,
                               maxLlamadosPermitidos,
                               accionTomada: willSuspend ? 'SUSPENSION_0_0' : 'LLAMADO_PREVENTIVO'
                             };

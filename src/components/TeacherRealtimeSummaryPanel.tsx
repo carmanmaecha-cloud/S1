@@ -39,6 +39,7 @@ interface TeacherRealtimeSummaryPanelProps {
   liveSessions: LiveClassroomSession[];
   config: SystemConfig;
   onNavigateTab?: (tab: any) => void;
+  onSelectStudentForAudit?: (studentId: string) => void;
 }
 
 const GRADE_BUCKET_COLORS = [

@@ -791,11 +791,13 @@ function AppContent() {
     (
       studentId: string,
       retoAttempt: MiniRetoAttemptRecord,
-      updatedStudent: StudentRecord
+      updatedStudent?: StudentRecord
     ) => {
-      const rawNextStudents = stateRef.current.students.map((s) =>
-        s.id === updatedStudent.id ? updatedStudent : s
-      );
+      const targetStudent =
+        updatedStudent || stateRef.current.students.find((s) => s.id === studentId);
+      const rawNextStudents = targetStudent
+        ? stateRef.current.students.map((s) => (s.id === targetStudent.id ? targetStudent : s))
+        : stateRef.current.students;
       const nextStudents = enrichStudentsWithServerSummary(
         rawNextStudents,
         stateRef.current.attempts,
@@ -806,7 +808,7 @@ function AppContent() {
       safeWriteLocalStorage(STORAGE_KEYS.STUDENTS, nextStudents);
 
       const enrichedUpdatedStudent =
-        nextStudents.find((s) => s.id === updatedStudent.id) || updatedStudent;
+        nextStudents.find((s) => s.id === studentId) || targetStudent;
 
       pushServerMutation('/api/state/reto-attempt', 'POST', {
         studentId,
@@ -818,15 +820,16 @@ function AppContent() {
   );
 
   const handleRecordAntiCheatEvent = useCallback(
-    (studentId: string, logEntry: AntiCheatLogEntry) => {
+    (studentId: string, logEntry: AntiCheatLogEntry, updatedStudent?: StudentRecord) => {
       const nextStudents = stateRef.current.students.map((s) => {
         if (s.id !== studentId) return s;
-        const prevLogs = Array.isArray(s.historialLlamadosAtencion)
-          ? s.historialLlamadosAtencion
+        const base = updatedStudent || s;
+        const prevLogs = Array.isArray(base.historialLlamadosAtencion)
+          ? base.historialLlamadosAtencion
           : [];
         const exists = prevLogs.some((l) => l && l.id === logEntry.id);
         return {
-          ...s,
+          ...base,
           historialLlamadosAtencion: exists ? prevLogs : [logEntry, ...prevLogs].slice(0, 150)
         };
       });
@@ -836,7 +839,8 @@ function AppContent() {
 
       pushServerMutation('/api/state/anti-cheat-event', 'POST', {
         studentId,
-        logEntry
+        logEntry,
+        updatedStudent: nextStudents.find((s) => s.id === studentId)
       });
     },
     [pushServerMutation]
@@ -1202,10 +1206,62 @@ function AppContent() {
   );
 }
 
+class AppErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { hasError: boolean; errorMsg: string }
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false, errorMsg: '' };
+  }
+
+  static getDerivedStateFromError(error: any) {
+    return {
+      hasError: true,
+      errorMsg: error?.message || 'Error inesperado de renderizado'
+    };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+          <div className="bg-white border border-slate-200 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-lg text-center">
+            <div className="text-base font-bold text-slate-900">
+              Sincronización de Seguridad Requerida
+            </div>
+            <p className="text-xs text-slate-600">
+              Se detectó una estructura de caché antigua en el navegador ({this.state.errorMsg}). Pulse el botón inferior para limpiar la caché local y recargar los datos oficiales desde el servidor.
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                try {
+                  localStorage.clear();
+                  sessionStorage.clear();
+                } catch {
+                  // ignore
+                }
+                window.location.reload();
+              }}
+              className="w-full px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold cursor-pointer"
+            >
+              Limpiar Caché Antigua y Recargar Ahora
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function App() {
   return (
-    <AuthProvider>
-      <AppContent />
-    </AuthProvider>
+    <AppErrorBoundary>
+      <AuthProvider>
+        <AppContent />
+      </AuthProvider>
+    </AppErrorBoundary>
   );
 }

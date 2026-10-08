@@ -698,11 +698,11 @@ app.use('/api/state', async (req, res, next) => {
             ? prevMod.historialIntentos.filter(Boolean)
             : [];
           const hasAttemptInMod = existingModHist.some(
-            (a) => a.attemptId === retoAttempt.attemptId
+            (a: any) => a && a.attemptId === retoAttempt.attemptId
           );
           const nextModHist = hasAttemptInMod
-            ? existingModHist.map((a) =>
-                a.attemptId === retoAttempt.attemptId ? retoAttempt : a
+            ? existingModHist.map((a: any) =>
+                a && a.attemptId === retoAttempt.attemptId ? retoAttempt : a
               )
             : [retoAttempt, ...existingModHist];
 

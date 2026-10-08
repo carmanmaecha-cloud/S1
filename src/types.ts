@@ -205,22 +205,24 @@ export type AntiCheatDetectionType =
 export interface AntiCheatLogEntry {
   id: string;
   fecha: string;
-  timestampMs: number;
+  timestampMs?: number;
   studentId: string;
   studentName: string;
   origen: 'EXAMEN' | 'MINI_RETO';
   modalidadOModulo: string;
   tipoDeteccion: AntiCheatDetectionType;
-  etiquetaDeteccion: string;
+  etiquetaDeteccion?: string;
   descripcion: string;
-  llamadoNumero: number;
+  llamadoNumero?: number;
+  numeroLlamado?: number;
   maxLlamadosPermitidos: number;
-  accionTomada: 'LLAMADO_PREVENTIVO' | 'SUSPENSION_0_0';
+  accionTomada: 'LLAMADO_PREVENTIVO' | 'LLAMADO_ATENCION' | 'SUSPENSION_0_0';
 }
 
 export interface StudentExamModalitySummary {
   modalidad: ExamModality;
   modalidadLabel: string;
+  label: string;
   realizado: boolean;
   intentosUtilizados: number;
   maxIntentosPermitidos: number;
@@ -228,8 +230,10 @@ export interface StudentExamModalitySummary {
   ultimaNota: number;
   porcentajeMejor: number;
   estado: 'APROBADO' | 'REPROBADO' | 'SUSPENDIDO' | 'PENDIENTE';
+  estadoMejor: 'APROBADO' | 'REPROBADO' | 'SUSPENDIDO' | 'PENDIENTE';
   ultimaFecha?: string;
   preguntasSalieronIds: string[];
+  preguntasQueSalieron: string[];
   totalPreguntas: number;
   llamadosAtencion: number;
 }
@@ -237,13 +241,16 @@ export interface StudentExamModalitySummary {
 export interface StudentRetoModalitySummary {
   modulo: 1 | 2 | 3 | 4 | 5;
   moduloLabel: string;
+  tituloModulo: string;
   realizado: boolean;
   intentosUtilizados: number;
   maxIntentos: number;
   mejorPorcentaje: number;
   notaEquivalenteEscala5: number;
+  mejorNotaEscala5: number;
   aprobado: boolean;
   insigniaDesbloqueada: boolean;
+  insigniaGanada: boolean;
   suspendidoPorTrampa: boolean;
   ultimaFecha?: string;
   ultimoTituloReto?: string;
@@ -252,18 +259,28 @@ export interface StudentRetoModalitySummary {
 export interface StudentServerAcademicSummary {
   actualizadoEnServidorIso: string;
   totalExamenesRealizadosIntentos: number;
+  totalIntentosExamenesRealizados: number;
   modalidadesExamenRealizadasCount: number;
+  examenesRealizadosCount: number;
   modalidadesExamenFaltantesCount: number;
+  examenesFaltantesCount: number;
   notaDefinitivaExamenes: number;
+  promedioExamenesPresentados: number;
   examenesRealizadosLabels: string[];
   examenesFaltantesLabels: string[];
   detalleModalidadesExamen: StudentExamModalitySummary[];
+  detallePorExamen: StudentExamModalitySummary[];
   totalRetosRealizadosIntentos: number;
+  totalIntentosRetosRealizados: number;
   modulosRetosRealizadosCount: number;
+  retosRealizadosCount: number;
   modulosRetosFaltantesCount: number;
+  retosFaltantesModulos: (1 | 2 | 3 | 4 | 5)[];
+  insigniasGanadasCount: number;
   retosRealizadosLabels: string[];
   retosFaltantesLabels: string[];
   detalleModulosRetos: StudentRetoModalitySummary[];
+  detallePorReto: StudentRetoModalitySummary[];
   totalLlamadosAntiTrampa: number;
 }
 
@@ -274,6 +291,7 @@ export interface StudentRecord {
   intentosUsados: number;
   maxIntentosPermitidos?: 1 | 2; // Configurable al reiniciar (1 o 2 intentos permitidos, por defecto 2)
   maxLlamadosAtencionIndividual?: number | null; // Límite individual de llamados anti-trampa antes de suspensión (null/undefined = usa el global)
+  advertenciasCambioFoco?: number;
   suspendido: boolean;
   conceptoInfraccion: string; // ej. "✓ Sin infracciones" o "Cambio de pestaña / ventana detectado 2 veces"
   preguntasIntento1: string[]; // IDs de preguntas usadas en Intento 1
@@ -401,6 +419,10 @@ export interface SystemConfig {
   detectarCambioAplicacion?: boolean; // Detectar cambio de aplicación / Alt+Tab / pérdida de foco del sistema operativo
   detectarSalidaPunteroDevToolsIA?: boolean; // Detectar salida prolongada del puntero, consola DevTools o multi-monitor
   detectarRafagaRespuestaRapidaIA?: boolean; // Detectar ráfaga de respuestas ultra-rápidas (<2.5s) sin lectura comprensiva
+  detectarCapturaPantallaDevTools?: boolean; // Alias / control específico de captura de pantalla, impresión y DevTools
+  detectarAbandonoPunteroIA?: boolean; // Alias / control específico de abandono prolongado del puntero
+  detectarRafagaClicsIA?: boolean; // Alias / control específico de ráfaga de respuestas sin lectura
+  detectarSplitScreen?: boolean; // Control de pantalla dividida
   examenBloquearCopiaClicDerechoAtajos?: boolean; // Bloquear Clic Derecho, Copiar/Pegar, F12 y PrintScreen en exámenes
   examenExigirPantallaCompleta?: boolean; // Solicitar modo Pantalla Completa y detectar salida en exámenes
   ecualizadorPsicometricoActivo?: boolean; // Ecualizador IA Anti-Patrones: respuestas con cascarita e igual longitud

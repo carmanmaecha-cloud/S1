@@ -76,8 +76,15 @@ export function getEffectiveMaxLlamadosAtencion(
 export function computeStudentServerSummary(
   student: StudentRecord,
   allAttempts: ExamAttemptResult[],
-  notaMinimaAprobacion = 3.0
+  configOrNotaMinima?: SystemConfig | number | null
 ): StudentServerAcademicSummary {
+  const notaMinimaAprobacion =
+    typeof configOrNotaMinima === 'number'
+      ? configOrNotaMinima
+      : typeof configOrNotaMinima?.notaMinimaAprobacion === 'number'
+      ? configOrNotaMinima.notaMinimaAprobacion
+      : 3.0;
+
   const studentAttempts = (Array.isArray(allAttempts) ? allAttempts : [])
     .filter((a) => a && String(a.studentId).toUpperCase() === String(student.id).toUpperCase())
     .sort((a, b) => (b.timestampMs || 0) - (a.timestampMs || 0));
@@ -135,6 +142,7 @@ export function computeStudentServerSummary(
       return {
         modalidad: modInfo.id,
         modalidadLabel: modInfo.label,
+        label: modInfo.label,
         realizado,
         intentosUtilizados: modAttempts.length,
         maxIntentosPermitidos: maxAllowedExamAttempts,
@@ -142,8 +150,10 @@ export function computeStudentServerSummary(
         ultimaNota: Number(ultimaNota.toFixed(2)),
         porcentajeMejor,
         estado,
+        estadoMejor: estado,
         ultimaFecha: modAttempts[0]?.fecha,
         preguntasSalieronIds,
+        preguntasQueSalieron: preguntasSalieronIds,
         totalPreguntas: modAttempts[0]?.totalPreguntas || preguntasSalieronIds.length,
         llamadosAtencion: llamadosMod
       };
@@ -167,6 +177,17 @@ export function computeStudentServerSummary(
       : studentAttempts.length > 0
       ? Number(Math.max(...studentAttempts.map((a) => Number(a.notaColombiana) || 0)).toFixed(2))
       : 0.0;
+
+  const completedExamModalities = detalleModalidadesExamen.filter((d) => d.realizado);
+  const promedioExamenesPresentados =
+    completedExamModalities.length > 0
+      ? Number(
+          (
+            completedExamModalities.reduce((acc, d) => acc + d.mejorNota, 0) /
+            completedExamModalities.length
+          ).toFixed(2)
+        )
+      : notaDefinitivaExamenes;
 
   // Mini Retos per Module (1 to 5)
   const globalRetoMap = new Map<string, MiniRetoAttemptRecord>();
@@ -207,17 +228,21 @@ export function computeStudentServerSummary(
     const notaEquivalenteEscala5 = suspendidoPorTrampa
       ? 0.0
       : Number(((mejorPorcentaje / 100) * 5.0).toFixed(1));
+    const insigniaDesbloqueada = Boolean(modProg?.insigniaDesbloqueada || aprobado);
 
     return {
       modulo: m,
       moduloLabel: mInfo.label,
+      tituloModulo: mInfo.label,
       realizado,
       intentosUtilizados,
       maxIntentos: modProg?.maxIntentos || 3,
       mejorPorcentaje,
       notaEquivalenteEscala5,
+      mejorNotaEscala5: notaEquivalenteEscala5,
       aprobado,
-      insigniaDesbloqueada: Boolean(modProg?.insigniaDesbloqueada || aprobado),
+      insigniaDesbloqueada,
+      insigniaGanada: insigniaDesbloqueada,
       suspendidoPorTrampa,
       ultimaFecha: modAttempts[0]?.fecha || modProg?.fechaDesbloqueo,
       ultimoTituloReto: modAttempts[0]?.tituloReto
@@ -235,6 +260,12 @@ export function computeStudentServerSummary(
     .filter((r) => !r.realizado)
     .map((r) => `Módulo ${r.modulo}`);
 
+  const retosFaltantesModulos = detalleModulosRetos
+    .filter((r) => !r.realizado)
+    .map((r) => r.modulo);
+
+  const insigniasGanadasCount = detalleModulosRetos.filter((r) => r.insigniaGanada).length;
+
   const examWarningsTotal = studentAttempts.reduce(
     (acc, a) => acc + (Number(a.incidenciasCount) || 0),
     0
@@ -248,21 +279,36 @@ export function computeStudentServerSummary(
     : 0;
   const totalLlamadosAntiTrampa = Math.max(logCount, examWarningsTotal + retoWarningsTotal);
 
+  const modalidadesExamenRealizadasCount = detalleModalidadesExamen.filter((d) => d.realizado).length;
+  const modalidadesExamenFaltantesCount = detalleModalidadesExamen.filter((d) => !d.realizado).length;
+  const modulosRetosRealizadosCount = detalleModulosRetos.filter((r) => r.realizado).length;
+  const modulosRetosFaltantesCount = detalleModulosRetos.filter((r) => !r.realizado).length;
+
   return {
     actualizadoEnServidorIso: new Date().toISOString(),
     totalExamenesRealizadosIntentos: studentAttempts.length,
-    modalidadesExamenRealizadasCount: detalleModalidadesExamen.filter((d) => d.realizado).length,
-    modalidadesExamenFaltantesCount: detalleModalidadesExamen.filter((d) => !d.realizado).length,
+    totalIntentosExamenesRealizados: studentAttempts.length,
+    modalidadesExamenRealizadasCount,
+    examenesRealizadosCount: modalidadesExamenRealizadasCount,
+    modalidadesExamenFaltantesCount,
+    examenesFaltantesCount: modalidadesExamenFaltantesCount,
     notaDefinitivaExamenes,
+    promedioExamenesPresentados,
     examenesRealizadosLabels,
     examenesFaltantesLabels,
     detalleModalidadesExamen,
+    detallePorExamen: detalleModalidadesExamen,
     totalRetosRealizadosIntentos: allRetoAttempts.length,
-    modulosRetosRealizadosCount: detalleModulosRetos.filter((r) => r.realizado).length,
-    modulosRetosFaltantesCount: detalleModulosRetos.filter((r) => !r.realizado).length,
+    totalIntentosRetosRealizados: allRetoAttempts.length,
+    modulosRetosRealizadosCount,
+    retosRealizadosCount: modulosRetosRealizadosCount,
+    modulosRetosFaltantesCount,
+    retosFaltantesModulos,
+    insigniasGanadasCount,
     retosRealizadosLabels,
     retosFaltantesLabels,
     detalleModulosRetos,
+    detallePorReto: detalleModulosRetos,
     totalLlamadosAntiTrampa
   };
 }

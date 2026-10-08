@@ -100,6 +100,7 @@ interface TeacherPanelProps {
   onForceServerSync?: () => Promise<ForceServerResyncResult | void> | void;
   lastServerSyncFormatted?: string;
   currentServerRevision?: number;
+  serverRevision?: number;
 }
 
 type TeacherTab =
@@ -137,8 +138,10 @@ export function TeacherPanel({
   onFullSystemRestore,
   onForceServerSync,
   lastServerSyncFormatted,
-  currentServerRevision
+  currentServerRevision,
+  serverRevision
 }: TeacherPanelProps) {
+  const effectiveServerRevision = currentServerRevision ?? serverRevision ?? 1;
   // Teacher Authentication State (Persisted across page reloads via AuthContext + sessionStorageWrapper)
   const {
     authState,
@@ -3038,7 +3041,7 @@ function doPost(e) {
               <div className="inline-flex items-center gap-1.5 text-xs font-mono font-bold text-sky-900 bg-sky-50 border border-sky-200 px-2.5 py-0.5 rounded-md">
                 <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
                 <span>
-                  Sincronización Servidor Activa (Cada 3s) · Rev #{currentServerRevision || 1}
+                  Sincronización Servidor Activa (Cada 3s) · Rev #{effectiveServerRevision}
                   {lastServerSyncFormatted ? ` · ${lastServerSyncFormatted}` : ''}
                 </span>
               </div>
@@ -4521,8 +4524,7 @@ function doPost(e) {
                       </td>
                       <td className="py-2 px-1.5 text-center font-mono tabular-nums font-semibold">
                         {(() => {
-                          const srv =
-                            st.resumenServidor || computeStudentServerSummary(st, attempts, config);
+                          const srv = computeStudentServerSummary(st, attempts, config);
                           const effWarn = getEffectiveMaxLlamadosAtencion(st, config);
                           const isCustomWarn =
                             typeof st.maxLlamadosAtencionIndividual === 'number' ||
@@ -4946,9 +4948,7 @@ function doPost(e) {
 
                   {/* ================= RESUMEN DE SERVIDOR: EXÁMENES REALIZADOS, NOTAS, FALTANTES, RETOS Y LLAMADOS ANTI-TRAMPA ================= */}
                   {(() => {
-                    const srv =
-                      activeAuditStudent.resumenServidor ||
-                      computeStudentServerSummary(activeAuditStudent, attempts, config);
+                    const srv = computeStudentServerSummary(activeAuditStudent, attempts, config);
                     const effWarn = getEffectiveMaxLlamadosAtencion(activeAuditStudent, config);
                     const isCustomWarn =
                       typeof activeAuditStudent.maxLlamadosAtencionIndividual === 'number' ||
@@ -5156,7 +5156,7 @@ function doPost(e) {
                                           : 'bg-amber-200 text-amber-950'
                                       }`}
                                     >
-                                      Llamado #{logItem.numeroLlamado}/{logItem.maxLlamadosPermitidos} ·{' '}
+                                      Llamado #{logItem.numeroLlamado ?? logItem.llamadoNumero ?? 1}/{logItem.maxLlamadosPermitidos} ·{' '}
                                       {logItem.accionTomada === 'SUSPENSION_0_0'
                                         ? 'SUSPENDIDO 0.0'
                                         : 'ADVERTENCIA'}
@@ -9253,8 +9253,7 @@ function doPost(e) {
 
                 {/* Resumen consolidado en el Servidor: Exámenes realizados, notas, faltantes, retos e historial anti-trampa */}
                 {(() => {
-                  const srv =
-                    auditSt.resumenServidor || computeStudentServerSummary(auditSt, attempts, config);
+                  const srv = computeStudentServerSummary(auditSt, attempts, config);
                   const effWarn = getEffectiveMaxLlamadosAtencion(auditSt, config);
                   const isCustomWarn =
                     typeof auditSt.maxLlamadosAtencionIndividual === 'number' ||
