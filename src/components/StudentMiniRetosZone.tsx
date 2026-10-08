@@ -7,8 +7,11 @@ import {
   GeneratedMiniRetoInstance,
   MiniRetoAttemptRecord,
   StudentRetoModuleProgress,
-  MiniRetoMechanicId
+  MiniRetoMechanicId,
+  AntiCheatLogEntry,
+  AntiCheatDetectionType
 } from '../types';
+import { getEffectiveMaxLlamadosAtencion } from '../utils/academicServerSummary';
 import {
   OFFICIAL_BADGES,
   SPECIAL_DISTINCTION_BADGE,
@@ -41,6 +44,16 @@ import {
 interface StudentMiniRetosZoneProps {
   student: StudentRecord;
   onUpdateStudentProfile: (updated: StudentRecord) => void;
+  onRecordRetoAttempt?: (
+    studentId: string,
+    retoAttempt: MiniRetoAttemptRecord,
+    updatedStudent?: StudentRecord
+  ) => void;
+  onRecordAntiCheatEvent?: (
+    studentId: string,
+    logEntry: AntiCheatLogEntry,
+    updatedStudent?: StudentRecord
+  ) => void;
   questions: Question[];
   config: SystemConfig;
   customMiniRetos: CustomMiniRetoTemplate[];
@@ -143,6 +156,8 @@ function analyzeCopiedTextRewriting(
 export function StudentMiniRetosZone({
   student,
   onUpdateStudentProfile,
+  onRecordRetoAttempt,
+  onRecordAntiCheatEvent,
   questions,
   config,
   customMiniRetos
@@ -160,11 +175,35 @@ export function StudentMiniRetosZone({
   const [lastAttemptResult, setLastAttemptResult] = useState<MiniRetoAttemptRecord | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Anti-Cheat State for Active Mini Reto (1-Warning Rule on Focus Change + Immediate 0.0/5.0 Suspension on Copy/Reincidence)
+  // Anti-Cheat State for Active Mini Reto (Configurable Warning Rule on Focus/Multi-Vector Change + Immediate 0.0/5.0 Suspension on Copy/Reincidence)
   const [retoWarningsCount, setRetoWarningsCount] = useState(0);
   const [retoWarningModalText, setRetoWarningModalText] = useState<string | null>(null);
   const [retoTimeLeftSec, setRetoTimeLeftSec] = useState(RETO_DURATION_SECONDS);
   const [isSplitScreen, setIsSplitScreen] = useState(false);
+
+  // Refs to keep latest answer and warning count without resetting Anti-Cheat / Timer effects on keystrokes
+  const studentAnswerRef = useRef<string>('');
+  const retoWarningsCountRef = useRef<number>(0);
+  const retoWarningHistoryRef = useRef<AntiCheatLogEntry[]>([]);
+  const pointerOutsideSinceRef = useRef<number | null>(null);
+  const maxLlamadosPermitidos = getEffectiveMaxLlamadosAtencion(student, config);
+  useEffect(() => {
+    studentAnswerRef.current = studentAnswer;
+  }, [studentAnswer]);
+  useEffect(() => {
+    retoWarningsCountRef.current = retoWarningsCount;
+  }, [retoWarningsCount]);
+
+  // Effective Anti-Cheat Config Flags for Mini Retos (all default to true if undefined)
+  const isRetoAntiCheatMasterEnabled = config.antiTrampaMiniRetosActivo !== false;
+  const isRetoFocusGuardEnabled =
+    isRetoAntiCheatMasterEnabled && config.retoBloquearCambioPestanaFoco !== false;
+  const isRetoCopyPasteGuardEnabled =
+    isRetoAntiCheatMasterEnabled && config.retoSuspenderCopiaPegadoInyeccion !== false;
+  const isRetoBiometricGuardEnabled =
+    isRetoAntiCheatMasterEnabled && config.retoBiometriaTecleoAntiCopia !== false;
+  const isRetoFullscreenGuardEnabled =
+    isRetoAntiCheatMasterEnabled && config.retoExigirPantallaCompleta !== false;
 
   // Biometric Keystroke Telemetry Refs (for Detecting Rewriting of Copied Text)
   const retoStartPerfRef = useRef<number>(performance.now());
@@ -287,16 +326,22 @@ export function StudentMiniRetosZone({
 
   // Execute Immediate Automatic Suspension (0.0 / 5.0 — SUSPENDIDO) on Reincidence or Copy/Paste/Rewrite Attempt
   const executeAntiCheatRetoSuspension = useCallback(
-    (motivoInfraccion: string, warningsTriggered: number) => {
+    (
+      motivoInfraccion: string,
+      warningsTriggered: number,
+      tipoDeteccion: AntiCheatDetectionType = 'CAMBIO_PESTANA'
+    ) => {
       if (!activeReto) return;
 
+      const nowFormatted = new Date().toLocaleString('es-CO');
       const modProg = retoProgressMap[activeReto.modulo];
       const currentAttemptNum = Math.min(3, modProg.intentosUsados + 1) as 1 | 2 | 3;
       const elapsedTypingSec = firstKeyPressPerfRef.current
         ? Math.max(1, (performance.now() - firstKeyPressPerfRef.current) / 1000)
         : 1;
+      const currentAnswerText = studentAnswerRef.current;
       const rewriteCheck = analyzeCopiedTextRewriting(
-        studentAnswer,
+        currentAnswerText,
         keystrokeIntervalsRef.current,
         backspaceCountRef.current,
         totalKeyPressesRef.current,
@@ -309,9 +354,25 @@ export function StudentMiniRetosZone({
         Math.round((performance.now() - retoStartPerfRef.current) / 1000)
       );
 
+      const finalLogEntry: AntiCheatLogEntry = {
+        id: `AC-RETO-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        studentId: student.id,
+        studentName: student.nombre,
+        fecha: nowFormatted,
+        origen: 'MINI_RETO',
+        modalidadOModulo: `Módulo ${activeReto.modulo} — ${activeReto.mecanicaNombre}`,
+        tipoDeteccion,
+        descripcion: motivoInfraccion,
+        numeroLlamado: warningsTriggered,
+        maxLlamadosPermitidos,
+        accionTomada: 'SUSPENSION_0_0'
+      };
+      const updatedRetoLogs = [...retoWarningHistoryRef.current, finalLogEntry];
+      retoWarningHistoryRef.current = updatedRetoLogs;
+
       const suspendedAttempt: MiniRetoAttemptRecord = {
         attemptId: `RETO-SUSP-${student.id}-M${activeReto.modulo}-${Date.now()}`,
-        fecha: new Date().toLocaleString('es-CO'),
+        fecha: nowFormatted,
         timestampMs: Date.now(),
         studentId: student.id,
         studentName: student.nombre,
@@ -327,7 +388,7 @@ export function StudentMiniRetosZone({
         respuestaEsperadaDocente: activeReto.respuestaEsperadaDocente,
         conceptosClave: Array.isArray(activeReto.conceptosClave) ? activeReto.conceptosClave : [],
         respuestaEstudiante:
-          studentAnswer.trim() || `[Intento suspendido automáticamente: ${motivoInfraccion}]`,
+          currentAnswerText.trim() || `[Intento suspendido automáticamente: ${motivoInfraccion}]`,
         porcentajeIA: 0,
         umbralAprobacionPct: activeReto.umbralAprobacionPct || thresholdPct,
         rubricaDesglose: {
@@ -340,6 +401,8 @@ export function StudentMiniRetosZone({
         notaEquivalenteEscala5: 0.0,
         motivoInfraccion,
         advertenciasRegistradas: warningsTriggered,
+        maxLlamadosPermitidosEnIntento: maxLlamadosPermitidos,
+        historialLlamadosIntento: updatedRetoLogs,
         telemetriaEscritura: {
           wpm: rewriteCheck.wpm,
           correccionesBackspace: backspaceCountRef.current,
@@ -372,20 +435,32 @@ export function StudentMiniRetosZone({
       const prevHistorialGlobal = Array.isArray(student.historialIntentosRetos)
         ? student.historialIntentosRetos
         : [];
+      const prevAntiCheatLogs = Array.isArray(student.historialLlamadosAtencion)
+        ? student.historialLlamadosAtencion
+        : [];
 
       const updatedStudent: StudentRecord = {
         ...student,
         suspendido: true,
         conceptoInfraccion: `Mini Reto M${activeReto.modulo} Suspendido (0.0 / 5.0): ${motivoInfraccion}`,
+        advertenciasCambioFoco: Math.max(student.advertenciasCambioFoco || 0, warningsTriggered),
         progresoRetos: nextProgresoRetos,
-        historialIntentosRetos: [suspendedAttempt, ...prevHistorialGlobal]
+        historialIntentosRetos: [suspendedAttempt, ...prevHistorialGlobal],
+        historialLlamadosAtencion: [finalLogEntry, ...prevAntiCheatLogs]
       };
 
       if (document.fullscreenElement) {
         document.exitFullscreen().catch(() => {});
       }
 
-      onUpdateStudentProfile(updatedStudent);
+      if (onRecordAntiCheatEvent) {
+        onRecordAntiCheatEvent(student.id, finalLogEntry, updatedStudent);
+      }
+      if (onRecordRetoAttempt) {
+        onRecordRetoAttempt(student.id, suspendedAttempt, updatedStudent);
+      } else {
+        onUpdateStudentProfile(updatedStudent);
+      }
       void handleExecuteServerSave(
         'estudiante_vitrina_insignias',
         `Actualización automática de Mini Reto M${activeReto.modulo} en Base de Datos del Servidor`
@@ -395,59 +470,188 @@ export function StudentMiniRetosZone({
       setActiveReto(null);
       setIsEvaluating(false);
     },
-    [activeReto, retoProgressMap, student, studentAnswer, thresholdPct, onUpdateStudentProfile, handleExecuteServerSave]
+    [
+      activeReto,
+      retoProgressMap,
+      student,
+      thresholdPct,
+      maxLlamadosPermitidos,
+      onUpdateStudentProfile,
+      onRecordRetoAttempt,
+      onRecordAntiCheatEvent,
+      handleExecuteServerSave
+    ]
   );
 
   // Active Anti-Cheat Event Listeners while a Mini Reto is open
   useEffect(() => {
-    if (!activeReto) return;
+    if (!activeReto || !isRetoAntiCheatMasterEnabled) return;
 
     let armed = false;
+    let lastInfractionTimestamp = 0;
     const armTimer = setTimeout(() => {
       armed = true;
-    }, 1000);
+    }, 800);
 
-    // Register Focus / Fullscreen / Tab-Switch Warning (1 Warning allowed; 2nd Infraction = Immediate 0.0 / 5.0 Suspension)
-    const handleFocusInfraction = (motivo: string) => {
+    // Register Focus / Fullscreen / Tab-Switch / Minimize / App-Switch Warning (Configurable maxLlamadosPermitidos allowed)
+    const handleFocusInfraction = (
+      motivo: string,
+      tipoDeteccion: AntiCheatDetectionType = 'CAMBIO_PESTANA'
+    ) => {
       if (!armed) return;
-      setRetoWarningsCount((prev) => {
-        const next = prev + 1;
-        if (next === 1) {
-          setRetoWarningModalText(
-            `⚠️ 1ª Advertencia Preventiva de Seguridad: Se detectó "${motivo}". Durante el Mini Reto está prohibido cambiar de pestaña, perder el foco de la ventana o salir de pantalla completa. Una segunda incidencia suspenderá automáticamente el reto con calificación 0.0 / 5.0 (SUSPENDIDO).`
-          );
-        } else if (next >= 2) {
-          executeAntiCheatRetoSuspension(
-            `Reincidencia en pérdida de foco / cambio de pestaña (${motivo} — 2 incidencias)`,
-            next
-          );
+      const now = Date.now();
+      if (now - lastInfractionTimestamp < 900) return;
+      lastInfractionTimestamp = now;
+
+      const next = retoWarningsCountRef.current + 1;
+      retoWarningsCountRef.current = next;
+      setRetoWarningsCount(next);
+
+      const nowFormatted = new Date().toLocaleString('es-CO');
+
+      if (next <= maxLlamadosPermitidos) {
+        const warningLog: AntiCheatLogEntry = {
+          id: `AC-RETO-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          studentId: student.id,
+          studentName: student.nombre,
+          fecha: nowFormatted,
+          origen: 'MINI_RETO',
+          modalidadOModulo: `Módulo ${activeReto.modulo} — ${activeReto.mecanicaNombre}`,
+          tipoDeteccion,
+          descripcion: motivo,
+          numeroLlamado: next,
+          maxLlamadosPermitidos,
+          accionTomada: 'LLAMADO_ATENCION'
+        };
+        const updatedLogs = [...retoWarningHistoryRef.current, warningLog];
+        retoWarningHistoryRef.current = updatedLogs;
+
+        const prevAntiCheatLogs = Array.isArray(student.historialLlamadosAtencion)
+          ? student.historialLlamadosAtencion
+          : [];
+        const updatedStudentWarning: StudentRecord = {
+          ...student,
+          advertenciasCambioFoco: Math.max(student.advertenciasCambioFoco || 0, next),
+          historialLlamadosAtencion: [warningLog, ...prevAntiCheatLogs]
+        };
+
+        if (onRecordAntiCheatEvent) {
+          onRecordAntiCheatEvent(student.id, warningLog, updatedStudentWarning);
+        } else {
+          onUpdateStudentProfile(updatedStudentWarning);
         }
-        return next;
-      });
+
+        const restantes = Math.max(0, maxLlamadosPermitidos - next);
+        setRetoWarningModalText(
+          `⚠️ LLAMADO DE ATENCIÓN ANTI-TRAMPA (${next} DE ${maxLlamadosPermitidos}): Se detectó "${motivo}". ${
+            restantes > 0
+              ? `Te quedan ${restantes} llamado(s) de atención antes de la suspensión automática.`
+              : 'Este es tu ÚLTIMO llamado permitido; la próxima infracción suspenderá el Mini Reto con calificación 0.0 / 5.0 (SUSPENDIDO).'
+          }`
+        );
+      } else {
+        executeAntiCheatRetoSuspension(
+          `Superó el límite de llamados de atención (${next}/${maxLlamadosPermitidos} incidencias): ${motivo}`,
+          next,
+          tipoDeteccion
+        );
+      }
     };
 
     const handleVisibilityChange = () => {
-      if (document.hidden) {
-        handleFocusInfraction('Cambio de pestaña o minimizado del navegador');
+      if ((document.hidden || document.visibilityState === 'hidden') && isRetoFocusGuardEnabled) {
+        const isMinimized =
+          window.outerWidth <= 160 ||
+          window.outerHeight <= 160 ||
+          window.screenX < -10000 ||
+          window.screenY < -10000;
+        if (isMinimized) {
+          if (config.detectarMinimizarPestana !== false) {
+            handleFocusInfraction(
+              'Minimizar la pestaña o ventana del navegador durante el Mini Reto',
+              'MINIMIZAR_PESTANA_VENTANA'
+            );
+          }
+        } else if (config.detectarCambioPestana !== false) {
+          handleFocusInfraction(
+            'Cambio de pestaña activa del navegador durante el Mini Reto',
+            'CAMBIO_PESTANA'
+          );
+        }
       }
     };
 
     const handleWindowBlur = () => {
-      handleFocusInfraction('Pérdida de foco de la ventana activa');
+      if (!isRetoFocusGuardEnabled) return;
+      setTimeout(() => {
+        if (document.hidden) return;
+        const isMinimized =
+          window.outerWidth <= 160 ||
+          window.outerHeight <= 160 ||
+          window.screenX < -10000 ||
+          window.screenY < -10000;
+        if (isMinimized) {
+          if (config.detectarMinimizarPestana !== false) {
+            handleFocusInfraction(
+              'Minimizar la ventana del navegador durante el Mini Reto',
+              'MINIMIZAR_PESTANA_VENTANA'
+            );
+          }
+        } else if (config.detectarCambioAplicacion !== false) {
+          handleFocusInfraction(
+            'Cambio de aplicación externa (Alt+Tab, asistente IA o segunda pantalla) durante el Mini Reto',
+            'CAMBIO_APLICACION_EXTERNA'
+          );
+        }
+      }, 80);
     };
 
     const handleFullscreenChange = () => {
-      if (armed && !document.fullscreenElement) {
-        handleFocusInfraction('Salida del modo de Pantalla Completa durante el reto');
+      if (armed && isRetoFullscreenGuardEnabled && !document.fullscreenElement) {
+        handleFocusInfraction(
+          'Salida del modo de Pantalla Completa durante el reto',
+          'SALIDA_PANTALLA_COMPLETA'
+        );
+      }
+    };
+
+    const handleMouseLeaveDocument = (e: MouseEvent) => {
+      if (config.detectarAbandonoPunteroIA === false) return;
+      if (
+        e.clientY <= 0 ||
+        e.clientX <= 0 ||
+        e.clientX >= window.innerWidth ||
+        e.clientY >= window.innerHeight
+      ) {
+        pointerOutsideSinceRef.current = Date.now();
+      }
+    };
+
+    const handleMouseEnterDocument = () => {
+      if (config.detectarAbandonoPunteroIA === false) return;
+      if (pointerOutsideSinceRef.current) {
+        const elapsedOutsideMs = Date.now() - pointerOutsideSinceRef.current;
+        pointerOutsideSinceRef.current = null;
+        if (elapsedOutsideMs >= 9000 && !document.hidden) {
+          handleFocusInfraction(
+            `Abandono prolongado del puntero fuera de la ventana (${Math.round(elapsedOutsideMs / 1000)}s en monitor secundario o app externa)`,
+            'ABANDONO_PUNTERO_FUERA_VENTANA'
+          );
+        }
       }
     };
 
     const handleContextMenu = (e: MouseEvent) => {
+      if (!isRetoCopyPasteGuardEnabled) return;
       e.preventDefault();
-      handleFocusInfraction('Intento de abrir menú contextual (Clic derecho)');
+      handleFocusInfraction(
+        'Intento de abrir menú contextual (Clic derecho)',
+        'COPIA_PEGADO_CLIC_DERECHO'
+      );
     };
 
     const handleKeyDownGlobal = (e: KeyboardEvent) => {
+      if (!isRetoCopyPasteGuardEnabled) return;
       const key = (e.key || '').toUpperCase();
       const isCtrlOrMeta = e.ctrlKey || e.metaKey;
 
@@ -461,26 +665,44 @@ export function StudentMiniRetosZone({
       if (isCopyShortcut || isInspectOrSource || isPrintScreen) {
         e.preventDefault();
         e.stopPropagation();
-        // Immediate suspension with 0.0 / 5.0 on copy/paste/inspection shortcut attempt
-        executeAntiCheatRetoSuspension(
+        handleFocusInfraction(
           `Intento prohibido de copia, pegado o inspección mediante atajo (${
             isPrintScreen ? 'PrintScreen' : isCtrlOrMeta ? `Ctrl+${key}` : key
           })`,
-          retoWarningsCount + 1
+          isInspectOrSource || isPrintScreen
+            ? 'CAPTURA_IMPRESION_DEVTOOLS'
+            : 'COPIA_PEGADO_CLIC_DERECHO'
         );
       }
     };
 
     const checkWindowSplit = () => {
+      if (!isRetoFullscreenGuardEnabled) {
+        setIsSplitScreen(false);
+        return;
+      }
       const availW = window.screen?.availWidth || window.innerWidth;
       const splitNow = availW > 0 && window.innerWidth < availW * 0.85;
       setIsSplitScreen(splitNow);
+      if (armed && config.detectarMinimizarPestana !== false && (window.innerWidth <= 200 || window.innerHeight <= 180)) {
+        handleFocusInfraction(
+          'Minimizar o colapsar el tamaño de la ventana del Mini Reto',
+          'MINIMIZAR_PESTANA_VENTANA'
+        );
+      } else if (armed && config.detectarSplitScreen !== false && availW >= 900 && window.innerWidth < availW * 0.62) {
+        handleFocusInfraction(
+          'Reducción de ventana o pantalla dividida (Split-Screen) durante el Mini Reto',
+          'PANTALLA_DIVIDIDA_SPLIT'
+        );
+      }
     };
 
     checkWindowSplit();
     document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('blur', handleWindowBlur);
     document.addEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('mouseleave', handleMouseLeaveDocument);
+    document.addEventListener('mouseenter', handleMouseEnterDocument);
     document.addEventListener('contextmenu', handleContextMenu);
     window.addEventListener('keydown', handleKeyDownGlobal, true);
     window.addEventListener('resize', checkWindowSplit);
@@ -490,11 +712,25 @@ export function StudentMiniRetosZone({
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('blur', handleWindowBlur);
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      document.removeEventListener('mouseleave', handleMouseLeaveDocument);
+      document.removeEventListener('mouseenter', handleMouseEnterDocument);
       document.removeEventListener('contextmenu', handleContextMenu);
       window.removeEventListener('keydown', handleKeyDownGlobal, true);
       window.removeEventListener('resize', checkWindowSplit);
     };
-  }, [activeReto, executeAntiCheatRetoSuspension, retoWarningsCount]);
+  }, [
+    activeReto?.instanceId,
+    isRetoAntiCheatMasterEnabled,
+    isRetoFocusGuardEnabled,
+    isRetoCopyPasteGuardEnabled,
+    isRetoFullscreenGuardEnabled,
+    maxLlamadosPermitidos,
+    config,
+    student,
+    onRecordAntiCheatEvent,
+    onUpdateStudentProfile,
+    executeAntiCheatRetoSuspension
+  ]);
 
   // Monotonic Countdown Timer for Active Mini Reto (8 minutes max)
   useEffect(() => {
@@ -509,13 +745,13 @@ export function StudentMiniRetosZone({
       if (remaining === 0) {
         executeAntiCheatRetoSuspension(
           'Tiempo máximo del Mini Reto agotado (8:00 min) sin entrega',
-          retoWarningsCount
+          retoWarningsCountRef.current
         );
       }
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [activeReto, executeAntiCheatRetoSuspension, retoWarningsCount]);
+  }, [activeReto?.instanceId, executeAntiCheatRetoSuspension]);
 
   // Reset keystroke telemetry when starting a new reto
   const resetKeystrokeTelemetry = () => {
@@ -524,6 +760,8 @@ export function StudentMiniRetosZone({
     keystrokeIntervalsRef.current = [];
     backspaceCountRef.current = 0;
     totalKeyPressesRef.current = 0;
+    retoWarningHistoryRef.current = [];
+    retoWarningsCountRef.current = 0;
     setLiveKeystrokeStats({ wpm: 0, backspaces: 0, keystrokes: 0 });
   };
 
@@ -563,13 +801,15 @@ export function StudentMiniRetosZone({
       return;
     }
 
-    // Request Fullscreen to enforce secure environment
-    try {
-      if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
-        await document.documentElement.requestFullscreen();
+    // Request Fullscreen to enforce secure environment if enabled in config
+    if (isRetoFullscreenGuardEnabled) {
+      try {
+        if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
+          await document.documentElement.requestFullscreen();
+        }
+      } catch {
+        // Continue if browser blocks fullscreen in iframe
       }
-    } catch {
-      // Continue if browser blocks fullscreen in iframe
     }
 
     setIsGeneratingReto(true);
@@ -724,11 +964,11 @@ export function StudentMiniRetosZone({
     const nextVal = e.target.value;
     const deltaChars = nextVal.length - studentAnswer.length;
 
-    // If more than 18 characters appear in a single event, it's a paste/injection/clipboard manager
-    if (deltaChars > 18) {
+    // Detect Bulk Text Injection / Hidden Paste / Auto-Fill in onChange
+    if (isRetoCopyPasteGuardEnabled && deltaChars > 18) {
       executeAntiCheatRetoSuspension(
         `Inyección instantánea de texto copiado (+${deltaChars} caracteres en un solo pulso)`,
-        retoWarningsCount + 1
+        retoWarningsCountRef.current + 1
       );
       return;
     }
@@ -761,8 +1001,8 @@ export function StudentMiniRetosZone({
       activeReto.respuestaEsperadaDocente
     );
 
-    if (rewriteAudit.isRewrittenCopy) {
-      executeAntiCheatRetoSuspension(rewriteAudit.reason, retoWarningsCount + 1);
+    if (isRetoBiometricGuardEnabled && rewriteAudit.isRewrittenCopy) {
+      executeAntiCheatRetoSuspension(rewriteAudit.reason, retoWarningsCountRef.current + 1);
       return;
     }
 
@@ -874,6 +1114,8 @@ export function StudentMiniRetosZone({
       suspendidoPorTrampa: false,
       notaEquivalenteEscala5: Number(((finalEvaluation.porcentajeIA / 100) * 5.0).toFixed(1)),
       advertenciasRegistradas: retoWarningsCount,
+      maxLlamadosPermitidosEnIntento: maxLlamadosPermitidos,
+      historialLlamadosIntento: retoWarningHistoryRef.current,
       telemetriaEscritura: {
         wpm: rewriteAudit.wpm,
         correccionesBackspace: backspaceCountRef.current,
@@ -924,7 +1166,11 @@ export function StudentMiniRetosZone({
       document.exitFullscreen().catch(() => {});
     }
 
-    onUpdateStudentProfile(updatedStudent);
+    if (onRecordRetoAttempt) {
+      onRecordRetoAttempt(student.id, attemptRecord, updatedStudent);
+    } else {
+      onUpdateStudentProfile(updatedStudent);
+    }
     void handleExecuteServerSave(
       'estudiante_vitrina_insignias',
       `Actualización automática de Mini Reto M${activeReto.modulo} (${finalEvaluation.porcentajeIA}%) en Base de Datos del Servidor`
@@ -1337,40 +1583,61 @@ export function StudentMiniRetosZone({
         {activeReto && !currentModProgress.insigniaDesbloqueada && accessStatus.allowed && (
           <div
             onCopy={(e) => {
+              if (!isRetoCopyPasteGuardEnabled) return;
               e.preventDefault();
               executeAntiCheatRetoSuspension(
                 'Intento directo de copiar el enunciado del Mini Reto (Evento onCopy)',
-                retoWarningsCount + 1
+                retoWarningsCountRef.current + 1
               );
             }}
             onCut={(e) => {
+              if (!isRetoCopyPasteGuardEnabled) return;
               e.preventDefault();
               executeAntiCheatRetoSuspension(
                 'Intento directo de cortar texto en el Mini Reto (Evento onCut)',
-                retoWarningsCount + 1
+                retoWarningsCountRef.current + 1
               );
             }}
             className="border-2 border-sky-500 bg-sky-50/30 rounded-2xl p-6 space-y-5 select-none"
           >
             {/* Barra Superior de Telemetría Anti-Trampa del Mini Reto */}
             <div className="bg-slate-900 text-white rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs">
-              <div className="flex flex-wrap items-center gap-2.5">
-                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 font-semibold">
-                  <ShieldCheck className="w-3.5 h-3.5" />
-                  <span>Escudo Anti-Trampa Activo</span>
-                </span>
+              <div className="flex flex-wrap items-center gap-2">
                 <span
-                  className={`px-2.5 py-1 rounded-md font-mono font-bold ${
-                    retoWarningsCount === 0
-                      ? 'bg-slate-800 text-slate-300'
-                      : 'bg-amber-500 text-slate-950 animate-pulse'
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border font-semibold ${
+                    isRetoAntiCheatMasterEnabled
+                      ? 'bg-emerald-500/20 border-emerald-400/40 text-emerald-300'
+                      : 'bg-amber-500/20 border-amber-400/40 text-amber-300'
                   }`}
                 >
-                  Advertencias de Foco: {retoWarningsCount} / 1
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  <span>
+                    {isRetoAntiCheatMasterEnabled
+                      ? '🛡️ Escudo Anti-Trampa Activo'
+                      : '⚠️ Modo Flexible (Anti-Trampa Pausado por Docente)'}
+                  </span>
                 </span>
-                <span className="px-2.5 py-1 rounded-md bg-slate-800 text-sky-300 font-mono">
-                  Biometría: {liveKeystrokeStats.wpm} PPM · {liveKeystrokeStats.backspaces} edic.
-                </span>
+                {isRetoFocusGuardEnabled && (
+                  <span
+                    className={`px-2.5 py-1 rounded-md font-mono font-bold ${
+                      retoWarningsCount === 0
+                        ? 'bg-slate-800 text-slate-300'
+                        : 'bg-amber-500 text-slate-950 animate-pulse'
+                    }`}
+                  >
+                    Advertencias Foco: {retoWarningsCount} / 1
+                  </span>
+                )}
+                {isRetoCopyPasteGuardEnabled && (
+                  <span className="px-2 py-1 rounded-md bg-slate-800 text-emerald-300 font-mono text-[11px]">
+                    ✓ Anti-Copia/Pegado Activo
+                  </span>
+                )}
+                {isRetoBiometricGuardEnabled && (
+                  <span className="px-2.5 py-1 rounded-md bg-slate-800 text-sky-300 font-mono">
+                    Biometría: {liveKeystrokeStats.wpm} PPM · {liveKeystrokeStats.backspaces} edic.
+                  </span>
+                )}
               </div>
 
               <div className="flex items-center gap-2 font-mono">
@@ -1480,24 +1747,27 @@ export function StudentMiniRetosZone({
                   onKeyDown={handleTextareaKeyDown}
                   onChange={handleTextareaChange}
                   onPaste={(e) => {
+                    if (!isRetoCopyPasteGuardEnabled) return;
                     e.preventDefault();
                     executeAntiCheatRetoSuspension(
                       'Intento de pegar texto copiado en la respuesta del Mini Reto (Evento onPaste)',
-                      retoWarningsCount + 1
+                      retoWarningsCountRef.current + 1
                     );
                   }}
                   onDrop={(e) => {
+                    if (!isRetoCopyPasteGuardEnabled) return;
                     e.preventDefault();
                     executeAntiCheatRetoSuspension(
                       'Intento de arrastrar y soltar texto externo en el Mini Reto (Evento onDrop)',
-                      retoWarningsCount + 1
+                      retoWarningsCountRef.current + 1
                     );
                   }}
                   onCopy={(e) => {
+                    if (!isRetoCopyPasteGuardEnabled) return;
                     e.preventDefault();
                     executeAntiCheatRetoSuspension(
                       'Intento de copiar texto dentro del Mini Reto (Evento onCopy)',
-                      retoWarningsCount + 1
+                      retoWarningsCountRef.current + 1
                     );
                   }}
                   placeholder="Escribe aquí tu respuesta con tus propias palabras. Recuerda: Ctrl+C, Ctrl+V, F12, PrintScreen, cambiar de pestaña 2 veces o reescribir texto copiado suspende automáticamente con 0.0 / 5.0..."

@@ -8,7 +8,10 @@ import {
   LiveClassroomSession,
   SystemConfig,
   BloomLevel,
-  CustomMiniRetoTemplate
+  CustomMiniRetoTemplate,
+  MiniRetoAttemptRecord,
+  AntiCheatLogEntry,
+  AntiCheatDetectionType
 } from '../types';
 import { computePayloadChecksum, generateDeterministicAccessCode } from '../data/students';
 import {
@@ -16,6 +19,7 @@ import {
   normalizeQuestionList,
   equalizeQuestionPsychometrics
 } from '../data/questions';
+import { getEffectiveMaxLlamadosAtencion } from '../utils/academicServerSummary';
 import {
   StudentPerformanceDashboard,
   ZeroTrialSimulatorModal
@@ -63,6 +67,12 @@ interface StudentPortalProps {
   config: SystemConfig;
   attempts: ExamAttemptResult[];
   onRecordAttempt: (result: ExamAttemptResult, updatedStudent: StudentRecord) => void;
+  onRecordRetoAttempt?: (
+    studentId: string,
+    retoAttempt: MiniRetoAttemptRecord,
+    updatedStudent: StudentRecord
+  ) => void;
+  onRecordAntiCheatEvent?: (studentId: string, logEntry: AntiCheatLogEntry) => void;
   onUpdateLiveSession: (session: LiveClassroomSession | null, studentIdToRemove?: string) => void;
   onSwitchToTeacherLogin: () => void;
   onSessionActiveChange?: (active: boolean) => void;
@@ -213,6 +223,8 @@ export function StudentPortal({
   config,
   attempts,
   onRecordAttempt,
+  onRecordRetoAttempt,
+  onRecordAntiCheatEvent,
   onUpdateLiveSession,
   onSwitchToTeacherLogin,
   onSessionActiveChange,
@@ -368,11 +380,44 @@ export function StudentPortal({
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [confirmSubmitModal, setConfirmSubmitModal] = useState(false);
   const [finishedResult, setFinishedResult] = useState<ExamAttemptResult | null>(null);
+  const attemptAntiCheatLogsRef = useRef<AntiCheatLogEntry[]>([]);
+  const lastInfractionTimeMsRef = useRef<number>(0);
+  const rapidAnswerStreakRef = useRef<number>(0);
+  const lastAnswerPerfRef = useRef<number>(0);
+
+  // Effective Anti-Cheat Config Flags for Exams (all default to true if undefined)
+  const isExamAntiCheatMasterEnabled = config.antiTrampaExamenesActivo !== false;
+  const isExamFocusGuardEnabled =
+    isExamAntiCheatMasterEnabled && config.examenBloquearCambioPestanaFoco !== false;
+  const isTabSwitchGuardEnabled =
+    isExamFocusGuardEnabled && config.detectarCambioPestana !== false;
+  const isMinimizeGuardEnabled =
+    isExamFocusGuardEnabled && config.detectarMinimizarPestana !== false;
+  const isAppSwitchGuardEnabled =
+    isExamFocusGuardEnabled && config.detectarCambioAplicacion !== false;
+  const isPointerAndDevToolsGuardEnabled =
+    isExamAntiCheatMasterEnabled && config.detectarSalidaPunteroDevToolsIA !== false;
+  const isRapidClickBurstGuardEnabled =
+    isExamAntiCheatMasterEnabled && config.detectarRafagaRespuestaRapidaIA !== false;
+  const isExamCopyShortcutGuardEnabled =
+    isExamAntiCheatMasterEnabled && config.examenBloquearCopiaClicDerechoAtajos !== false;
+  const isExamFullscreenGuardEnabled =
+    isExamAntiCheatMasterEnabled && config.examenExigirPantallaCompleta !== false;
+  const isExamSplitScreenGuardEnabled =
+    isExamAntiCheatMasterEnabled && config.exigirPantallaMaximizada !== false;
+  const isExamPsychometricEqualizerEnabled = config.ecualizadorPsicometricoActivo !== false;
+  const isExamShuffleOptionsEnabled = config.barajarOpciones !== false;
 
   // Always lookup fresh student object from props
   const currentStudent = verifiedStudentId
     ? students.find((s) => s.id === verifiedStudentId) || null
     : null;
+
+  // Effective allowed warnings ("llamados de atención") for this student (individual override or global default)
+  const maxLlamadosPermitidos = useMemo(
+    () => getEffectiveMaxLlamadosAtencion(currentStudent, config),
+    [currentStudent, config]
+  );
 
   // Notify parent App when a student session is active so the opposite panel is hidden
   useEffect(() => {
@@ -833,14 +878,16 @@ export function StudentPortal({
 
     // Sanitize payload for client: equalize psychometrics ("con cascarita" + equal length + mini-explanation in all options), omit `correcta` and `justificacion`, and shuffle options A/B/C/D
     const sanitized: SanitizedQuestion[] = chosenRaw.map((rawQ, idx) => {
-      const q = equalizeQuestionPsychometrics(rawQ, idx);
+      const q = isExamPsychometricEqualizerEnabled
+        ? equalizeQuestionPsychometrics(rawQ, idx)
+        : rawQ;
       const safeOpts = q.opciones || {
         A: 'Opción A',
         B: 'Opción B',
         C: 'Opción C',
         D: 'Opción D'
       };
-      if (config.barajarOpciones) {
+      if (isExamShuffleOptionsEnabled) {
         const originalLetters: ('A' | 'B' | 'C' | 'D')[] = ['A', 'B', 'C', 'D'];
         const permuted = shuffleArray(originalLetters);
         const mapaOrdenOpciones = {
@@ -918,9 +965,21 @@ export function StudentPortal({
     setWarningsCount(0);
     setSuspensionReason('✓ Sin infracciones');
     setWarningModalText(null);
+    attemptAntiCheatLogsRef.current = [];
+    rapidAnswerStreakRef.current = 0;
+    lastAnswerPerfRef.current = performance.now();
     setConfirmSubmitModal(false);
     setDrawerOpen(false);
     setInductionModalOpen(false);
+    if (isExamFullscreenGuardEnabled) {
+      try {
+        if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
+          document.documentElement.requestFullscreen().catch(() => {});
+        }
+      } catch {
+        // ignore if blocked by iframe policy
+      }
+    }
     setExamPhase('active_exam');
   };
 
@@ -989,7 +1048,7 @@ export function StudentPortal({
       const finalConcept = isSuspended
         ? customInfractionConcept || suspensionReason || 'Suspendido por infracción de seguridad'
         : warningsCount > 0
-        ? `1 Advertencia preventiva (${suspensionReason})`
+        ? `${warningsCount}/${maxLlamadosPermitidos} Llamado(s) preventivo(s) (${suspensionReason})`
         : '✓ Sin infracciones';
 
       const minPassingGrade = Number(config.notaMinimaAprobacion) || 3.0;
@@ -1022,7 +1081,9 @@ export function StudentPortal({
         tiempoEmpleadoSegundos: elapsedSec,
         estado: estadoFinal,
         conceptoInfraccion: finalConcept,
-        incidenciasCount: isSuspended ? 2 : warningsCount,
+        incidenciasCount: isSuspended ? Math.max(warningsCount, maxLlamadosPermitidos + 1) : warningsCount,
+        maxLlamadosPermitidosEnIntento: maxLlamadosPermitidos,
+        historialLlamadosIntento: [...attemptAntiCheatLogsRef.current],
         firmaVerificacion: firma,
         respuestasDetalle: detalle
       };
@@ -1039,12 +1100,19 @@ export function StudentPortal({
       const prevIntento2 = Array.isArray(currentStudent.preguntasIntento2)
         ? currentStudent.preguntasIntento2
         : [];
+      const prevStudentLogs = Array.isArray(currentStudent.historialLlamadosAtencion)
+        ? currentStudent.historialLlamadosAtencion
+        : [];
 
       const updatedStudent: StudentRecord = {
         ...currentStudent,
         intentosUsados: Math.max(currentStudent.intentosUsados || 0, modStats.count + 1),
         suspendido: isSuspended ? true : Boolean(currentStudent.suspendido),
-        conceptoInfraccion: isSuspended ? finalConcept : currentStudent.conceptoInfraccion || '✓ Sin infracciones',
+        conceptoInfraccion: isSuspended
+          ? finalConcept
+          : warningsCount > 0
+          ? finalConcept
+          : currentStudent.conceptoInfraccion || '✓ Sin infracciones',
         preguntasIntento1:
           currentAttemptNumber === 1
             ? Array.from(new Set([...prevIntento1, ...usedIds]))
@@ -1056,10 +1124,17 @@ export function StudentPortal({
         preguntasUsadasPorModalidad: {
           ...(currentStudent.preguntasUsadasPorModalidad || {}),
           [selectedModality]: Array.from(new Set([...prevModalityUsed, ...usedIds]))
-        }
+        },
+        historialLlamadosAtencion: [
+          ...attemptAntiCheatLogsRef.current,
+          ...prevStudentLogs
+        ].slice(0, 150)
       };
 
       // Clear active backup & update live classroom monitor to show student completed exam and is viewing results
+      if (document.fullscreenElement) {
+        document.exitFullscreen().catch(() => {});
+      }
       try {
         localStorage.removeItem(ACTIVE_EXAM_BACKUP_KEY);
       } catch {
@@ -1178,12 +1253,28 @@ export function StudentPortal({
     }
   }, [examPhase, timeLeftSeconds, activeQuestions.length, finalizeExam]);
 
-  // Auto-suspend when 2nd anti-cheat infraction is reached
+  // Auto-suspend when anti-cheat infractions exceed maxLlamadosPermitidos
   useEffect(() => {
-    if (examPhase === 'active_exam' && warningsCount >= 2 && activeQuestions.length > 0) {
-      finalizeExam(true, `${suspensionReason} (2 incidencias registradas)`);
+    if (
+      examPhase === 'active_exam' &&
+      isExamAntiCheatMasterEnabled &&
+      warningsCount > maxLlamadosPermitidos &&
+      activeQuestions.length > 0
+    ) {
+      finalizeExam(
+        true,
+        `${suspensionReason} (${warningsCount} llamados registrados · Límite permitido: ${maxLlamadosPermitidos})`
+      );
     }
-  }, [examPhase, warningsCount, suspensionReason, activeQuestions.length, finalizeExam]);
+  }, [
+    examPhase,
+    isExamAntiCheatMasterEnabled,
+    warningsCount,
+    maxLlamadosPermitidos,
+    suspensionReason,
+    activeQuestions.length,
+    finalizeExam
+  ]);
 
   // Save & Broadcast helper (called on answer/question change and every 15s)
   const syncExamProgress = useCallback(() => {
@@ -1236,6 +1327,7 @@ export function StudentPortal({
       respondidasCount: Object.keys(answers).length,
       tiempoRestanteSegundos: timeLeftRef.current,
       advertencias: warningsCount,
+      maxLlamadosPermitidos,
       motivoUltimaAdvertencia: suspensionReason,
       online: isOnline,
       ultimaActualizacionMs: Date.now(),
@@ -1326,23 +1418,69 @@ export function StudentPortal({
     onUpdateLiveSession
   ]);
 
-  // Anti-Cheat Listeners: Tab Switch, Window Blur, Right-Click, Copy/DevTools Shortcuts (with 1.2s start grace period)
+  // Anti-Cheat Listeners: Tab Switch, Minimize Window, External App Switch (Alt+Tab), Fullscreen Exit, Split-Screen, DevTools, Pointer Leave, Right-Click, Copy/Paste/PrintScreen Shortcuts (with 1.0s start grace period)
   useEffect(() => {
-    if (examPhase !== 'active_exam') return;
+    if (examPhase !== 'active_exam' || !isExamAntiCheatMasterEnabled) return;
 
     let armed = false;
     const armTimer = setTimeout(() => {
       armed = true;
-    }, 1200);
+    }, 1000);
 
-    const registerInfraction = (motivo: string) => {
+    let pointerLeaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const registerInfraction = (
+      motivo: string,
+      tipoDeteccion: AntiCheatDetectionType,
+      etiquetaDeteccion: string
+    ) => {
       if (!armed) return;
-      setSuspensionReason(motivo);
+      const nowMs = Date.now();
+      // Debounce simultaneous browser blur + visibilitychange events fired within 650ms of each other
+      if (nowMs - lastInfractionTimeMsRef.current < 650) {
+        return;
+      }
+      lastInfractionTimeMsRef.current = nowMs;
+
+      const modConfig =
+        MODALITY_OPTIONS.find((m) => m.id === selectedModality) || MODALITY_OPTIONS[0];
+      setSuspensionReason(`${etiquetaDeteccion}: ${motivo}`);
+
       setWarningsCount((prev) => {
         const nextCount = prev + 1;
-        if (nextCount === 1) {
+        const willSuspend = nextCount > maxLlamadosPermitidos;
+
+        if (currentStudent) {
+          const logEntry: AntiCheatLogEntry = {
+            id: `AC-EX-${currentStudent.id}-${nowMs}-${nextCount}`,
+            fecha: new Date().toLocaleString('es-CO'),
+            timestampMs: nowMs,
+            studentId: currentStudent.id,
+            studentName: currentStudent.nombre,
+            origen: 'EXAMEN',
+            modalidadOModulo: modConfig.title,
+            tipoDeteccion,
+            etiquetaDeteccion,
+            descripcion: motivo,
+            llamadoNumero: nextCount,
+            maxLlamadosPermitidos,
+            accionTomada: willSuspend ? 'SUSPENSION_0_0' : 'LLAMADO_PREVENTIVO'
+          };
+          attemptAntiCheatLogsRef.current = [
+            logEntry,
+            ...attemptAntiCheatLogsRef.current
+          ];
+          onRecordAntiCheatEvent?.(currentStudent.id, logEntry);
+        }
+
+        if (!willSuspend) {
+          const remainingWarnings = Math.max(0, maxLlamadosPermitidos - nextCount);
           setWarningModalText(
-            `1ª Advertencia Preventiva de Seguridad: Se detectó "${motivo}". Recuerde que está prohibido cambiar de pestaña, salir de la ventana o usar atajos de copia. Una segunda incidencia suspenderá inmediatamente su evaluación.`
+            `⚠️ Llamado de Atención #${nextCount} de ${maxLlamadosPermitidos} Permitidos (${etiquetaDeteccion}): Se detectó "${motivo}". ${
+              remainingWarnings === 0
+                ? '¡ATENCIÓN! Ha alcanzado el límite de llamados preventivos. La próxima incidencia suspenderá automáticamente su examen con calificación 0.0 / 5.0 (SUSPENDIDO).'
+                : `Le quedan ${remainingWarnings} llamado(s) preventivo(s) antes de la suspensión automática con calificación 0.0 / 5.0.`
+            }`
           );
         }
         return nextCount;
@@ -1350,45 +1488,231 @@ export function StudentPortal({
     };
 
     const handleVisibilityChange = () => {
-      if (document.hidden) {
-        registerInfraction('Cambio de pestaña / minimizado de navegador');
+      if (!document.hidden) return;
+      const isMinimized =
+        typeof window !== 'undefined' &&
+        (window.outerWidth <= 220 ||
+          window.outerHeight <= 140 ||
+          window.screenX < -10000 ||
+          window.screenY < -10000);
+
+      if (isMinimized && isMinimizeGuardEnabled) {
+        registerInfraction(
+          'Ventana o pestaña del navegador minimizada durante el examen',
+          'MINIMIZAR_PESTANA_VENTANA',
+          'Minimizar Pestaña / Ventana'
+        );
+      } else if (isTabSwitchGuardEnabled) {
+        registerInfraction(
+          'Cambio a otra pestaña del navegador o envío de la evaluación a segundo plano',
+          'CAMBIO_PESTANA',
+          'Cambio de Pestaña'
+        );
       }
     };
 
     const handleWindowBlur = () => {
-      registerInfraction('Pérdida de foco de la ventana de evaluación');
+      // Distinguish between Tab Switch (document.hidden) vs External Application Switch (Alt+Tab, WhatsApp, ChatGPT, Word, etc.)
+      setTimeout(() => {
+        if (!armed) return;
+        const isMinimized =
+          typeof window !== 'undefined' &&
+          (window.outerWidth <= 220 ||
+            window.outerHeight <= 140 ||
+            window.screenX < -10000 ||
+            window.screenY < -10000);
+        if (isMinimized && isMinimizeGuardEnabled) {
+          registerInfraction(
+            'Minimizado de ventana del navegador detectado',
+            'MINIMIZAR_PESTANA_VENTANA',
+            'Minimizar Pestaña / Ventana'
+          );
+        } else if (document.hidden && isTabSwitchGuardEnabled) {
+          registerInfraction(
+            'Cambio de pestaña del navegador detectado',
+            'CAMBIO_PESTANA',
+            'Cambio de Pestaña'
+          );
+        } else if (!document.hasFocus() && isAppSwitchGuardEnabled) {
+          registerInfraction(
+            'Cambio de aplicación externa (Alt+Tab / clic fuera del navegador hacia otra app o ventana)',
+            'CAMBIO_APLICACION_EXTERNA',
+            'Cambio de Aplicación'
+          );
+        }
+      }, 120);
+    };
+
+    const handleFullscreenChange = () => {
+      if (armed && isExamFullscreenGuardEnabled && !document.fullscreenElement) {
+        registerInfraction(
+          'Salida del modo de Pantalla Completa durante el examen',
+          'SALIDA_PANTALLA_COMPLETA',
+          'Salida de Pantalla Completa'
+        );
+      }
+    };
+
+    const handleResizeOrDevTools = () => {
+      if (!armed || typeof window === 'undefined') return;
+      const isMinimized = window.outerWidth <= 220 || window.outerHeight <= 140;
+      if (isMinimized && isMinimizeGuardEnabled) {
+        registerInfraction(
+          'Minimizado de la ventana de evaluación detectado',
+          'MINIMIZAR_PESTANA_VENTANA',
+          'Minimizar Pestaña / Ventana'
+        );
+        return;
+      }
+      // Detect docked DevTools console opening during active exam
+      const widthDiff = window.outerWidth - window.innerWidth;
+      const heightDiff = window.outerHeight - window.innerHeight;
+      if (isPointerAndDevToolsGuardEnabled && (widthDiff > 220 || heightDiff > 260)) {
+        registerInfraction(
+          'Apertura de panel lateral o consola de inspección (DevTools) detectada',
+          'CAPTURA_IMPRESION_DEVTOOLS',
+          'Consola / Panel Lateral'
+        );
+      }
+    };
+
+    const handleMouseLeaveDocument = (e: MouseEvent) => {
+      if (!armed || !isPointerAndDevToolsGuardEnabled) return;
+      if (
+        e.clientY <= 0 ||
+        e.clientX <= 0 ||
+        e.clientX >= window.innerWidth ||
+        e.clientY >= window.innerHeight
+      ) {
+        if (pointerLeaveTimer) clearTimeout(pointerLeaveTimer);
+        pointerLeaveTimer = setTimeout(() => {
+          if (!document.hasFocus()) {
+            registerInfraction(
+              'Puntero y foco fuera del área de evaluación hacia barra del sistema o segundo monitor (>3.5s)',
+              'ABANDONO_PUNTERO_FUERA_VENTANA',
+              'Salida de Ventana / Monitor'
+            );
+          }
+        }, 3500);
+      }
+    };
+
+    const handleMouseEnterDocument = () => {
+      if (pointerLeaveTimer) {
+        clearTimeout(pointerLeaveTimer);
+        pointerLeaveTimer = null;
+      }
     };
 
     const handleContextMenu = (e: MouseEvent) => {
+      if (!isExamCopyShortcutGuardEnabled) return;
       e.preventDefault();
+      registerInfraction(
+        'Intento de abrir menú contextual (Clic derecho)',
+        'COPIA_PEGADO_CLIC_DERECHO',
+        'Clic Derecho Bloqueado'
+      );
+    };
+
+    const handleCopyCutPaste = (e: ClipboardEvent) => {
+      if (!isExamCopyShortcutGuardEnabled) return;
+      e.preventDefault();
+      registerInfraction(
+        `Intento prohibido de portapapeles (${e.type.toUpperCase()})`,
+        'COPIA_PEGADO_CLIC_DERECHO',
+        'Copia / Pegado Bloqueado'
+      );
+    };
+
+    const handleDragDrop = (e: DragEvent) => {
+      if (!isExamCopyShortcutGuardEnabled) return;
+      e.preventDefault();
+      registerInfraction(
+        'Intento de arrastrar o soltar texto en la evaluación',
+        'COPIA_PEGADO_CLIC_DERECHO',
+        'Arrastrar Texto Bloqueado'
+      );
     };
 
     const handleKeyDown = (e: KeyboardEvent) => {
       const key = (e.key || '').toUpperCase();
-      const isCopyOrSource = (e.ctrlKey || e.metaKey) && (key === 'C' || key === 'U' || key === 'P');
+      const isCtrlOrMeta = e.ctrlKey || e.metaKey;
+
+      if (isAppSwitchGuardEnabled && e.altKey && key === 'TAB') {
+        registerInfraction(
+          'Uso de atajo Alt+Tab para cambiar de aplicación',
+          'CAMBIO_APLICACION_EXTERNA',
+          'Cambio de Aplicación (Alt+Tab)'
+        );
+        return;
+      }
+
+      if (!isExamCopyShortcutGuardEnabled) return;
+      const isCopyOrSource =
+        isCtrlOrMeta &&
+        (key === 'C' || key === 'V' || key === 'X' || key === 'U' || key === 'P' || key === 'S');
       const isDevTools =
-        key === 'F12' || (e.ctrlKey && e.shiftKey && (key === 'I' || key === 'J' || key === 'C'));
+        key === 'F12' ||
+        (isCtrlOrMeta && e.shiftKey && (key === 'I' || key === 'J' || key === 'C' || key === 'S'));
       const isPrintScreen = key === 'PRINTSCREEN';
 
       if (isCopyOrSource || isDevTools || isPrintScreen) {
         e.preventDefault();
-        registerInfraction(`Intento de atajo restringido o inspección (${key})`);
+        e.stopPropagation();
+        registerInfraction(
+          `Intento de atajo restringido, captura o inspección (${
+            isPrintScreen ? 'Captura PrintScreen' : isCtrlOrMeta ? `Ctrl+${key}` : key
+          })`,
+          isPrintScreen || isDevTools ? 'CAPTURA_IMPRESION_DEVTOOLS' : 'COPIA_PEGADO_CLIC_DERECHO',
+          isPrintScreen ? 'Captura de Pantalla' : isDevTools ? 'Inspector F12' : 'Atajo de Copia'
+        );
       }
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('blur', handleWindowBlur);
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    window.addEventListener('resize', handleResizeOrDevTools);
+    document.documentElement.addEventListener('mouseleave', handleMouseLeaveDocument);
+    document.documentElement.addEventListener('mouseenter', handleMouseEnterDocument);
     document.addEventListener('contextmenu', handleContextMenu);
-    window.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('copy', handleCopyCutPaste);
+    document.addEventListener('cut', handleCopyCutPaste);
+    document.addEventListener('paste', handleCopyCutPaste);
+    document.addEventListener('drop', handleDragDrop);
+    window.addEventListener('keydown', handleKeyDown, true);
 
     return () => {
       clearTimeout(armTimer);
+      if (pointerLeaveTimer) clearTimeout(pointerLeaveTimer);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('blur', handleWindowBlur);
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      window.removeEventListener('resize', handleResizeOrDevTools);
+      document.documentElement.removeEventListener('mouseleave', handleMouseLeaveDocument);
+      document.documentElement.removeEventListener('mouseenter', handleMouseEnterDocument);
       document.removeEventListener('contextmenu', handleContextMenu);
-      window.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('copy', handleCopyCutPaste);
+      document.removeEventListener('cut', handleCopyCutPaste);
+      document.removeEventListener('paste', handleCopyCutPaste);
+      document.removeEventListener('drop', handleDragDrop);
+      window.removeEventListener('keydown', handleKeyDown, true);
     };
-  }, [examPhase]);
+  }, [
+    examPhase,
+    currentStudent,
+    selectedModality,
+    maxLlamadosPermitidos,
+    isExamAntiCheatMasterEnabled,
+    isExamFocusGuardEnabled,
+    isTabSwitchGuardEnabled,
+    isMinimizeGuardEnabled,
+    isAppSwitchGuardEnabled,
+    isPointerAndDevToolsGuardEnabled,
+    isExamFullscreenGuardEnabled,
+    isExamCopyShortcutGuardEnabled,
+    onRecordAntiCheatEvent
+  ]);
 
   // Format MM:SS
   const formatTime = (sec: number) => {
@@ -2172,6 +2496,8 @@ export function StudentPortal({
           <StudentMiniRetosZone
             student={currentStudent}
             onUpdateStudentProfile={onUpdateStudentProfile}
+            onRecordRetoAttempt={onRecordRetoAttempt}
+            onRecordAntiCheatEvent={onRecordAntiCheatEvent}
             questions={safeQuestions}
             config={config}
             customMiniRetos={customMiniRetos}
@@ -2404,7 +2730,7 @@ export function StudentPortal({
               )}
               {warningsCount > 0 && (
                 <span className="text-amber-700 font-semibold">
-                  ⚠️ Advertencias: {warningsCount}/1
+                  ⚠️ Llamados: {warningsCount}/{maxLlamadosPermitidos}
                 </span>
               )}
               {secondsOnCurrentQuestion >= 240 && (
@@ -2447,8 +2773,71 @@ export function StudentPortal({
           </div>
         </div>
 
+        {/* Barra de Estado del Escudo Anti-Trampa en el Examen */}
+        <div className="bg-slate-900 text-white rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="flex flex-wrap items-center gap-2">
+            <span
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border font-semibold ${
+                isExamAntiCheatMasterEnabled
+                  ? 'bg-emerald-500/20 border-emerald-400/40 text-emerald-300'
+                  : 'bg-amber-500/20 border-amber-400/40 text-amber-300'
+              }`}
+            >
+              <ShieldCheck className="w-3.5 h-3.5" />
+              <span>
+                {isExamAntiCheatMasterEnabled
+                  ? '🛡️ Escudo Anti-Trampa Activo'
+                  : '⚠️ Modo Flexible (Anti-Trampa Pausado por Docente)'}
+              </span>
+            </span>
+
+            {isExamFocusGuardEnabled && (
+              <span
+                className={`px-2.5 py-1 rounded-md font-mono font-bold ${
+                  warningsCount === 0
+                    ? 'bg-slate-800 text-slate-300'
+                    : 'bg-amber-500 text-slate-950 animate-pulse'
+                }`}
+              >
+                Llamados Anti-Trampa: {warningsCount} / {maxLlamadosPermitidos} permitidos
+              </span>
+            )}
+
+            {isExamCopyShortcutGuardEnabled && (
+              <span className="px-2 py-1 rounded-md bg-slate-800 text-emerald-300 font-mono text-[11px]">
+                ✓ Bloqueo Copia / Clic Derecho / F12
+              </span>
+            )}
+
+            {isExamPsychometricEqualizerEnabled && (
+              <span className="px-2 py-1 rounded-md bg-slate-800 text-sky-300 font-mono text-[11px]">
+                🧠 Opciones Ecualizadas IA
+              </span>
+            )}
+          </div>
+
+          {isExamFullscreenGuardEnabled && (
+            <button
+              type="button"
+              onClick={() => {
+                try {
+                  if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
+                    document.documentElement.requestFullscreen().catch(() => {});
+                  }
+                } catch {
+                  // ignore
+                }
+              }}
+              className="px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-semibold flex items-center gap-1.5 cursor-pointer"
+            >
+              <Maximize2 className="w-3.5 h-3.5 text-sky-400" />
+              <span>Pantalla Completa Segura</span>
+            </button>
+          )}
+        </div>
+
         {/* Alerta de Detección de Pantalla Dividida (<85% Ancho) o Monitor Secundario Extendido */}
-        {config.exigirPantallaMaximizada !== false &&
+        {isExamSplitScreenGuardEnabled &&
           (isSplitScreenDetected || isExtendedMonitorDetected) && (
             <div className="bg-amber-50 border-2 border-amber-400 rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-2 text-xs text-amber-950">
               <div className="flex items-center gap-2 font-bold text-amber-900">
@@ -2616,12 +3005,63 @@ export function StudentPortal({
                 <button
                   key={letter}
                   type="button"
-                  onClick={() =>
+                  onClick={() => {
+                    const nowPerf = performance.now();
+                    const isFirstSelectionForQuestion = !answers[currentQ.id];
+                    if (isFirstSelectionForQuestion && isRapidClickBurstGuardEnabled) {
+                      const timeSinceEnteredSec = (nowPerf - questionEnteredPerfRef.current) / 1000;
+                      if (timeSinceEnteredSec < 2.2) {
+                        rapidAnswerStreakRef.current += 1;
+                      } else {
+                        rapidAnswerStreakRef.current = 0;
+                      }
+                      if (rapidAnswerStreakRef.current >= 3) {
+                        rapidAnswerStreakRef.current = 0;
+                        const nowMs = Date.now();
+                        setSuspensionReason(
+                          'Ráfaga IA: 3 respuestas marcadas en menos de 2.2 segundos sin lectura comprensiva'
+                        );
+                        setWarningsCount((prev) => {
+                          const nextCount = prev + 1;
+                          const willSuspend = nextCount > maxLlamadosPermitidos;
+                          if (currentStudent) {
+                            const logEntry: AntiCheatLogEntry = {
+                              id: `AC-BURST-${currentStudent.id}-${nowMs}-${nextCount}`,
+                              fecha: new Date().toLocaleString('es-CO'),
+                              timestampMs: nowMs,
+                              studentId: currentStudent.id,
+                              studentName: currentStudent.nombre,
+                              origen: 'EXAMEN',
+                              modalidadOModulo: selectedModConfig.title,
+                              tipoDeteccion: 'RAFAGA_RESPUESTA_RAPIDA_IA',
+                              etiquetaDeteccion: 'Ráfaga sin Lectura (IA)',
+                              descripcion:
+                                'Marcación consecutiva de 3 respuestas en menos de 2.2s por pregunta sin lectura del enunciado',
+                              llamadoNumero: nextCount,
+                              maxLlamadosPermitidos,
+                              accionTomada: willSuspend ? 'SUSPENSION_0_0' : 'LLAMADO_PREVENTIVO'
+                            };
+                            attemptAntiCheatLogsRef.current = [
+                              logEntry,
+                              ...attemptAntiCheatLogsRef.current
+                            ];
+                            onRecordAntiCheatEvent?.(currentStudent.id, logEntry);
+                          }
+                          if (!willSuspend) {
+                            setWarningModalText(
+                              `⚠️ Llamado de Atención IA #${nextCount} de ${maxLlamadosPermitidos}: Se detectó marcación en ráfaga (<2.2 segundos por pregunta) sin lectura comprensiva del caso. Lea detenidamente cada enunciado y sus opciones.`
+                            );
+                          }
+                          return nextCount;
+                        });
+                      }
+                    }
+                    lastAnswerPerfRef.current = nowPerf;
                     setAnswers((prev) => ({
                       ...prev,
                       [currentQ.id]: letter
-                    }))
-                  }
+                    }));
+                  }}
                   className={`w-full text-left p-4 rounded-xl border transition-all flex items-start gap-3.5 cursor-pointer ${
                     isChosen
                       ? 'border-sky-600 bg-sky-50/80 ring-1 ring-sky-600'
@@ -2815,19 +3255,32 @@ export function StudentPortal({
           </div>
         )}
 
-        {/* 1st Anti-Cheat Preventive Warning Modal */}
+        {/* Anti-Cheat Preventive Warning Modal */}
         {warningModalText && (
           <div className="fixed inset-0 z-50 bg-slate-900/70 flex items-center justify-center p-4">
             <div className="bg-white border-2 border-amber-500 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-xl">
               <div className="flex items-center gap-2.5 text-amber-800 font-bold text-base">
                 <AlertTriangle className="w-6 h-6 text-amber-600 shrink-0" />
-                <span>Advertencia Preventiva Anti-Fraude (1 de 1)</span>
+                <span>
+                  Llamado de Atención Anti-Trampa ({warningsCount} de {maxLlamadosPermitidos} permitidos)
+                </span>
               </div>
               <p className="text-xs text-slate-700 leading-relaxed">{warningModalText}</p>
               <button
                 type="button"
-                onClick={() => setWarningModalText(null)}
-                className="w-full py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold"
+                onClick={() => {
+                  setWarningModalText(null);
+                  if (isExamFullscreenGuardEnabled) {
+                    try {
+                      if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
+                        document.documentElement.requestFullscreen().catch(() => {});
+                      }
+                    } catch {
+                      // ignore
+                    }
+                  }
+                }}
+                className="w-full py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold cursor-pointer"
               >
                 Entendido, continuar en modo seguro
               </button>

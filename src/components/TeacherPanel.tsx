@@ -9,8 +9,14 @@ import {
   BloomLevel,
   CustomMiniRetoTemplate,
   MiniRetoAttemptRecord,
-  StudentRetoModuleProgress
+  StudentRetoModuleProgress,
+  AntiCheatLogEntry
 } from '../types';
+import {
+  getEffectiveMaxLlamadosAtencion,
+  computeStudentServerSummary,
+  OFFICIAL_EXAM_MODALITIES
+} from '../utils/academicServerSummary';
 import { generateDeterministicAccessCode } from '../data/students';
 import {
   normalizeQuestionList,
@@ -92,6 +98,8 @@ interface TeacherPanelProps {
     customMiniRetos?: CustomMiniRetoTemplate[];
   }) => Promise<void>;
   onForceServerSync?: () => Promise<ForceServerResyncResult | void> | void;
+  lastServerSyncFormatted?: string;
+  currentServerRevision?: number;
 }
 
 type TeacherTab =
@@ -127,7 +135,9 @@ export function TeacherPanel({
   customMiniRetos = [],
   onUpdateCustomMiniRetos = () => {},
   onFullSystemRestore,
-  onForceServerSync
+  onForceServerSync,
+  lastServerSyncFormatted,
+  currentServerRevision
 }: TeacherPanelProps) {
   // Teacher Authentication State (Persisted across page reloads via AuthContext + sessionStorageWrapper)
   const {
@@ -1026,6 +1036,157 @@ export function TeacherPanel({
   };
 
   const [isEqualizingBankIA, setIsEqualizingBankIA] = useState(false);
+  const [antiCheatControlModalOpen, setAntiCheatControlModalOpen] = useState(false);
+  const [antiCheatActionNotice, setAntiCheatActionNotice] = useState<string | null>(null);
+  const [warningLimitStudentSearch, setWarningLimitStudentSearch] = useState('');
+
+  const activeExamAntiCheatFlags = [
+    config.antiTrampaExamenesActivo !== false,
+    config.examenBloquearCambioPestanaFoco !== false,
+    config.detectarCambioPestana !== false,
+    config.detectarMinimizarPestana !== false,
+    config.detectarCambioAplicacion !== false,
+    config.examenBloquearCopiaClicDerechoAtajos !== false,
+    config.examenExigirPantallaCompleta !== false,
+    config.exigirPantallaMaximizada !== false,
+    config.detectarCapturaPantallaDevTools !== false,
+    config.detectarAbandonoPunteroIA !== false,
+    config.detectarRafagaClicsIA !== false,
+    config.barajarOpciones !== false,
+    config.ecualizadorPsicometricoActivo !== false
+  ];
+  const activeRetoAntiCheatFlags = [
+    config.antiTrampaMiniRetosActivo !== false,
+    config.retoBloquearCambioPestanaFoco !== false,
+    config.retoSuspenderCopiaPegadoInyeccion !== false,
+    config.retoBiometriaTecleoAntiCopia !== false,
+    config.retoExigirPantallaCompleta !== false
+  ];
+  const activeExamAntiCheatCount = activeExamAntiCheatFlags.filter(Boolean).length;
+  const activeRetoAntiCheatCount = activeRetoAntiCheatFlags.filter(Boolean).length;
+  const totalActiveAntiCheatCount = activeExamAntiCheatCount + activeRetoAntiCheatCount;
+
+  const handleSetGlobalWarningLimit = (limit: number) => {
+    const safeLimit = Math.max(0, Math.min(10, Math.round(limit)));
+    const nextConfig: SystemConfig = {
+      ...config,
+      maxLlamadosAtencionGlobal: safeLimit
+    };
+    commitTeacherConfigUpdate(nextConfig);
+    void handleExecuteServerSave(
+      'control_anti_trampas',
+      `Actualización de Límite Global de Llamados de Atención (${safeLimit}) en BD del Servidor`
+    );
+    setAntiCheatActionNotice(
+      `✓ Límite Global ajustado a ${safeLimit} llamado(s) de atención antes de suspensión automática (0.0 / 5.0) y guardado en el Servidor Central.`
+    );
+  };
+
+  const handleApplyWarningLimitToAllStudents = (limit: number) => {
+    const safeLimit = Math.max(0, Math.min(10, Math.round(limit)));
+    const nextStudents = students.map((s) => ({
+      ...s,
+      maxLlamadosAtencionIndividual: undefined
+    }));
+    const nextConfig: SystemConfig = {
+      ...config,
+      maxLlamadosAtencionGlobal: safeLimit,
+      llamadosAtencionPorEstudiante: {}
+    };
+    commitTeacherStudentsUpdate(nextStudents);
+    commitTeacherConfigUpdate(nextConfig);
+    void handleExecuteServerSave(
+      'control_anti_trampas',
+      `Aplicación de ${safeLimit} llamado(s) de atención para TODOS los estudiantes en BD del Servidor`
+    );
+    setAntiCheatActionNotice(
+      `✓ Se ajustaron ${safeLimit} llamado(s) de atención por igual para TODOS los ${students.length} estudiantes en el Servidor.`
+    );
+  };
+
+  const handleSetIndividualStudentWarningLimit = (studentId: string, limitOrGlobal: number | 'GLOBAL') => {
+    const targetSt = students.find((s) => s.id === studentId);
+    if (!targetSt) return;
+    const isGlobal = limitOrGlobal === 'GLOBAL';
+    const numericVal = isGlobal ? undefined : Math.max(0, Math.min(10, Math.round(Number(limitOrGlobal))));
+
+    const updatedSt: StudentRecord = {
+      ...targetSt,
+      maxLlamadosAtencionIndividual: numericVal
+    };
+    const nextStudents = students.map((s) => (s.id === studentId ? updatedSt : s));
+    const nextMap = { ...(config.llamadosAtencionPorEstudiante || {}) };
+    if (isGlobal || numericVal === undefined) {
+      delete nextMap[studentId];
+    } else {
+      nextMap[studentId] = numericVal;
+    }
+
+    commitTeacherStudentsUpdate(nextStudents, updatedSt);
+    commitTeacherConfigUpdate({
+      ...config,
+      llamadosAtencionPorEstudiante: nextMap
+    });
+    void handleExecuteServerSave(
+      'control_anti_trampas',
+      `Ajuste individual de llamados de atención para ${targetSt.nombre} (${isGlobal ? 'Global' : numericVal}) en BD del Servidor`
+    );
+    setAntiCheatActionNotice(
+      `✓ Llamados de atención para ${targetSt.nombre}: ${
+        isGlobal
+          ? `Usa regla global (${config.maxLlamadosAtencionGlobal ?? 1})`
+          : `${numericVal} llamado(s) personalizado(s)`
+      } — guardado en el Servidor.`
+    );
+  };
+
+  const handleToggleAntiCheatField = (field: keyof SystemConfig) => {
+    const currentVal = config[field] !== false;
+    const nextConfig: SystemConfig = {
+      ...config,
+      [field]: !currentVal
+    };
+    commitTeacherConfigUpdate(nextConfig);
+    void handleExecuteServerSave(
+      'control_anti_trampas',
+      `Actualización de método anti-trampa (${String(field)}: ${!currentVal ? 'HABILITADO' : 'DESHABILITADO'}) en BD del Servidor`
+    );
+    setAntiCheatActionNotice(
+      `✓ Método "${String(field)}" ${!currentVal ? 'HABILITADO' : 'DESHABILITADO'} y guardado en el Servidor Central.`
+    );
+  };
+
+  const handleEnableAllAntiCheatMethods = () => {
+    const nextConfig: SystemConfig = {
+      ...config,
+      antiTrampaExamenesActivo: true,
+      examenBloquearCambioPestanaFoco: true,
+      detectarCambioPestana: true,
+      detectarMinimizarPestana: true,
+      detectarCambioAplicacion: true,
+      examenBloquearCopiaClicDerechoAtajos: true,
+      examenExigirPantallaCompleta: true,
+      exigirPantallaMaximizada: true,
+      detectarCapturaPantallaDevTools: true,
+      detectarAbandonoPunteroIA: true,
+      detectarRafagaClicsIA: true,
+      barajarOpciones: true,
+      ecualizadorPsicometricoActivo: true,
+      antiTrampaMiniRetosActivo: true,
+      retoBloquearCambioPestanaFoco: true,
+      retoSuspenderCopiaPegadoInyeccion: true,
+      retoBiometriaTecleoAntiCopia: true,
+      retoExigirPantallaCompleta: true
+    };
+    commitTeacherConfigUpdate(nextConfig);
+    void handleExecuteServerSave(
+      'control_anti_trampas',
+      'Restauración y habilitación total de los 18 métodos anti-trampas (Exámenes y Mini Retos) en BD del Servidor'
+    );
+    setAntiCheatActionNotice(
+      '✓ Los 18 métodos anti-trampas (13 en Exámenes + 5 en Mini Retos) quedaron 100% HABILITADOS y sincronizados en la Base de Datos del Servidor.'
+    );
+  };
 
   const handleEqualizeQuestionBankIA = async (mode: 'all' | 'ai_deep' = 'all') => {
     if (questions.length === 0 || isEqualizingBankIA) return;
@@ -2869,9 +3030,29 @@ function doPost(e) {
       <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs space-y-4">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-slate-100 pb-4">
           <div>
-            <div className="inline-flex items-center gap-2 text-xs font-semibold text-emerald-800 bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded-md mb-1">
-              <CheckCircle2 className="w-3.5 h-3.5" />
-              <span>Sesión Docente Activa · Bienvenido(a), Docente Titular ({config.idDocente || 'DOCENTE2026'})</span>
+            <div className="flex flex-wrap items-center gap-2 mb-1">
+              <div className="inline-flex items-center gap-2 text-xs font-semibold text-emerald-800 bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded-md">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>Sesión Docente Activa · Bienvenido(a), Docente Titular ({config.idDocente || 'DOCENTE2026'})</span>
+              </div>
+              <div className="inline-flex items-center gap-1.5 text-xs font-mono font-bold text-sky-900 bg-sky-50 border border-sky-200 px-2.5 py-0.5 rounded-md">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                <span>
+                  Sincronización Servidor Activa (Cada 3s) · Rev #{currentServerRevision || 1}
+                  {lastServerSyncFormatted ? ` · ${lastServerSyncFormatted}` : ''}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAntiCheatControlModalOpen(true)}
+                className="inline-flex items-center gap-1.5 text-xs font-bold text-indigo-900 bg-indigo-50 hover:bg-indigo-100 border border-indigo-300 px-2.5 py-0.5 rounded-md cursor-pointer transition-colors"
+                title="Abrir Centro de Control Anti-Trampas y configurar llamados de atención globales o individuales"
+              >
+                <ShieldAlert className="w-3.5 h-3.5 text-indigo-700" />
+                <span>
+                  Escudo Anti-Trampa: {totalActiveAntiCheatCount}/18 Activos · Llamados: {config.maxLlamadosAtencionGlobal ?? 1}
+                </span>
+              </button>
             </div>
             <h1 className="text-xl sm:text-2xl font-bold text-slate-900">
               Centro de Control Académico y Supervisión de Aula (Marketing Digital PRU)
@@ -3700,6 +3881,81 @@ function doPost(e) {
           </div>
         </div>
 
+        {/* Barra Maestra de Control de Métodos Anti-Trampas (Exámenes y Mini Retos) */}
+        <div className="bg-slate-900 text-white border border-slate-800 rounded-xl p-3.5 flex flex-col lg:flex-row lg:items-center justify-between gap-3 text-xs">
+          <div className="space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 font-bold">
+                <ShieldAlert className="w-3.5 h-3.5" />
+                <span>Escudo Anti-Trampas Docente ({totalActiveAntiCheatCount}/12 Métodos Activos)</span>
+              </span>
+              <span className="font-mono text-[11px] text-slate-300">
+                Exámenes: <strong className="text-sky-300">{activeExamAntiCheatCount}/7 activos</strong> · Mini Retos:{' '}
+                <strong className="text-amber-300">{activeRetoAntiCheatCount}/5 activos</strong>
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-300">
+              Controle en todo momento la habilitación de los métodos anti-trampa en Exámenes y Mini Retos por si alguna actualización o respaldo los deshabilita.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => handleToggleAntiCheatField('antiTrampaExamenesActivo')}
+              className={`px-3 py-1.5 rounded-lg font-bold flex items-center gap-1.5 cursor-pointer transition-colors ${
+                config.antiTrampaExamenesActivo !== false
+                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                  : 'bg-red-600 hover:bg-red-500 text-white'
+              }`}
+              title="Habilitar o pausar el Escudo Maestro Anti-Trampas en los Exámenes"
+            >
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              <span>
+                Anti-Trampa Exámenes: {config.antiTrampaExamenesActivo !== false ? 'HABILITADO' : 'PAUSADO'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleToggleAntiCheatField('antiTrampaMiniRetosActivo')}
+              className={`px-3 py-1.5 rounded-lg font-bold flex items-center gap-1.5 cursor-pointer transition-colors ${
+                config.antiTrampaMiniRetosActivo !== false
+                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                  : 'bg-red-600 hover:bg-red-500 text-white'
+              }`}
+              title="Habilitar o pausar el Escudo Maestro Anti-Trampas en los Mini Retos"
+            >
+              <Trophy className="w-3.5 h-3.5" />
+              <span>
+                Anti-Trampa Mini Retos: {config.antiTrampaMiniRetosActivo !== false ? 'HABILITADO' : 'PAUSADO'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleEnableAllAntiCheatMethods}
+              className="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-bold flex items-center gap-1.5 cursor-pointer"
+              title="Fuerza la activación inmediata de los 12 métodos anti-trampas en Exámenes y Mini Retos"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Habilitar Todo (12/12)</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setAntiCheatActionNotice(null);
+                setAntiCheatControlModalOpen(true);
+              }}
+              className="px-3 py-1.5 rounded-lg bg-white hover:bg-slate-100 text-slate-900 font-bold flex items-center gap-1.5 cursor-pointer"
+            >
+              <Key className="w-3.5 h-3.5 text-sky-700" />
+              <span>Configurar Métodos Anti-Trampa</span>
+            </button>
+          </div>
+        </div>
+
         {/* Waiting Room Custom Message Input when Exam is Closed for All or Some Students */}
         {(!config.examenAbierto || masterClosedCount > 0) && (
           <div className="bg-amber-50/90 border border-amber-200 rounded-lg p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
@@ -4264,7 +4520,53 @@ function doPost(e) {
                         })()}
                       </td>
                       <td className="py-2 px-1.5 text-center font-mono tabular-nums font-semibold">
-                        {st.intentosUsados}/{st.maxIntentosPermitidos ?? 2}
+                        {(() => {
+                          const srv =
+                            st.resumenServidor || computeStudentServerSummary(st, attempts, config);
+                          const effWarn = getEffectiveMaxLlamadosAtencion(st, config);
+                          const isCustomWarn =
+                            typeof st.maxLlamadosAtencionIndividual === 'number' ||
+                            typeof config.llamadosAtencionPorEstudiante?.[st.id] === 'number';
+                          return (
+                            <div className="space-y-1 text-[10px] leading-tight">
+                              <div className="font-bold text-slate-900">
+                                {srv.totalIntentosExamenesRealizados} Int. ({srv.examenesRealizadosCount}/6 Exám.)
+                              </div>
+                              <div className="text-emerald-700 font-semibold">
+                                Prom: {srv.promedioExamenesPresentados.toFixed(1)} · Faltan: {srv.examenesFaltantesCount}
+                              </div>
+                              <div className="pt-0.5">
+                                <label
+                                  className="inline-flex items-center gap-0.5 bg-indigo-50 border border-indigo-200 rounded px-1 py-0.5 text-[9px] text-indigo-950 font-sans font-semibold"
+                                  title="Ajustar cuántos llamados de atención anti-trampa se permiten para este estudiante antes de suspender con 0.0"
+                                >
+                                  <span>🛡️ Llamados:</span>
+                                  <select
+                                    value={isCustomWarn ? String(effWarn) : 'GLOBAL'}
+                                    onChange={(e) => {
+                                      const val = e.target.value;
+                                      handleSetIndividualStudentWarningLimit(
+                                        st.id,
+                                        val === 'GLOBAL' ? 'GLOBAL' : Number(val)
+                                      );
+                                    }}
+                                    className="bg-transparent font-mono font-bold text-indigo-900 focus:outline-none cursor-pointer"
+                                  >
+                                    <option value="GLOBAL">
+                                      Global ({config.maxLlamadosAtencionGlobal ?? 1})
+                                    </option>
+                                    <option value="0">0 (Susp. Inmediata)</option>
+                                    <option value="1">1 Llamado</option>
+                                    <option value="2">2 Llamados</option>
+                                    <option value="3">3 Llamados</option>
+                                    <option value="4">4 Llamados</option>
+                                    <option value="5">5 Llamados</option>
+                                  </select>
+                                </label>
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </td>
                       <td className="py-2 px-2 text-center">
                         <div className="inline-flex items-center gap-0.5 bg-slate-50 border border-slate-200 rounded-lg px-1.5 py-0.5">
@@ -4641,6 +4943,234 @@ function doPost(e) {
                       </button>
                     </div>
                   )}
+
+                  {/* ================= RESUMEN DE SERVIDOR: EXÁMENES REALIZADOS, NOTAS, FALTANTES, RETOS Y LLAMADOS ANTI-TRAMPA ================= */}
+                  {(() => {
+                    const srv =
+                      activeAuditStudent.resumenServidor ||
+                      computeStudentServerSummary(activeAuditStudent, attempts, config);
+                    const effWarn = getEffectiveMaxLlamadosAtencion(activeAuditStudent, config);
+                    const isCustomWarn =
+                      typeof activeAuditStudent.maxLlamadosAtencionIndividual === 'number' ||
+                      typeof config.llamadosAtencionPorEstudiante?.[activeAuditStudent.id] === 'number';
+                    const antiCheatLogs = Array.isArray(activeAuditStudent.historialLlamadosAtencion)
+                      ? activeAuditStudent.historialLlamadosAtencion
+                      : [];
+
+                    return (
+                      <div className="bg-white border-2 border-indigo-200 rounded-xl p-4 space-y-4 shadow-xs text-xs">
+                        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-slate-200 pb-3">
+                          <div>
+                            <div className="inline-flex items-center gap-1.5 text-[11px] font-mono font-bold uppercase text-indigo-800 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded">
+                              <Database className="w-3.5 h-3.5" />
+                              <span>Expediente consolidado en Base de Datos del Servidor (Tiempo Real · 3s)</span>
+                            </div>
+                            <h4 className="text-sm font-bold text-slate-900 mt-1">
+                              Estado de Exámenes y Retos de {activeAuditStudent.nombre}: Realizados, Notas, Faltantes e Intentos
+                            </h4>
+                          </div>
+
+                          {/* Control directo de Llamados de Atención para este estudiante o Todos */}
+                          <div className="flex flex-wrap items-center gap-2 bg-indigo-50/80 border border-indigo-200 rounded-xl px-3 py-2">
+                            <span className="font-bold text-indigo-950">
+                              🛡️ Llamados de Atención Permitidos ({activeAuditStudent.nombre}):
+                            </span>
+                            <select
+                              value={isCustomWarn ? String(effWarn) : 'GLOBAL'}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                handleSetIndividualStudentWarningLimit(
+                                  activeAuditStudent.id,
+                                  val === 'GLOBAL' ? 'GLOBAL' : Number(val)
+                                );
+                              }}
+                              className="px-2.5 py-1 rounded-lg border border-indigo-300 bg-white font-mono font-bold text-indigo-950"
+                            >
+                              <option value="GLOBAL">
+                                Usar Regla Global ({config.maxLlamadosAtencionGlobal ?? 1} llamado(s))
+                              </option>
+                              <option value="0">0 Llamados (Suspensión inmediata al 1er evento)</option>
+                              <option value="1">1 Llamado de atención (Suspende al 2º)</option>
+                              <option value="2">2 Llamados de atención (Suspende al 3º)</option>
+                              <option value="3">3 Llamados de atención (Suspende al 4º)</option>
+                              <option value="4">4 Llamados de atención (Suspende al 5º)</option>
+                              <option value="5">5 Llamados de atención (Suspende al 6º)</option>
+                            </select>
+                            <button
+                              type="button"
+                              onClick={() => setAntiCheatControlModalOpen(true)}
+                              className="px-2.5 py-1 rounded-lg bg-indigo-700 hover:bg-indigo-800 text-white font-bold cursor-pointer"
+                            >
+                              Configurar Todos / Métodos IA
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Tarjetas Resumen: Exámenes Realizados vs Faltantes + Mini Retos Realizados vs Faltantes */}
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                          {/* Columna 1: los 6 Exámenes Oficiales */}
+                          <div className="border border-slate-200 rounded-xl p-3.5 bg-slate-50/70 space-y-2.5">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className="font-bold text-slate-900">
+                                📋 Exámenes Oficiales: {srv.examenesRealizadosCount} de 6 realizados ·{' '}
+                                <span className="text-amber-800">Faltan {srv.examenesFaltantesCount}</span>
+                              </span>
+                              <span className="font-mono font-bold text-sky-900 bg-sky-100 px-2 py-0.5 rounded">
+                                Total Intentos Usados: {srv.totalIntentosExamenesRealizados} · Promedio:{' '}
+                                {srv.promedioExamenesPresentados.toFixed(1)}/5.0
+                              </span>
+                            </div>
+
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                              {srv.detallePorExamen.map((exMod) => (
+                                <div
+                                  key={exMod.modalidad}
+                                  className={`p-2.5 rounded-lg border text-[11px] flex flex-col justify-between gap-1 ${
+                                    exMod.realizado
+                                      ? exMod.estadoMejor === 'APROBADO'
+                                        ? 'bg-emerald-50/90 border-emerald-300 text-emerald-950'
+                                        : exMod.estadoMejor === 'SUSPENDIDO'
+                                        ? 'bg-red-50 border-red-300 text-red-950'
+                                        : 'bg-amber-50 border-amber-300 text-amber-950'
+                                      : 'bg-white border-dashed border-slate-300 text-slate-600'
+                                  }`}
+                                >
+                                  <div className="flex items-center justify-between gap-1 font-bold">
+                                    <span>{exMod.label}</span>
+                                    <span className="font-mono">
+                                      {exMod.realizado ? `✓ Nota: ${exMod.mejorNota.toFixed(1)}` : '⏳ FALTA'}
+                                    </span>
+                                  </div>
+                                  <div className="text-[10px] font-mono flex flex-wrap items-center justify-between gap-1 opacity-90">
+                                    <span>
+                                      Intentos: {exMod.intentosUtilizados}/{exMod.maxIntentosPermitidos}
+                                    </span>
+                                    <span>
+                                      {exMod.realizado
+                                        ? `${exMod.preguntasQueSalieron.length} preg. registradas`
+                                        : 'Sin presentar'}
+                                    </span>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+
+                            {srv.examenesFaltantesLabels.length > 0 && (
+                              <div className="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                                <strong>Exámenes que le faltan por realizar ({srv.examenesFaltantesCount}):</strong>{' '}
+                                {srv.examenesFaltantesLabels.join(' · ')}
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Columna 2: los 5 Mini Retos por Módulo */}
+                          <div className="border border-slate-200 rounded-xl p-3.5 bg-slate-50/70 space-y-2.5">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className="font-bold text-slate-900">
+                                🏆 Mini Retos IA: {srv.retosRealizadosCount} de 5 módulos realizados ·{' '}
+                                <span className="text-amber-800">Faltan {srv.retosFaltantesModulos.length}</span>
+                              </span>
+                              <span className="font-mono font-bold text-indigo-900 bg-indigo-100 px-2 py-0.5 rounded">
+                                Insignias: {srv.insigniasGanadasCount}/5 · Intentos: {srv.totalIntentosRetosRealizados}
+                              </span>
+                            </div>
+
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                              {srv.detallePorReto.map((retMod) => (
+                                <div
+                                  key={retMod.modulo}
+                                  className={`p-2.5 rounded-lg border text-[11px] flex flex-col justify-between gap-1 ${
+                                    retMod.insigniaGanada
+                                      ? 'bg-emerald-50/90 border-emerald-300 text-emerald-950'
+                                      : retMod.suspendidoPorTrampa
+                                      ? 'bg-red-50 border-red-300 text-red-950'
+                                      : retMod.realizado
+                                      ? 'bg-amber-50 border-amber-300 text-amber-950'
+                                      : 'bg-white border-dashed border-slate-300 text-slate-600'
+                                  }`}
+                                >
+                                  <div className="flex items-center justify-between gap-1 font-bold">
+                                    <span>{retMod.tituloModulo}</span>
+                                    <span className="font-mono">
+                                      {retMod.realizado
+                                        ? `Nota: ${retMod.mejorNotaEscala5.toFixed(1)} (${retMod.mejorPorcentaje}%)`
+                                        : '⏳ FALTA'}
+                                    </span>
+                                  </div>
+                                  <div className="text-[10px] font-mono flex items-center justify-between gap-1 opacity-90">
+                                    <span>Intentos: {retMod.intentosUtilizados}/3</span>
+                                    <span>
+                                      {retMod.insigniaGanada
+                                        ? '🏅 Insignia Ganada'
+                                        : retMod.suspendidoPorTrampa
+                                        ? '🚨 Suspendido 0.0'
+                                        : retMod.realizado
+                                        ? 'En progreso'
+                                        : 'Pendiente'}
+                                    </span>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+
+                            {srv.retosFaltantesModulos.length > 0 && (
+                              <div className="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                                <strong>Mini Retos que le faltan por realizar:</strong>{' '}
+                                {srv.retosFaltantesModulos.map((m) => `Módulo ${m}`).join(' · ')}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Historial de Llamados de Atención Anti-Trampa de este estudiante */}
+                        {antiCheatLogs.length > 0 && (
+                          <div className="border border-red-200 bg-red-50/60 rounded-xl p-3 space-y-2">
+                            <div className="font-bold text-red-950 flex items-center justify-between">
+                              <span>
+                                🚨 Bitácora de Detecciones y Llamados Anti-Trampa de {activeAuditStudent.nombre} ({antiCheatLogs.length} evento(s))
+                              </span>
+                              <span className="font-mono text-[11px] text-red-800">
+                                Límite configurado: {effWarn} llamado(s)
+                              </span>
+                            </div>
+                            <div className="max-h-36 overflow-y-auto space-y-1.5 pr-1">
+                              {antiCheatLogs.slice(0, 12).map((logItem) => (
+                                <div
+                                  key={logItem.id}
+                                  className="bg-white border border-red-200 rounded-lg px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2 text-[11px]"
+                                >
+                                  <div>
+                                    <span className="font-mono font-bold text-red-800">
+                                      [{logItem.origen} · {logItem.tipoDeteccion}]
+                                    </span>{' '}
+                                    <span className="font-semibold text-slate-900">
+                                      {logItem.descripcion}
+                                    </span>{' '}
+                                    <span className="text-slate-500">({logItem.modalidadOModulo})</span>
+                                  </div>
+                                  <div className="font-mono text-[10px] flex items-center gap-2">
+                                    <span
+                                      className={`px-1.5 py-0.5 rounded font-bold ${
+                                        logItem.accionTomada === 'SUSPENSION_0_0'
+                                          ? 'bg-red-600 text-white'
+                                          : 'bg-amber-200 text-amber-950'
+                                      }`}
+                                    >
+                                      Llamado #{logItem.numeroLlamado}/{logItem.maxLlamadosPermitidos} ·{' '}
+                                      {logItem.accionTomada === 'SUSPENSION_0_0'
+                                        ? 'SUSPENDIDO 0.0'
+                                        : 'ADVERTENCIA'}
+                                    </span>
+                                    <span className="text-slate-500">{logItem.fecha}</span>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   {auditActiveMode === 'examenes' ? (
                     <div className="space-y-3">
@@ -6589,6 +7119,93 @@ function doPost(e) {
                 </div>
               </div>
             )}
+          </div>
+
+          {/* Panel de Control Permanente de Métodos Anti-Trampas (Exámenes y Mini Retos) */}
+          <div className="bg-white border-2 border-indigo-200 rounded-xl p-6 space-y-4 lg:col-span-2">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200 pb-4">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 text-slate-900">
+                  <ShieldAlert className="w-5 h-5 text-indigo-700" />
+                  <h2 className="text-lg font-bold">
+                    Control de Métodos Anti-Trampas en Exámenes y Mini Retos ({totalActiveAntiCheatCount}/12 Activos)
+                  </h2>
+                </div>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  Habilite, verifique o restaure todos los escudos anti-trampa en tiempo real por si alguna actualización de la aplicación web o carga de respaldo los deshabilita.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={handleEnableAllAntiCheatMethods}
+                  className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                >
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>Habilitar Todos los Métodos Anti-Trampa (12/12)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAntiCheatActionNotice(null);
+                    setAntiCheatControlModalOpen(true);
+                  }}
+                  className="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Key className="w-4 h-4" />
+                  <span>Abrir Panel Detallado Anti-Trampa</span>
+                </button>
+              </div>
+            </div>
+
+            {antiCheatActionNotice && (
+              <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-300 text-xs font-semibold text-emerald-950">
+                {antiCheatActionNotice}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
+                <div className="flex items-center justify-between font-bold text-slate-900">
+                  <span>🛡️ Exámenes Oficiales ({activeExamAntiCheatCount}/7 activos)</span>
+                  <button
+                    type="button"
+                    onClick={() => handleToggleAntiCheatField('antiTrampaExamenesActivo')}
+                    className={`px-2.5 py-1 rounded text-[11px] font-bold cursor-pointer ${
+                      config.antiTrampaExamenesActivo !== false
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-red-600 text-white'
+                    }`}
+                  >
+                    {config.antiTrampaExamenesActivo !== false ? '● HABILITADO' : '■ DESHABILITADO'}
+                  </button>
+                </div>
+                <p className="text-[11px] text-slate-600">
+                  Incluye bloqueo de cambio de pestaña/foco (1ª advertencia / 2ª suspensión 0.0), bloqueo de copia/clic derecho/F12/PrintScreen, pantalla completa, anti split-screen, barajado A/B/C/D y ecualizador psicométrico IA con «cascaritas».
+                </p>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
+                <div className="flex items-center justify-between font-bold text-slate-900">
+                  <span>🏅 Mini Retos & Insignias ({activeRetoAntiCheatCount}/5 activos)</span>
+                  <button
+                    type="button"
+                    onClick={() => handleToggleAntiCheatField('antiTrampaMiniRetosActivo')}
+                    className={`px-2.5 py-1 rounded text-[11px] font-bold cursor-pointer ${
+                      config.antiTrampaMiniRetosActivo !== false
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-red-600 text-white'
+                    }`}
+                  >
+                    {config.antiTrampaMiniRetosActivo !== false ? '● HABILITADO' : '■ DESHABILITADO'}
+                  </button>
+                </div>
+                <p className="text-[11px] text-slate-600">
+                  Incluye regla de 1 advertencia en pérdida de foco, suspensión inmediata 0.0 por intento de copiar/pegar/arrastrar o inyección de texto, biometría de tecleo anti-chatbot (PPM, cadencia, Backspace) y pantalla completa.
+                </p>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -8634,6 +9251,69 @@ function doPost(e) {
                   </div>
                 )}
 
+                {/* Resumen consolidado en el Servidor: Exámenes realizados, notas, faltantes, retos e historial anti-trampa */}
+                {(() => {
+                  const srv =
+                    auditSt.resumenServidor || computeStudentServerSummary(auditSt, attempts, config);
+                  const effWarn = getEffectiveMaxLlamadosAtencion(auditSt, config);
+                  const isCustomWarn =
+                    typeof auditSt.maxLlamadosAtencionIndividual === 'number' ||
+                    typeof config.llamadosAtencionPorEstudiante?.[auditSt.id] === 'number';
+                  return (
+                    <div className="bg-slate-50 border border-indigo-200 rounded-xl p-4 space-y-3 text-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-2.5">
+                        <div className="font-bold text-slate-900">
+                          📊 Resumen del Servidor ({auditSt.nombre}): {srv.examenesRealizadosCount}/6 Exámenes realizados (Faltan {srv.examenesFaltantesCount}) · {srv.retosRealizadosCount}/5 Mini Retos realizados (Faltan {srv.retosFaltantesModulos.length}) · Promedio Exámenes: {srv.promedioExamenesPresentados.toFixed(1)}/5.0
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-indigo-950">🛡️ Llamados Permitidos:</span>
+                          <select
+                            value={isCustomWarn ? String(effWarn) : 'GLOBAL'}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              handleSetIndividualStudentWarningLimit(
+                                auditSt.id,
+                                val === 'GLOBAL' ? 'GLOBAL' : Number(val)
+                              );
+                            }}
+                            className="px-2 py-1 rounded border border-indigo-300 bg-white font-mono font-bold text-indigo-950"
+                          >
+                            <option value="GLOBAL">
+                              Global ({config.maxLlamadosAtencionGlobal ?? 1})
+                            </option>
+                            <option value="0">0 Llamados (Susp. Inmediata)</option>
+                            <option value="1">1 Llamado</option>
+                            <option value="2">2 Llamados</option>
+                            <option value="3">3 Llamados</option>
+                            <option value="4">4 Llamados</option>
+                            <option value="5">5 Llamados</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 sm:grid-cols-6 gap-2">
+                        {srv.detallePorExamen.map((exMod) => (
+                          <div
+                            key={exMod.modalidad}
+                            className={`p-2 rounded-lg border text-[11px] ${
+                              exMod.realizado
+                                ? 'bg-emerald-50 border-emerald-300 text-emerald-950'
+                                : 'bg-white border-dashed border-slate-300 text-slate-500'
+                            }`}
+                          >
+                            <div className="font-bold truncate">{exMod.label}</div>
+                            <div className="font-mono font-bold mt-0.5">
+                              {exMod.realizado
+                                ? `Nota: ${exMod.mejorNota.toFixed(1)} (${exMod.intentosUtilizados} Int.)`
+                                : '⏳ FALTA'}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
+
                 {/* ================= MODO 1: AUDITORÍA DE EXÁMENES POR MÓDULO ================= */}
                 {auditActiveMode === 'examenes' && (
                   <div className="space-y-4">
@@ -9141,6 +9821,389 @@ function doPost(e) {
               </div>
             );
           })()}
+        </div>
+      )}
+
+      {/* ================= MODAL: CENTRO DE CONTROL DE MÉTODOS ANTI-TRAMPAS (EXÁMENES Y MINI RETOS) ================= */}
+      {antiCheatControlModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/75 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white border border-slate-200 rounded-2xl max-w-5xl w-full p-6 space-y-5 shadow-2xl my-8 max-h-[92vh] overflow-y-auto">
+            <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 border-b border-slate-200 pb-4">
+              <div className="space-y-1">
+                <span className="text-xs font-mono font-bold uppercase text-indigo-700">
+                  Seguridad Académica, Detección Multi-Vector IA y Blindaje Persistente en Servidor
+                </span>
+                <h3 className="text-lg font-bold text-slate-900">
+                  Centro de Control de Métodos Anti-Trampas y Llamados de Atención (Global e Individual)
+                </h3>
+                <p className="text-xs text-slate-600">
+                  Estado actual: <strong>{totalActiveAntiCheatCount} de 18 escudos activos</strong> ({activeExamAntiCheatCount}/13 en Exámenes · {activeRetoAntiCheatCount}/5 en Mini Retos) · Límite Global: <strong>{config.maxLlamadosAtencionGlobal ?? 1} llamado(s)</strong>. Todo se guarda en el Servidor Central.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={handleEnableAllAntiCheatMethods}
+                  className="px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-xs"
+                >
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>Habilitar Todos (18/18)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAntiCheatControlModalOpen(false)}
+                  className="px-3 py-2 rounded-lg border border-slate-300 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
+                >
+                  Cerrar ✕
+                </button>
+              </div>
+            </div>
+
+            {antiCheatActionNotice && (
+              <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-300 text-xs font-semibold text-emerald-950 flex items-center justify-between">
+                <span>{antiCheatActionNotice}</span>
+                <button
+                  type="button"
+                  onClick={() => setAntiCheatActionNotice(null)}
+                  className="text-emerald-800 hover:text-emerald-950 font-bold px-2"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
+            {/* SECCIÓN NUEVA: CONFIGURACIÓN DE CUÁNTOS LLAMADOS DE ATENCIÓN SE AJUSTAN A TODOS O DE FORMA INDIVIDUAL */}
+            <div className="border-2 border-indigo-200 rounded-xl p-4 bg-indigo-50/50 space-y-4 text-xs">
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-indigo-200 pb-3">
+                <div className="space-y-0.5">
+                  <h4 className="text-sm font-bold text-indigo-950">
+                    Configuración de Llamados de Atención Anti-Trampa (Para Todos o Individual por Estudiante)
+                  </h4>
+                  <p className="text-[11px] text-indigo-900">
+                    Defina cuántas advertencias preventivas permite el sistema (cambio de pestaña, minimizar ventana, cambio de aplicación, abandono de puntero, etc.) antes de suspender automáticamente con <strong>0.0 / 5.0 (SUSPENDIDO)</strong>.
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <span className="font-bold text-indigo-950">Ajustar a TODOS los estudiantes:</span>
+                  {[0, 1, 2, 3, 4, 5].map((num) => {
+                    const isCurrentGlobal = (config.maxLlamadosAtencionGlobal ?? 1) === num;
+                    return (
+                      <button
+                        key={num}
+                        type="button"
+                        onClick={() => handleApplyWarningLimitToAllStudents(num)}
+                        className={`px-2.5 py-1.5 rounded-lg font-mono font-bold cursor-pointer transition-colors ${
+                          isCurrentGlobal
+                            ? 'bg-indigo-700 text-white shadow-xs'
+                            : 'bg-white border border-indigo-300 text-indigo-900 hover:bg-indigo-100'
+                        }`}
+                        title={
+                          num === 0
+                            ? 'Suspensión inmediata en la 1ª detección sin llamados previos'
+                            : `Permitir ${num} llamado(s) de atención a todos los estudiantes antes de suspender`
+                        }
+                      >
+                        {num === 0 ? '0 (Inmediato)' : `${num} Llamado${num > 1 ? 's' : ''}`}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Ajuste Individual por Estudiante */}
+              <div className="space-y-2">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <span className="font-bold text-slate-900">
+                    Ajuste Individual de Llamados de Atención por Estudiante ({students.length} estudiantes):
+                  </span>
+                  <input
+                    type="text"
+                    value={warningLimitStudentSearch}
+                    onChange={(e) => setWarningLimitStudentSearch(e.target.value)}
+                    placeholder="Filtrar estudiante por nombre o documento..."
+                    className="px-3 py-1.5 rounded-lg border border-slate-300 bg-white text-xs w-full sm:w-72"
+                  />
+                </div>
+
+                <div className="max-h-48 overflow-y-auto border border-slate-200 rounded-xl bg-white divide-y divide-slate-100">
+                  {students
+                    .filter((s) => {
+                      const q = warningLimitStudentSearch.trim().toLowerCase();
+                      if (!q) return true;
+                      return (
+                        s.nombre.toLowerCase().includes(q) || s.id.toLowerCase().includes(q)
+                      );
+                    })
+                    .map((st) => {
+                      const effWarn = getEffectiveMaxLlamadosAtencion(st, config);
+                      const isCustom =
+                        typeof st.maxLlamadosAtencionIndividual === 'number' ||
+                        typeof config.llamadosAtencionPorEstudiante?.[st.id] === 'number';
+                      const logsCount = Array.isArray(st.historialLlamadosAtencion)
+                        ? st.historialLlamadosAtencion.length
+                        : st.advertenciasCambioFoco || 0;
+
+                      return (
+                        <div
+                          key={st.id}
+                          className="px-3 py-2 flex flex-wrap items-center justify-between gap-2 hover:bg-slate-50"
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono font-bold text-slate-700">{st.id}</span>
+                            <span className="font-semibold text-slate-900">{st.nombre}</span>
+                            {isCustom && (
+                              <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-900 font-bold text-[10px]">
+                                Individual: {effWarn} llamado(s)
+                              </span>
+                            )}
+                            {logsCount > 0 && (
+                              <span className="px-2 py-0.5 rounded bg-red-100 text-red-900 font-mono text-[10px]">
+                                Infracciones reg.: {logsCount}
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-1.5">
+                            <select
+                              value={isCustom ? String(effWarn) : 'GLOBAL'}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                handleSetIndividualStudentWarningLimit(
+                                  st.id,
+                                  val === 'GLOBAL' ? 'GLOBAL' : Number(val)
+                                );
+                              }}
+                              className="px-2 py-1 rounded border border-slate-300 bg-white font-mono font-bold text-slate-900 text-[11px]"
+                            >
+                              <option value="GLOBAL">
+                                Global ({config.maxLlamadosAtencionGlobal ?? 1} llamado(s))
+                              </option>
+                              <option value="0">0 Llamados (Suspensión inmediata)</option>
+                              <option value="1">1 Llamado de atención</option>
+                              <option value="2">2 Llamados de atención</option>
+                              <option value="3">3 Llamados de atención</option>
+                              <option value="4">4 Llamados de atención</option>
+                              <option value="5">5 Llamados de atención</option>
+                            </select>
+                          </div>
+                        </div>
+                      );
+                    })}
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+              {/* Columna 1: Métodos Anti-Trampa en Exámenes */}
+              <div className="border border-slate-200 rounded-xl p-4 space-y-3 bg-slate-50/60">
+                <div className="flex items-center justify-between border-b border-slate-200 pb-2.5">
+                  <div>
+                    <h4 className="text-sm font-bold text-slate-900">
+                      1. Métodos Anti-Trampa en Exámenes ({activeExamAntiCheatCount}/13)
+                    </h4>
+                    <p className="text-[11px] text-slate-600">
+                      Detecciones de pestaña, minimizado, cambio de app e IA en Exámenes Integrales y por Módulo
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
+                  {[
+                    {
+                      field: 'antiTrampaExamenesActivo' as keyof SystemConfig,
+                      title: 'Escudo Maestro Anti-Trampas en Exámenes',
+                      desc: 'Interruptor general que habilita la supervisión y sanción automática en todos los exámenes.'
+                    },
+                    {
+                      field: 'detectarCambioPestana' as keyof SystemConfig,
+                      title: 'Detector de Cambio de Pestaña del Navegador (Tab Switch)',
+                      desc: 'Detecta inmediatamente cuando el estudiante cambia a otra pestaña del navegador.'
+                    },
+                    {
+                      field: 'detectarMinimizarPestana' as keyof SystemConfig,
+                      title: 'Detector de Minimizar Pestaña o Colapsar Ventana',
+                      desc: 'Identifica cuando el estudiante minimiza el navegador o reduce la ventana al mínimo.'
+                    },
+                    {
+                      field: 'detectarCambioAplicacion' as keyof SystemConfig,
+                      title: 'Detector de Cambio de Aplicación Externa (Alt+Tab / App IA)',
+                      desc: 'Detecta cuando el foco pasa a otra aplicación de escritorio, asistente IA o segunda pantalla.'
+                    },
+                    {
+                      field: 'examenBloquearCambioPestanaFoco' as keyof SystemConfig,
+                      title: 'Control General de Foco y Llamados de Atención',
+                      desc: 'Aplica el límite configurado de llamados (global o individual) antes de suspender con 0.0 / 5.0.'
+                    },
+                    {
+                      field: 'examenBloquearCopiaClicDerechoAtajos' as keyof SystemConfig,
+                      title: 'Bloqueo de Copia, Pegado, Clic Derecho y Arrastrar Texto',
+                      desc: 'Bloquea Copy/Cut/Paste, menú contextual y Ctrl+C/V/X contabilizando llamado de atención.'
+                    },
+                    {
+                      field: 'detectarCapturaPantallaDevTools' as keyof SystemConfig,
+                      title: 'Detector de Captura de Pantalla, Impresión y DevTools (F12)',
+                      desc: 'Detecta PrintScreen, Ctrl+P, F12, Ctrl+Shift+I y apertura acoplada del inspector.'
+                    },
+                    {
+                      field: 'detectarAbandonoPunteroIA' as keyof SystemConfig,
+                      title: 'Detector IA de Abandono Prolongado de Puntero (>9s fuera)',
+                      desc: 'Detecta cuando el cursor sale de la ventana por más de 9s (uso de otro monitor o celular).'
+                    },
+                    {
+                      field: 'detectarRafagaClicsIA' as keyof SystemConfig,
+                      title: 'Detector IA de Ráfaga de Respuestas sin Lectura (<2.2s)',
+                      desc: 'Identifica marcación automática o respuestas en ráfaga sin tiempo humano de lectura.'
+                    },
+                    {
+                      field: 'examenExigirPantallaCompleta' as keyof SystemConfig,
+                      title: 'Modo Pantalla Completa Segura (Fullscreen)',
+                      desc: 'Activa pantalla completa al iniciar el examen y registra llamado si el estudiante sale de ella.'
+                    },
+                    {
+                      field: 'exigirPantallaMaximizada' as keyof SystemConfig,
+                      title: 'Detector Anti Split-Screen (<85%) y Doble Monitor',
+                      desc: 'Detecta ventanas divididas o monitores extendidos y alerta en el Monitor de Aula en Vivo.'
+                    },
+                    {
+                      field: 'barajarOpciones' as keyof SystemConfig,
+                      title: 'Barajado Dinámico de Preguntas y Opciones A/B/C/D',
+                      desc: 'Permuta el orden de las opciones A, B, C y D de forma única para cada estudiante.'
+                    },
+                    {
+                      field: 'ecualizadorPsicometricoActivo' as keyof SystemConfig,
+                      title: 'Ecualizador Psicométrico IA («Cascaritas» + Igual Longitud)',
+                      desc: 'Evita adivinar por extensión: iguala la longitud y añade mini-explicación con cascarita a los distractores.'
+                    }
+                  ].map((item) => {
+                    const enabled = config[item.field] !== false;
+                    return (
+                      <div
+                        key={String(item.field)}
+                        className="p-3 rounded-lg bg-white border border-slate-200 flex items-center justify-between gap-3 text-xs"
+                      >
+                        <div className="space-y-0.5">
+                          <div className="font-bold text-slate-900">{item.title}</div>
+                          <div className="text-[11px] text-slate-600 leading-snug">{item.desc}</div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleToggleAntiCheatField(item.field)}
+                          className={`px-3 py-1.5 rounded-lg font-bold shrink-0 cursor-pointer transition-colors ${
+                            enabled
+                              ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                              : 'bg-slate-200 hover:bg-slate-300 text-slate-700'
+                          }`}
+                        >
+                          {enabled ? '✓ Habilitado' : 'Deshabilitado'}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Columna 2: Métodos Anti-Trampa en Mini Retos */}
+              <div className="border border-slate-200 rounded-xl p-4 space-y-3 bg-slate-50/60">
+                <div className="flex items-center justify-between border-b border-slate-200 pb-2.5">
+                  <div>
+                    <h4 className="text-sm font-bold text-slate-900">
+                      2. Métodos Anti-Trampa en Mini Retos ({activeRetoAntiCheatCount}/5)
+                    </h4>
+                    <p className="text-[11px] text-slate-600">
+                      Protección en la Zona de Mini Retos Semánticos con IA & Medallero PRU
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  {[
+                    {
+                      field: 'antiTrampaMiniRetosActivo' as keyof SystemConfig,
+                      title: 'Escudo Maestro Anti-Trampas en Mini Retos',
+                      desc: 'Interruptor general que activa el entorno supervisado en todos los intentos de Mini Retos.'
+                    },
+                    {
+                      field: 'retoBloquearCambioPestanaFoco' as keyof SystemConfig,
+                      title: 'Regla de 1 Advertencia en Cambio de Pestaña / Foco',
+                      desc: 'Permite 1 advertencia preventiva al perder foco; la 2ª incidencia suspende con 0.0 / 5.0 (SUSPENDIDO).'
+                    },
+                    {
+                      field: 'retoSuspenderCopiaPegadoInyeccion' as keyof SystemConfig,
+                      title: 'Suspensión Inmediata 0.0 por Copiar, Pegar o Inyectar Texto',
+                      desc: 'Suspende automáticamente ante Ctrl+C/V/X, clic derecho, arrastrar texto o inyección >18 caracteres.'
+                    },
+                    {
+                      field: 'retoBiometriaTecleoAntiCopia' as keyof SystemConfig,
+                      title: 'Biometría de Tecleo Anti-Copia y Anti-Chatbot',
+                      desc: 'Analiza velocidad (PPM), cadencia en milisegundos, uso de Backspace y muletillas de IA al enviar.'
+                    },
+                    {
+                      field: 'retoExigirPantallaCompleta' as keyof SystemConfig,
+                      title: 'Pantalla Completa Obligatoria y Anti Ventana Dividida',
+                      desc: 'Solicita modo Fullscreen al abrir el reto y advierte si el estudiante divide la pantalla (<85%).'
+                    }
+                  ].map((item) => {
+                    const enabled = config[item.field] !== false;
+                    return (
+                      <div
+                        key={String(item.field)}
+                        className="p-3 rounded-lg bg-white border border-slate-200 flex items-center justify-between gap-3 text-xs"
+                      >
+                        <div className="space-y-0.5">
+                          <div className="font-bold text-slate-900">{item.title}</div>
+                          <div className="text-[11px] text-slate-600 leading-snug">{item.desc}</div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleToggleAntiCheatField(item.field)}
+                          className={`px-3 py-1.5 rounded-lg font-bold shrink-0 cursor-pointer transition-colors ${
+                            enabled
+                              ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                              : 'bg-slate-200 hover:bg-slate-300 text-slate-700'
+                          }`}
+                        >
+                          {enabled ? '✓ Habilitado' : 'Deshabilitado'}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 border-t border-slate-200">
+              <div className="flex-1">
+                <OptionServerSaveBar
+                  sectionKey="control_anti_trampas"
+                  label="Configuración de Métodos Anti-Trampas (Exámenes y Mini Retos)"
+                  watchValue={[
+                    config.antiTrampaExamenesActivo,
+                    config.examenBloquearCambioPestanaFoco,
+                    config.examenBloquearCopiaClicDerechoAtajos,
+                    config.examenExigirPantallaCompleta,
+                    config.exigirPantallaMaximizada,
+                    config.barajarOpciones,
+                    config.ecualizadorPsicometricoActivo,
+                    config.antiTrampaMiniRetosActivo,
+                    config.retoBloquearCambioPestanaFoco,
+                    config.retoSuspenderCopiaPegadoInyeccion,
+                    config.retoBiometriaTecleoAntiCopia,
+                    config.retoExigirPantallaCompleta
+                  ]}
+                  compact
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => setAntiCheatControlModalOpen(false)}
+                className="px-5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold cursor-pointer"
+              >
+                Listo / Guardar y Cerrar
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

@@ -20,7 +20,14 @@ import {
   equalizeQuestionPsychometrics,
   equalizeQuestionBank
 } from './src/data/questions.ts';
-import { INITIAL_CUSTOM_MINI_RETOS } from './src/utils/miniRetosEngine.ts';
+import {
+  INITIAL_CUSTOM_MINI_RETOS,
+  getDefaultRetoProgress
+} from './src/utils/miniRetosEngine.ts';
+import {
+  enrichStudentsWithServerSummary,
+  computeStudentServerSummary
+} from './src/utils/academicServerSummary.ts';
 
 dotenv.config();
 
@@ -126,6 +133,23 @@ const DEFAULT_SERVER_CONFIG: SystemConfig = {
   tiempoExamenModuloMin: 50,
   notaMinimaAprobacion: 3.0,
   exigirPantallaMaximizada: true,
+  maxLlamadosAtencionGlobal: 1,
+  llamadosAtencionPorEstudiante: {},
+  antiTrampaExamenesActivo: true,
+  examenBloquearCambioPestanaFoco: true,
+  detectarCambioPestana: true,
+  detectarMinimizarPestana: true,
+  detectarCambioAplicacion: true,
+  detectarSalidaPunteroDevToolsIA: true,
+  detectarRafagaRespuestaRapidaIA: true,
+  examenBloquearCopiaClicDerechoAtajos: true,
+  examenExigirPantallaCompleta: true,
+  ecualizadorPsicometricoActivo: true,
+  antiTrampaMiniRetosActivo: true,
+  retoBloquearCambioPestanaFoco: true,
+  retoSuspenderCopiaPegadoInyeccion: true,
+  retoBiometriaTecleoAntiCopia: true,
+  retoExigirPantallaCompleta: true,
   miniRetosAbiertos: true,
   estudiantesSinMiniRetos: [],
   estudiantesModulosMiniRetosBloqueados: {},
@@ -171,6 +195,18 @@ function parseRawDbObject(parsed: any): CentralDatabaseState {
       : INITIAL_QUESTIONS
     : INITIAL_QUESTIONS;
 
+  const rawStudents: StudentRecord[] =
+    Array.isArray(parsed.students) && parsed.students.length > 0
+      ? parsed.students
+      : INITIAL_STUDENTS;
+  const rawAttempts: ExamAttemptResult[] = Array.isArray(parsed.attempts) ? parsed.attempts : [];
+  const mergedConfig: SystemConfig = { ...DEFAULT_SERVER_CONFIG, ...(parsed.config || {}) };
+  const enrichedStudents = enrichStudentsWithServerSummary(
+    rawStudents,
+    rawAttempts,
+    mergedConfig.notaMinimaAprobacion ?? 3.0
+  );
+
   return {
     initialized: true,
     migratedFromClient: Boolean(parsed.migratedFromClient ?? true),
@@ -178,15 +214,12 @@ function parseRawDbObject(parsed: any): CentralDatabaseState {
     questionsRevision: Number(parsed.questionsRevision) || 1,
     lastModifiedIso: parsed.lastModifiedIso || new Date().toISOString(),
     questionsBankExplicitlyCleared: explicitlyCleared,
-    students:
-      Array.isArray(parsed.students) && parsed.students.length > 0
-        ? parsed.students
-        : INITIAL_STUDENTS,
+    students: enrichedStudents,
     questions: loadedQuestions,
-    attempts: Array.isArray(parsed.attempts) ? parsed.attempts : [],
+    attempts: rawAttempts,
     abproEvaluations: Array.isArray(parsed.abproEvaluations) ? parsed.abproEvaluations : [],
     liveSessions: Array.isArray(parsed.liveSessions) ? parsed.liveSessions : [],
-    config: { ...DEFAULT_SERVER_CONFIG, ...(parsed.config || {}) },
+    config: mergedConfig,
     customMiniRetos:
       Array.isArray(parsed.customMiniRetos) && parsed.customMiniRetos.length > 0
         ? parsed.customMiniRetos
@@ -238,6 +271,12 @@ function saveCentralDbToDisk(
   description = 'Sincronización con base de datos del servidor'
 ): void {
   ensureDataDir();
+  // Always keep every student's server academic summary (completed exams, missing exams, grades, questions, retos) up-to-date in the database
+  db.students = enrichStudentsWithServerSummary(
+    db.students,
+    db.attempts,
+    db.config?.notaMinimaAprobacion ?? 3.0
+  );
   const serialized = JSON.stringify(db);
   try {
     const tmpPath = `${CENTRAL_DB_PATH}.tmp`;
@@ -313,7 +352,7 @@ let lastRedisSyncMs = 0;
 async function syncFromUpstashIfConfigured(force = false): Promise<void> {
   if (!getUpstashConfig()) return;
   const now = Date.now();
-  if (!force && !IS_VERCEL && now - lastRedisSyncMs < 5000) return;
+  if (!force && !IS_VERCEL && now - lastRedisSyncMs < 1500) return;
   lastRedisSyncMs = now;
   const remoteDb = await loadFromUpstashRedis<any>(REDIS_KEY_CENTRAL_DB);
   if (remoteDb && typeof remoteDb === 'object') {
@@ -556,7 +595,7 @@ app.use('/api/state', async (req, res, next) => {
     }
   });
 
-  // 6. POST /api/state/attempt — Atomically record an Exam Attempt AND update the StudentRecord
+  // 6. POST /api/state/attempt — Atomically record an Exam Attempt AND update the StudentRecord in the Server DB
   app.post('/api/state/attempt', (req, res) => {
     try {
       const { attempt, student } = req.body || {};
@@ -571,18 +610,218 @@ app.use('/api/state', async (req, res, next) => {
         centralDb.attempts.unshift(attempt);
       }
 
-      if (student && student.id) {
+      const targetStudentId = String(student?.id || attempt.studentId || '').trim();
+      if (targetStudentId) {
         const stIdx = centralDb.students.findIndex(
-          (s) => s.id.toUpperCase() === String(student.id).toUpperCase()
+          (s) => s.id.toUpperCase() === targetStudentId.toUpperCase()
         );
         if (stIdx >= 0) {
-          centralDb.students[stIdx] = {
-            ...centralDb.students[stIdx],
-            ...student
+          const prevSt = centralDb.students[stIdx];
+          const prevLogs = Array.isArray(prevSt.historialLlamadosAtencion)
+            ? prevSt.historialLlamadosAtencion
+            : [];
+          const incomingLogs = Array.isArray(student?.historialLlamadosAtencion)
+            ? student.historialLlamadosAtencion
+            : Array.isArray(attempt.historialLlamadosIntento)
+            ? attempt.historialLlamadosIntento
+            : [];
+          const mergedLogsMap = new Map<string, any>();
+          [...incomingLogs, ...prevLogs].forEach((entry) => {
+            if (entry && entry.id) mergedLogsMap.set(entry.id, entry);
+          });
+
+          const mergedStudent: StudentRecord = {
+            ...prevSt,
+            ...(student || {}),
+            historialLlamadosAtencion: Array.from(mergedLogsMap.values()).sort(
+              (a, b) => (b.timestampMs || 0) - (a.timestampMs || 0)
+            )
+          };
+          mergedStudent.resumenServidor = computeStudentServerSummary(
+            mergedStudent,
+            centralDb.attempts,
+            centralDb.config?.notaMinimaAprobacion ?? 3.0
+          );
+          centralDb.students[stIdx] = mergedStudent;
+        }
+        centralDb.liveSessions = centralDb.liveSessions.filter(
+          (s) => s.studentId.toUpperCase() !== targetStudentId.toUpperCase()
+        );
+        delete centralDb.activeExamsByStudent[targetStudentId];
+      }
+
+      centralDb.migratedFromClient = true;
+      centralDb.revision += 1;
+      centralDb.lastModifiedIso = new Date().toISOString();
+      saveCentralDbToDisk(
+        centralDb,
+        'ExamenRealizado',
+        `Examen registrado automáticamente en el servidor: ${attempt.studentName} (${attempt.modalidadLabel} - Nota ${attempt.notaColombiana})`
+      );
+
+      return res.json({
+        ok: true,
+        revision: centralDb.revision,
+        questionsRevision: centralDb.questionsRevision,
+        lastModifiedIso: centralDb.lastModifiedIso
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || 'Error al registrar intento de examen.' });
+    }
+  });
+
+  // 6B. POST /api/state/reto-attempt — Atomically record a Mini Reto Attempt AND update StudentRecord on the Server DB
+  app.post('/api/state/reto-attempt', (req, res) => {
+    try {
+      const { studentId, retoAttempt, updatedStudent } = req.body || {};
+      const cleanId = String(studentId || retoAttempt?.studentId || updatedStudent?.id || '').trim();
+      if (!cleanId) {
+        return res.status(400).json({ error: 'Falta studentId para registrar el Mini Reto.' });
+      }
+
+      const stIdx = centralDb.students.findIndex(
+        (s) => s.id.toUpperCase() === cleanId.toUpperCase()
+      );
+      if (stIdx >= 0) {
+        const currentSt = centralDb.students[stIdx];
+        const baseProgress = getDefaultRetoProgress();
+        const mergedProgresoRetos = {
+          ...baseProgress,
+          ...(currentSt.progresoRetos || {}),
+          ...(updatedStudent?.progresoRetos || {})
+        };
+
+        if (retoAttempt && retoAttempt.modulo) {
+          const mod = Number(retoAttempt.modulo) as 1 | 2 | 3 | 4 | 5;
+          const prevMod = mergedProgresoRetos[mod] || baseProgress[mod];
+          const existingModHist = Array.isArray(prevMod.historialIntentos)
+            ? prevMod.historialIntentos.filter(Boolean)
+            : [];
+          const hasAttemptInMod = existingModHist.some(
+            (a) => a.attemptId === retoAttempt.attemptId
+          );
+          const nextModHist = hasAttemptInMod
+            ? existingModHist.map((a) =>
+                a.attemptId === retoAttempt.attemptId ? retoAttempt : a
+              )
+            : [retoAttempt, ...existingModHist];
+
+          mergedProgresoRetos[mod] = {
+            ...prevMod,
+            modulo: mod,
+            intentosUsados: Math.max(prevMod.intentosUsados || 0, nextModHist.length),
+            insigniaDesbloqueada: Boolean(
+              prevMod.insigniaDesbloqueada || retoAttempt.aprobado
+            ),
+            mejorPorcentaje: Math.max(
+              prevMod.mejorPorcentaje || 0,
+              Number(retoAttempt.porcentajeIA) || 0
+            ),
+            suspendidoPorTrampa: Boolean(
+              prevMod.suspendidoPorTrampa || retoAttempt.suspendidoPorTrampa
+            ),
+            motivoSuspensionReto:
+              retoAttempt.motivoInfraccion || prevMod.motivoSuspensionReto,
+            historialIntentos: nextModHist
           };
         }
-        centralDb.liveSessions = centralDb.liveSessions.filter((s) => s.studentId !== student.id);
-        delete centralDb.activeExamsByStudent[student.id];
+
+        const prevGlobalRetos = Array.isArray(currentSt.historialIntentosRetos)
+          ? currentSt.historialIntentosRetos.filter(Boolean)
+          : [];
+        const incomingGlobalRetos = Array.isArray(updatedStudent?.historialIntentosRetos)
+          ? updatedStudent.historialIntentosRetos.filter(Boolean)
+          : [];
+        const retoMap = new Map<string, any>();
+        if (retoAttempt && retoAttempt.attemptId) {
+          retoMap.set(retoAttempt.attemptId, retoAttempt);
+        }
+        [...incomingGlobalRetos, ...prevGlobalRetos].forEach((r) => {
+          if (r && r.attemptId && !retoMap.has(r.attemptId)) {
+            retoMap.set(r.attemptId, r);
+          }
+        });
+
+        const prevLogs = Array.isArray(currentSt.historialLlamadosAtencion)
+          ? currentSt.historialLlamadosAtencion
+          : [];
+        const incomingLogs = Array.isArray(updatedStudent?.historialLlamadosAtencion)
+          ? updatedStudent.historialLlamadosAtencion
+          : Array.isArray(retoAttempt?.historialLlamadosIntento)
+          ? retoAttempt.historialLlamadosIntento
+          : [];
+        const logsMap = new Map<string, any>();
+        [...incomingLogs, ...prevLogs].forEach((l) => {
+          if (l && l.id) logsMap.set(l.id, l);
+        });
+
+        const nextStudent: StudentRecord = {
+          ...currentSt,
+          ...(updatedStudent || {}),
+          progresoRetos: mergedProgresoRetos,
+          historialIntentosRetos: Array.from(retoMap.values()).sort(
+            (a, b) => (b.timestampMs || 0) - (a.timestampMs || 0)
+          ),
+          historialLlamadosAtencion: Array.from(logsMap.values()).sort(
+            (a, b) => (b.timestampMs || 0) - (a.timestampMs || 0)
+          )
+        };
+        nextStudent.resumenServidor = computeStudentServerSummary(
+          nextStudent,
+          centralDb.attempts,
+          centralDb.config?.notaMinimaAprobacion ?? 3.0
+        );
+        centralDb.students[stIdx] = nextStudent;
+      }
+
+      centralDb.migratedFromClient = true;
+      centralDb.revision += 1;
+      centralDb.lastModifiedIso = new Date().toISOString();
+      saveCentralDbToDisk(
+        centralDb,
+        'MiniRetoRealizado',
+        `Mini Reto registrado automáticamente en el servidor: Estudiante ${cleanId}`
+      );
+
+      return res.json({
+        ok: true,
+        revision: centralDb.revision,
+        questionsRevision: centralDb.questionsRevision,
+        lastModifiedIso: centralDb.lastModifiedIso,
+        student: stIdx >= 0 ? centralDb.students[stIdx] : null
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || 'Error al registrar Mini Reto en el servidor.' });
+    }
+  });
+
+  // 6C. POST /api/state/anti-cheat-event — Atomically record a real-time anti-cheat warning or suspension in the Server DB
+  app.post('/api/state/anti-cheat-event', (req, res) => {
+    try {
+      const { studentId, logEntry } = req.body || {};
+      const cleanId = String(studentId || logEntry?.studentId || '').trim();
+      if (!cleanId || !logEntry) {
+        return res.status(400).json({ error: 'Datos de evento anti-trampa incompletos.' });
+      }
+
+      const stIdx = centralDb.students.findIndex(
+        (s) => s.id.toUpperCase() === cleanId.toUpperCase()
+      );
+      if (stIdx >= 0) {
+        const currentSt = centralDb.students[stIdx];
+        const prevLogs = Array.isArray(currentSt.historialLlamadosAtencion)
+          ? currentSt.historialLlamadosAtencion
+          : [];
+        const exists = prevLogs.some((l) => l && l.id === logEntry.id);
+        const nextLogs = exists ? prevLogs : [logEntry, ...prevLogs].slice(0, 150);
+        centralDb.students[stIdx] = {
+          ...currentSt,
+          historialLlamadosAtencion: nextLogs,
+          conceptoInfraccion:
+            logEntry.accionTomada === 'SUSPENSION_0_0'
+              ? `${logEntry.etiquetaDeteccion}: ${logEntry.descripcion}`
+              : currentSt.conceptoInfraccion
+        };
       }
 
       centralDb.migratedFromClient = true;
@@ -597,7 +836,7 @@ app.use('/api/state', async (req, res, next) => {
         lastModifiedIso: centralDb.lastModifiedIso
       });
     } catch (err: any) {
-      return res.status(500).json({ error: err?.message || 'Error al registrar intento de examen.' });
+      return res.status(500).json({ error: err?.message || 'Error al registrar evento anti-trampa.' });
     }
   });
 

@@ -11,11 +11,14 @@ import {
   LiveClassroomSession,
   ABProProjectEvaluation,
   SystemConfig,
-  CustomMiniRetoTemplate
+  CustomMiniRetoTemplate,
+  MiniRetoAttemptRecord,
+  AntiCheatLogEntry
 } from './types';
 import { INITIAL_STUDENTS } from './data/students';
 import { INITIAL_QUESTIONS, normalizeQuestionList } from './data/questions';
 import { INITIAL_CUSTOM_MINI_RETOS } from './utils/miniRetosEngine';
+import { enrichStudentsWithServerSummary } from './utils/academicServerSummary';
 import { StudentPortal } from './components/StudentPortal';
 import { TeacherPanel } from './components/TeacherPanel';
 import { ServerSaveProvider, ServerSaveResponse } from './components/ServerSaveContext';
@@ -72,6 +75,23 @@ const DEFAULT_CONFIG: SystemConfig = {
   tiempoExamenModuloMin: 50,
   notaMinimaAprobacion: 3.0,
   exigirPantallaMaximizada: true,
+  maxLlamadosAtencionGlobal: 1,
+  llamadosAtencionPorEstudiante: {},
+  antiTrampaExamenesActivo: true,
+  examenBloquearCambioPestanaFoco: true,
+  detectarCambioPestana: true,
+  detectarMinimizarPestana: true,
+  detectarCambioAplicacion: true,
+  detectarSalidaPunteroDevToolsIA: true,
+  detectarRafagaRespuestaRapidaIA: true,
+  examenBloquearCopiaClicDerechoAtajos: true,
+  examenExigirPantallaCompleta: true,
+  ecualizadorPsicometricoActivo: true,
+  antiTrampaMiniRetosActivo: true,
+  retoBloquearCambioPestanaFoco: true,
+  retoSuspenderCopiaPegadoInyeccion: true,
+  retoBiometriaTecleoAntiCopia: true,
+  retoExigirPantallaCompleta: true,
   miniRetosAbiertos: true,
   estudiantesSinMiniRetos: [],
   estudiantesModulosMiniRetosBloqueados: {},
@@ -116,6 +136,10 @@ function AppContent() {
   );
   const [previousQuestionsSnapshotCount, setPreviousQuestionsSnapshotCount] = useState<number>(0);
   const [activeExamsByStudent, setActiveExamsByStudent] = useState<Record<string, any>>({});
+  const [lastServerSyncFormatted, setLastServerSyncFormatted] = useState<string>(() =>
+    new Date().toLocaleTimeString('es-CO')
+  );
+  const [currentServerRevision, setCurrentServerRevision] = useState<number>(1);
 
   const serverRevisionRef = useRef<number>(-1);
   const questionsRevisionRef = useRef<number>(-1);
@@ -422,12 +446,15 @@ function AppContent() {
         }
 
         if (data.upToDate && !purgeLocalCache && !forceFullPull) {
+          const nowFmt = new Date().toLocaleTimeString('es-CO');
           serverRevisionRef.current = data.revision;
           questionsRevisionRef.current = data.questionsRevision;
+          setCurrentServerRevision(data.revision || 1);
+          setLastServerSyncFormatted(nowFmt);
           setIsServerHydrated(true);
           return {
             ok: true,
-            syncedAtFormatted: new Date().toLocaleTimeString('es-CO'),
+            syncedAtFormatted: nowFmt,
             revision: data.revision,
             questionsRevision: data.questionsRevision,
             lastModifiedIso: data.lastModifiedIso,
@@ -445,10 +472,12 @@ function AppContent() {
 
         if (typeof data.revision === 'number') {
           serverRevisionRef.current = data.revision;
+          setCurrentServerRevision(data.revision);
         }
         if (typeof data.questionsRevision === 'number') {
           questionsRevisionRef.current = data.questionsRevision;
         }
+        setLastServerSyncFormatted(new Date().toLocaleTimeString('es-CO'));
 
         if (typeof data.questionsBankExplicitlyCleared === 'boolean') {
           setQuestionsBankExplicitlyCleared(data.questionsBankExplicitlyCleared);
@@ -709,8 +738,13 @@ function AppContent() {
       };
 
       const nextAttempts = [attemptWithSyncFlag, ...stateRef.current.attempts];
-      const nextStudents = stateRef.current.students.map((s) =>
+      const rawNextStudents = stateRef.current.students.map((s) =>
         s.id === updatedStudent.id ? updatedStudent : s
+      );
+      const nextStudents = enrichStudentsWithServerSummary(
+        rawNextStudents,
+        nextAttempts,
+        stateRef.current.config.notaMinimaAprobacion ?? 3.0
       );
 
       stateRef.current.attempts = nextAttempts;
@@ -721,9 +755,12 @@ function AppContent() {
       safeWriteLocalStorage(STORAGE_KEYS.ATTEMPTS, nextAttempts);
       safeWriteLocalStorage(STORAGE_KEYS.STUDENTS, nextStudents);
 
+      const enrichedUpdatedStudent =
+        nextStudents.find((s) => s.id === updatedStudent.id) || updatedStudent;
+
       pushServerMutation('/api/state/attempt', 'POST', {
         attempt: attemptWithSyncFlag,
-        student: updatedStudent
+        student: enrichedUpdatedStudent
       });
 
       if (stateRef.current.config.webhookUrl) {
@@ -746,6 +783,61 @@ function AppContent() {
             // Remains sincronizadoSheets: false so teacher can retry in bulk from the Retry Queue
           });
       }
+    },
+    [pushServerMutation]
+  );
+
+  const handleRecordRetoAttempt = useCallback(
+    (
+      studentId: string,
+      retoAttempt: MiniRetoAttemptRecord,
+      updatedStudent: StudentRecord
+    ) => {
+      const rawNextStudents = stateRef.current.students.map((s) =>
+        s.id === updatedStudent.id ? updatedStudent : s
+      );
+      const nextStudents = enrichStudentsWithServerSummary(
+        rawNextStudents,
+        stateRef.current.attempts,
+        stateRef.current.config.notaMinimaAprobacion ?? 3.0
+      );
+      stateRef.current.students = nextStudents;
+      setStudents(nextStudents);
+      safeWriteLocalStorage(STORAGE_KEYS.STUDENTS, nextStudents);
+
+      const enrichedUpdatedStudent =
+        nextStudents.find((s) => s.id === updatedStudent.id) || updatedStudent;
+
+      pushServerMutation('/api/state/reto-attempt', 'POST', {
+        studentId,
+        retoAttempt,
+        updatedStudent: enrichedUpdatedStudent
+      });
+    },
+    [pushServerMutation]
+  );
+
+  const handleRecordAntiCheatEvent = useCallback(
+    (studentId: string, logEntry: AntiCheatLogEntry) => {
+      const nextStudents = stateRef.current.students.map((s) => {
+        if (s.id !== studentId) return s;
+        const prevLogs = Array.isArray(s.historialLlamadosAtencion)
+          ? s.historialLlamadosAtencion
+          : [];
+        const exists = prevLogs.some((l) => l && l.id === logEntry.id);
+        return {
+          ...s,
+          historialLlamadosAtencion: exists ? prevLogs : [logEntry, ...prevLogs].slice(0, 150)
+        };
+      });
+      stateRef.current.students = nextStudents;
+      setStudents(nextStudents);
+      safeWriteLocalStorage(STORAGE_KEYS.STUDENTS, nextStudents);
+
+      pushServerMutation('/api/state/anti-cheat-event', 'POST', {
+        studentId,
+        logEntry
+      });
     },
     [pushServerMutation]
   );
@@ -1061,6 +1153,8 @@ function AppContent() {
             config={config}
             attempts={attempts}
             onRecordAttempt={handleRecordAttempt}
+            onRecordRetoAttempt={handleRecordRetoAttempt}
+            onRecordAntiCheatEvent={handleRecordAntiCheatEvent}
             onUpdateLiveSession={handleUpdateLiveSession}
             onSwitchToTeacherLogin={handleSwitchToTeacherLogin}
             onSessionActiveChange={setStudentSessionActive}
@@ -1093,6 +1187,8 @@ function AppContent() {
             onUpdateCustomMiniRetos={handleUpdateCustomMiniRetos}
             onFullSystemRestore={handleFullSystemRestore}
             onForceServerSync={handleForceResyncAndClearLocalCache}
+            lastServerSyncFormatted={lastServerSyncFormatted}
+            serverRevision={currentServerRevision}
           />
         )}
       </main>

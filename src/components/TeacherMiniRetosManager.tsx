@@ -662,6 +662,111 @@ export function TeacherMiniRetosManager({
         </div>
       </div>
 
+      {/* Barra Docente de Control Anti-Trampas en Mini Retos */}
+      <div className="bg-slate-900 text-white border border-slate-800 rounded-2xl p-4 space-y-3 text-xs">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          <div className="space-y-0.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 font-bold">
+                <ShieldCheck className="w-3.5 h-3.5" />
+                <span>Escudo Anti-Trampas en Mini Retos</span>
+              </span>
+              <span className="font-mono text-[11px] text-slate-300">
+                Estado Maestro:{' '}
+                <strong
+                  className={
+                    config.antiTrampaMiniRetosActivo !== false
+                      ? 'text-emerald-300'
+                      : 'text-red-400'
+                  }
+                >
+                  {config.antiTrampaMiniRetosActivo !== false ? 'HABILITADO' : 'PAUSADO'}
+                </strong>
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-300">
+              Active o verifique individualmente cada protección anti-trampa de los Mini Retos (persistente en la Base de Datos del Servidor).
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                onUpdateConfig((prev) => ({
+                  ...prev,
+                  antiTrampaMiniRetosActivo: true,
+                  retoBloquearCambioPestanaFoco: true,
+                  retoSuspenderCopiaPegadoInyeccion: true,
+                  retoBiometriaTecleoAntiCopia: true,
+                  retoExigirPantallaCompleta: true
+                }));
+                setStatusBanner(
+                  '✓ Los 5 métodos anti-trampa de Mini Retos quedaron 100% HABILITADOS y guardados en el Servidor.'
+                );
+              }}
+              className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold flex items-center gap-1.5 cursor-pointer"
+            >
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              <span>Habilitar los 5 Métodos Anti-Trampa</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2 pt-1">
+          {[
+            {
+              key: 'antiTrampaMiniRetosActivo' as keyof SystemConfig,
+              label: '1. Escudo Maestro Retos'
+            },
+            {
+              key: 'retoBloquearCambioPestanaFoco' as keyof SystemConfig,
+              label: '2. Foco/Pestaña (1 Adv → 0.0)'
+            },
+            {
+              key: 'retoSuspenderCopiaPegadoInyeccion' as keyof SystemConfig,
+              label: '3. Bloqueo Copia/Pegado/Inyec.'
+            },
+            {
+              key: 'retoBiometriaTecleoAntiCopia' as keyof SystemConfig,
+              label: '4. Biometría Tecleo/Chatbot'
+            },
+            {
+              key: 'retoExigirPantallaCompleta' as keyof SystemConfig,
+              label: '5. Pantalla Completa Segura'
+            }
+          ].map((item) => {
+            const active = config[item.key] !== false;
+            return (
+              <button
+                key={String(item.key)}
+                type="button"
+                onClick={() => {
+                  onUpdateConfig((prev) => ({
+                    ...prev,
+                    [item.key]: !(prev[item.key] !== false)
+                  }));
+                }}
+                className={`p-2 rounded-lg border text-left font-semibold flex items-center justify-between gap-2 cursor-pointer transition-colors ${
+                  active
+                    ? 'bg-emerald-950/60 border-emerald-500/50 text-emerald-200 hover:bg-emerald-900/60'
+                    : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700'
+                }`}
+              >
+                <span className="truncate text-[11px]">{item.label}</span>
+                <span
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold shrink-0 ${
+                    active ? 'bg-emerald-500 text-slate-950' : 'bg-red-600 text-white'
+                  }`}
+                >
+                  {active ? 'ON' : 'OFF'}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       {statusBanner && (
         <div className="bg-emerald-50 border border-emerald-300 rounded-xl px-4 py-3 text-xs font-semibold text-emerald-950 flex items-center justify-between">
           <span>{statusBanner}</span>
