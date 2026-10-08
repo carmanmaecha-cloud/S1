@@ -1,0 +1,6 @@
+{
+  "name": "EvaluaPlus - Mapeo de Mercado y Comportamiento del Consumidor",
+  "description": "Gestor de exámenes, evaluación por competencias y supervisión de aula en vivo para Técnico Profesional en Marketing Digital (La Dorada, Caldas).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
