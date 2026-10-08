@@ -1192,7 +1192,7 @@ function AppContent() {
     <ServerSaveProvider onExecuteServerSave={handleExecuteServerSave}>
       <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
       {/* Strict 3-Zone Top Bar Contract with Session Isolation */}
-      <header className="bg-white border-b border-slate-200 px-4 sm:px-8 h-16 flex items-center justify-between no-print sticky top-0 z-40">
+      <header className="bg-white border-b border-slate-200 px-3 sm:px-8 h-16 flex items-center justify-between gap-2 no-print sticky top-0 z-40">
         {/* Zone 1: Single text element wordmark */}
         <a
           href="#top"
@@ -1202,16 +1202,16 @@ function AppContent() {
               setActiveView('estudiante');
             }
           }}
-          className="text-lg font-bold tracking-tight text-slate-900 font-display whitespace-nowrap"
+          className="text-base sm:text-lg font-bold tracking-tight text-slate-900 font-display whitespace-nowrap shrink-0"
         >
           EvaluaPlus
         </a>
 
         {/* Zone 2: Clean text navigation links (hides opposite panel when a session is active) */}
-        <nav className="flex items-center gap-6 text-sm font-medium text-slate-600">
+        <nav className="flex items-center gap-3 sm:gap-6 text-xs sm:text-sm font-medium text-slate-600 overflow-x-auto">
           {studentSessionActive ? (
             <span className="py-1 text-slate-900 font-semibold border-b-2 border-slate-900 whitespace-nowrap">
-              Evaluación Estudiantil
+              Portal del Estudiante
             </span>
           ) : teacherSessionActive ? (
             <span className="py-1 text-slate-900 font-semibold border-b-2 border-slate-900 whitespace-nowrap">
@@ -1225,13 +1225,13 @@ function AppContent() {
                   fetchAndApplyServerState(false);
                   setActiveView('estudiante');
                 }}
-                className={`py-1 transition-colors whitespace-nowrap cursor-pointer ${
+                className={`py-1.5 transition-colors whitespace-nowrap cursor-pointer ${
                   activeView === 'estudiante'
                     ? 'text-slate-900 font-semibold border-b-2 border-slate-900'
                     : 'hover:text-slate-900'
                 }`}
               >
-                Evaluación Estudiantil
+                Portal Estudiante
               </button>
               <button
                 type="button"
@@ -1239,7 +1239,7 @@ function AppContent() {
                   fetchAndApplyServerState(false);
                   setActiveView('docente');
                 }}
-                className={`py-1 transition-colors whitespace-nowrap cursor-pointer ${
+                className={`py-1.5 transition-colors whitespace-nowrap cursor-pointer ${
                   activeView === 'docente'
                     ? 'text-slate-900 font-semibold border-b-2 border-slate-900'
                     : 'hover:text-slate-900'
@@ -1252,12 +1252,12 @@ function AppContent() {
         </nav>
 
         {/* Zone 3: 1 Primary Action (Cerrar Sesión when logged in, or switch login view on initial screen) */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 shrink-0">
           {anySessionActive ? (
             <button
               type="button"
               onClick={handleGlobalLogout}
-              className="px-4 py-2 text-xs font-semibold text-white bg-red-600 rounded-lg hover:bg-red-700 transition-colors whitespace-nowrap cursor-pointer"
+              className="min-h-[40px] px-3.5 sm:px-4 py-2 text-xs font-bold text-white bg-red-600 rounded-xl hover:bg-red-700 transition-colors whitespace-nowrap cursor-pointer shadow-2xs"
             >
               Cerrar Sesión
             </button>
@@ -1268,9 +1268,9 @@ function AppContent() {
                 fetchAndApplyServerState(false);
                 setActiveView(activeView === 'docente' ? 'estudiante' : 'docente');
               }}
-              className="px-4 py-2 text-xs font-semibold text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition-colors whitespace-nowrap cursor-pointer"
+              className="min-h-[40px] px-3 sm:px-4 py-2 text-xs font-bold text-white bg-slate-900 rounded-xl hover:bg-slate-800 transition-colors whitespace-nowrap cursor-pointer"
             >
-              {activeView === 'docente' ? 'Ir al Portal Estudiante' : 'Administración Docente'}
+              {activeView === 'docente' ? 'Modo Estudiante' : 'Modo Docente'}
             </button>
           )}
         </div>

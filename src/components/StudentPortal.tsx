@@ -298,6 +298,8 @@ export function StudentPortal({
   // Pre-Exam Induction Confirmation Modal (1-Warning Rule Induction) & Zero Trial Simulator
   const [inductionModalOpen, setInductionModalOpen] = useState(false);
   const [zeroTrialModalOpen, setZeroTrialModalOpen] = useState(false);
+  const [examFilterStatus, setExamFilterStatus] = useState<'all' | 'pending' | 'completed'>('all');
+  const [selectedRetoModuloJump, setSelectedRetoModuloJump] = useState<1 | 2 | 3 | 4 | 5>(1);
 
   // Monotonic Clock Synchronization (performance.now() decoupled from OS wall clock tampering)
   const bootPerfNowRef = useRef<number>(performance.now());
@@ -1728,24 +1730,24 @@ export function StudentPortal({
   // ================= VIEW 1: PANTALLA INICIAL CON DOS OPCIONES (ESTUDIANTE / DOCENTE) Y VALIDACIÓN DUAL ESTRICTA =================
   if (examPhase === 'login') {
     return (
-      <div className="min-h-[calc(100vh-8rem)] flex items-center justify-center px-4 py-10">
-        <div className="w-full max-w-md bg-white border border-slate-200 rounded-2xl shadow-xs p-6 sm:p-8 space-y-6">
-          {/* Selector Dual de Rol en la Pantalla Inicial: Iniciar como Estudiante o Iniciar como Docente */}
-          <div className="grid grid-cols-2 gap-2 p-1 bg-slate-100 rounded-xl border border-slate-200">
+      <div className="min-h-[calc(100vh-8rem)] flex items-center justify-center px-4 py-8 sm:py-10">
+        <div className="w-full max-w-md bg-white border border-slate-200 rounded-2xl shadow-xs p-5 sm:p-8 space-y-6">
+          {/* Selector Dual de Rol en la Pantalla Inicial: Iniciar como Estudiante o Iniciar como Docente (Adaptado a Móvil) */}
+          <div className="grid grid-cols-2 gap-2 p-1.5 bg-slate-100 rounded-xl border border-slate-200">
             <button
               type="button"
-              className="py-2.5 px-3 rounded-lg bg-slate-900 text-white text-xs font-bold flex items-center justify-center gap-2 shadow-xs"
+              className="min-h-[48px] py-2.5 px-3 rounded-lg bg-slate-900 text-white text-xs sm:text-sm font-bold flex items-center justify-center gap-2 shadow-xs"
             >
-              <GraduationCap className="w-4 h-4" />
-              <span>Iniciar como Estudiante</span>
+              <GraduationCap className="w-4 h-4 shrink-0" />
+              <span>Soy Estudiante</span>
             </button>
             <button
               type="button"
               onClick={onSwitchToTeacherLogin}
-              className="py-2.5 px-3 rounded-lg text-slate-700 hover:text-slate-900 hover:bg-white/60 text-xs font-semibold flex items-center justify-center gap-2 transition-colors"
+              className="min-h-[48px] py-2.5 px-3 rounded-lg text-slate-700 hover:text-slate-900 hover:bg-white/80 text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer"
             >
-              <Lock className="w-3.5 h-3.5" />
-              <span>Iniciar como Docente</span>
+              <Lock className="w-4 h-4 shrink-0" />
+              <span>Soy Docente</span>
             </button>
           </div>
 
@@ -1754,10 +1756,10 @@ export function StudentPortal({
               Marketing Digital PRU · La Dorada, Caldas
             </span>
             <h1 className="text-2xl font-bold text-slate-900 tracking-tight">
-              Ingreso Oficial de Estudiante
+              Portal Oficial del Estudiante
             </h1>
-            <p className="text-sm text-slate-600">
-              Mapeo de Mercado y Comportamiento del Consumidor
+            <p className="text-xs sm:text-sm text-slate-600">
+              Ingrese su documento y código de sesión para acceder a sus Exámenes, Mini Retos e Historial de Notas.
             </p>
           </div>
 
@@ -1766,11 +1768,11 @@ export function StudentPortal({
             <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 space-y-2 text-xs text-amber-950">
               <div className="flex items-center gap-2 font-bold text-amber-900">
                 <Clock className="w-4 h-4 shrink-0 text-amber-700 animate-spin" />
-                <span>Sala de Espera Activa · Evaluación Cerrada por el Docente</span>
+                <span>Aviso · Exámenes en Sala de Espera (Mini Retos y Notas Disponibles)</span>
               </div>
               <p className="leading-relaxed">
                 {config.mensajeSalaEspera ||
-                  'Por favor espere las indicaciones del docente en el aula para dar inicio a la sesión.'}
+                  'Puede iniciar sesión normalmente para consultar sus notas, diagnóstico o presentar Mini Retos mientras el docente habilita los exámenes.'}
               </p>
             </div>
           )}
@@ -1818,23 +1820,25 @@ export function StudentPortal({
 
           <form onSubmit={handleLoginSubmit} className="space-y-4">
             <div className="space-y-1.5">
-              <label htmlFor="docId" className="block text-xs font-semibold text-slate-800">
-                ID de Estudiante (Documento de Identidad)
+              <label htmlFor="docId" className="block text-xs sm:text-sm font-bold text-slate-800">
+                1. Número de Documento (ID de Estudiante)
               </label>
               <input
                 id="docId"
                 type="text"
+                inputMode="numeric"
                 required
                 autoComplete="off"
+                placeholder="Ej. 1054998123"
                 value={docIdInput}
                 onChange={(e) => setDocIdInput(e.target.value)}
-                className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 text-sm font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-600 focus:border-transparent"
+                className="w-full min-h-[48px] px-4 py-3 rounded-xl border border-slate-300 text-base sm:text-sm font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-600 focus:border-transparent"
               />
             </div>
 
             <div className="space-y-1.5">
-              <label htmlFor="accessCode" className="block text-xs font-semibold text-slate-800">
-                Código de Acceso de Sesión
+              <label htmlFor="accessCode" className="block text-xs sm:text-sm font-bold text-slate-800">
+                2. Código de Acceso de Sesión
               </label>
               <input
                 id="accessCode"
@@ -1842,16 +1846,17 @@ export function StudentPortal({
                 required
                 autoComplete="off"
                 maxLength={24}
+                placeholder="Ingrese su código personal"
                 value={accessCodeInput}
                 onChange={(e) => setAccessCodeInput(e.target.value.toUpperCase())}
-                className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 text-sm font-mono uppercase text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-600 focus:border-transparent"
+                className="w-full min-h-[48px] px-4 py-3 rounded-xl border border-slate-300 text-base sm:text-sm font-mono uppercase text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-600 focus:border-transparent"
               />
             </div>
 
             {config.exigirPinAula && (
               <div className="space-y-1.5 pt-1">
-                <label htmlFor="classroomPin" className="block text-xs font-semibold text-sky-900">
-                  PIN de Aula Temporal del Día (Proyectado por el Docente)
+                <label htmlFor="classroomPin" className="block text-xs sm:text-sm font-bold text-sky-900">
+                  3. PIN de Aula Temporal del Día (Proyectado por el Docente)
                 </label>
                 <input
                   id="classroomPin"
@@ -1860,21 +1865,21 @@ export function StudentPortal({
                   autoComplete="off"
                   value={classroomPinInput}
                   onChange={(e) => setClassroomPinInput(e.target.value.toUpperCase())}
-                  className="w-full px-3.5 py-2.5 rounded-lg border border-sky-300 bg-sky-50/50 text-sm font-mono uppercase text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-600"
+                  className="w-full min-h-[48px] px-4 py-3 rounded-xl border border-sky-300 bg-sky-50/50 text-base sm:text-sm font-mono uppercase text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-600"
                 />
               </div>
             )}
 
             <button
               type="submit"
-              className="w-full py-3 px-4 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-semibold text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer"
+              className="w-full min-h-[52px] py-3.5 px-5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-bold text-base sm:text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-xs"
             >
-              <span>Iniciar Sesión</span>
-              <ArrowRight className="w-4 h-4" />
+              <span>Ingresar a Mi Panel Estudiantil</span>
+              <ArrowRight className="w-5 h-5" />
             </button>
           </form>
 
-          {/* Directriz Institucional de Control Exclusivo del Docente (Sin enlaces de recuperación ni modo demo en inicio) */}
+          {/* Directriz Institucional de Control Exclusivo del Docente */}
           <div className="pt-3 border-t border-slate-100 text-xs text-slate-500 leading-relaxed">
             <div className="flex items-start gap-2">
               <Lock className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
@@ -1888,73 +1893,166 @@ export function StudentPortal({
     );
   }
 
-  // ================= VIEW 2: PANEL DEL ESTUDIANTE CON SESIÓN INICIADA (ACTIVA) =================
+  // ================= VIEW 2: PANEL DEL ESTUDIANTE CON SESIÓN INICIADA (ACTIVA) — REORGANIZADO PARA WEB Y MÓVIL =================
   if (examPhase === 'modality_select' && currentStudent) {
     const selectedModStats = getModalityAttemptStats(selectedModality);
     const selectedModConfig =
       activeModalityOptions.find((m) => m.id === selectedModality) || activeModalityOptions[0];
 
+    // Summary counters for the Student Status Overview
+    const modalitiesOverview = activeModalityOptions.map((m) => {
+      const st = getModalityAttemptStats(m.id);
+      return {
+        ...m,
+        stats: st,
+        hasCompletedAttempt: st.count > 0
+      };
+    });
+    const completedExamsCount = modalitiesOverview.filter((m) => m.hasCompletedAttempt).length;
+    const pendingExamsCount = Math.max(0, modalitiesOverview.length - completedExamsCount);
+    const unlockedBadgesCount = ([1, 2, 3, 4, 5] as const).filter(
+      (m) => currentStudent.progresoRetos?.[m]?.insigniaDesbloqueada
+    ).length;
+    const pendingRetosCount = Math.max(0, 5 - unlockedBadgesCount);
+    const studentBestOverallGrade =
+      studentAttempts.length > 0
+        ? Math.max(...studentAttempts.map((a) => a.notaColombiana))
+        : 0;
+    const minPass = Number(config.notaMinimaAprobacion) || 3.0;
+
+    const filteredModalityOptions = modalitiesOverview.filter((m) => {
+      if (examFilterStatus === 'pending') return !m.hasCompletedAttempt || (!m.stats.isExhausted && m.stats.count < 2);
+      if (examFilterStatus === 'completed') return m.hasCompletedAttempt;
+      return true;
+    });
+
     return (
-      <div className="max-w-5xl mx-auto px-4 py-8 space-y-6">
-        {/* Header de Bienvenida con Nombre Verificado, Simulador Prueba Cero, Botón Modificar Datos y Botón Cambiar Usuario */}
-        <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-          <div className="space-y-1">
-            <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-md">
-              <UserCheck className="w-3.5 h-3.5" />
-              <span>Sesión Estudiantil Activa y Verificada</span>
+      <div className="max-w-5xl mx-auto px-3 sm:px-4 pt-5 pb-24 sm:py-8 space-y-5 sm:space-y-6">
+        {/* 1. CABECERA DE IDENTIDAD, HERRAMIENTAS RÁPIDAS Y RESUMEN DE ESTADO DEL ESTUDIANTE */}
+        <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 shadow-xs space-y-4">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+            <div className="space-y-1.5">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
+                <span className="inline-flex items-center gap-1.5 font-bold text-emerald-800">
+                  <UserCheck className="w-4 h-4 text-emerald-600" />
+                  <span>Sesión Estudiantil Activa</span>
+                </span>
+                <span aria-hidden="true">·</span>
+                <span className="font-mono">
+                  ID: <strong className="text-slate-900">{currentStudent.id}</strong>
+                </span>
+                <span aria-hidden="true">·</span>
+                <span className="font-mono">
+                  Código: <strong className="text-slate-900">{currentStudent.codigoAcceso}</strong>
+                </span>
+              </div>
+              <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
+                Hola, {currentStudent.nombre}
+              </h1>
             </div>
-            <h1 className="text-xl sm:text-2xl font-bold text-slate-900">
-              Bienvenido(a), {currentStudent.nombre}
-            </h1>
-            <p className="text-xs text-slate-600 font-mono">
-              ID de Estudiante (Solo Lectura): <strong>{currentStudent.id}</strong> · Código de Acceso Activo:{' '}
-              <strong>{currentStudent.codigoAcceso}</strong>
-            </p>
+
+            {/* Botones de Herramientas Rápidas — Grandes y Adaptados a Móvil (grid en móvil, fila en web) */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 lg:flex items-stretch sm:items-center gap-2.5">
+              <button
+                type="button"
+                onClick={() => setZeroTrialModalOpen(true)}
+                className="min-h-[48px] px-4 py-2.5 rounded-xl border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-xs sm:text-sm font-bold text-emerald-950 flex items-center justify-center gap-2 cursor-pointer transition-colors"
+              >
+                <PlayCircle className="w-4 h-4 text-emerald-700 shrink-0" />
+                <span>Prueba Cero (Ensayo Gratis)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setProfileNameInput(currentStudent.nombre);
+                  setProfileCodeInput(currentStudent.codigoAcceso);
+                  setProfileSaveMsg(null);
+                  setEditProfileModalOpen(true);
+                }}
+                className="min-h-[48px] px-4 py-2.5 rounded-xl border border-sky-200 bg-sky-50 hover:bg-sky-100 text-xs sm:text-sm font-bold text-sky-950 flex items-center justify-center gap-2 cursor-pointer transition-colors"
+              >
+                <Edit3 className="w-4 h-4 text-sky-700 shrink-0" />
+                <span>Modificar Mis Datos</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  if (currentStudent) {
+                    onUpdateLiveSession(null, currentStudent.id);
+                  }
+                  logoutStudent();
+                  setVerifiedStudentId(null);
+                  setDocIdInput('');
+                  setAccessCodeInput('');
+                  setClassroomPinInput('');
+                  setThirdAttemptBlockedModal(null);
+                  setExamPhase('login');
+                }}
+                className="min-h-[48px] px-4 py-2.5 rounded-xl border border-red-200 bg-red-50/80 hover:bg-red-100 text-xs sm:text-sm font-bold text-red-900 flex items-center justify-center gap-2 cursor-pointer transition-colors"
+              >
+                <RotateCcw className="w-4 h-4 text-red-700 shrink-0" />
+                <span>Salir / Cambiar Usuario</span>
+              </button>
+            </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2.5">
-            <button
-              type="button"
-              onClick={() => setZeroTrialModalOpen(true)}
-              className="px-3.5 py-2 rounded-lg border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-xs font-semibold text-emerald-900 flex items-center gap-1.5 cursor-pointer"
-            >
-              <PlayCircle className="w-3.5 h-3.5 text-emerald-700" />
-              <span>Simulador de Prueba Cero (2 Preguntas · Sin Gastar Intentos)</span>
-            </button>
+          {/* Cinta de Estado General en Tiempo Real (4 Indicadores Claros para Móvil 2x2 y Web 4 cols) */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-3 pt-3 border-t border-slate-100">
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80 space-y-0.5">
+              <div className="text-[11px] font-semibold text-slate-500">Estado de Exámenes</div>
+              <div className="text-sm sm:text-base font-bold font-mono tabular-nums text-slate-900">
+                {completedExamsCount} / {modalitiesOverview.length} realizados
+              </div>
+              <div className="text-[11px] text-slate-600">
+                {pendingExamsCount === 0
+                  ? '✓ Todos presentados'
+                  : `⏳ ${pendingExamsCount} pendiente(s)`}
+              </div>
+            </div>
 
-            <button
-              type="button"
-              onClick={() => {
-                setProfileNameInput(currentStudent.nombre);
-                setProfileCodeInput(currentStudent.codigoAcceso);
-                setProfileSaveMsg(null);
-                setEditProfileModalOpen(true);
-              }}
-              className="px-3.5 py-2 rounded-lg border border-sky-200 bg-sky-50 hover:bg-sky-100 text-xs font-semibold text-sky-900 flex items-center gap-1.5"
-            >
-              <Edit3 className="w-3.5 h-3.5" />
-              <span>Modificar Datos del Estudiante</span>
-            </button>
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80 space-y-0.5">
+              <div className="text-[11px] font-semibold text-slate-500">Estado de Mini Retos</div>
+              <div className="text-sm sm:text-base font-bold font-mono tabular-nums text-slate-900">
+                {unlockedBadgesCount} / 5 insignias
+              </div>
+              <div className="text-[11px] text-slate-600">
+                {pendingRetosCount === 0
+                  ? '🏆 5/5 completados'
+                  : `⏳ ${pendingRetosCount} reto(s) por superar`}
+              </div>
+            </div>
 
-            <button
-              type="button"
-              onClick={() => {
-                if (currentStudent) {
-                  onUpdateLiveSession(null, currentStudent.id);
-                }
-                logoutStudent();
-                setVerifiedStudentId(null);
-                setDocIdInput('');
-                setAccessCodeInput('');
-                setClassroomPinInput('');
-                setThirdAttemptBlockedModal(null);
-                setExamPhase('login');
-              }}
-              className="px-3.5 py-2 rounded-lg border border-red-200 bg-red-50/70 text-xs font-semibold text-red-800 hover:bg-red-100 flex items-center gap-1.5 cursor-pointer"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              <span>Cerrar Sesión / Cambiar de Usuario</span>
-            </button>
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80 space-y-0.5">
+              <div className="text-[11px] font-semibold text-slate-500">Mejor Nota Examen</div>
+              <div
+                className={`text-sm sm:text-base font-bold font-mono tabular-nums ${
+                  studentAttempts.length === 0
+                    ? 'text-slate-700'
+                    : studentBestOverallGrade >= minPass
+                    ? 'text-emerald-700'
+                    : 'text-amber-700'
+                }`}
+              >
+                {studentAttempts.length > 0
+                  ? `${studentBestOverallGrade.toFixed(1)} / 5.0`
+                  : 'Sin entregas'}
+              </div>
+              <div className="text-[11px] text-slate-600">
+                {studentAttempts.length} intento(s) en total
+              </div>
+            </div>
+
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80 space-y-0.5">
+              <div className="text-[11px] font-semibold text-slate-500">Seguridad de Sesión</div>
+              <div className="text-sm sm:text-base font-bold text-emerald-800">
+                {currentStudent.suspendido ? '⚠️ Suspendida' : '🛡️ Habilitada'}
+              </div>
+              <div className="text-[11px] text-slate-600 font-mono">
+                Límite: {maxLlamadosPermitidos} llamado(s)
+              </div>
+            </div>
           </div>
         </div>
 
@@ -1970,103 +2068,292 @@ export function StudentPortal({
           }}
         />
 
-        {/* Dashboard de Rendimiento Estudiantil (Recharts: Evolución de Calificaciones vs. Promedio del Curso) */}
-        <StudentPerformanceDashboard
-          studentId={currentStudent.id}
-          studentName={currentStudent.nombre}
-          studentAttempts={studentAttempts}
-          allAttempts={attempts}
-          minPassingGrade={Number(config.notaMinimaAprobacion) || 3.0}
-        />
-
-        {/* Pestañas Internas del Panel del Estudiante */}
-        <div className="flex flex-wrap items-center gap-2 bg-white border border-slate-200 rounded-xl p-2">
-          <button
-            type="button"
-            onClick={() => setStudentDashboardTab('modalidades')}
-            className={`px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition-colors ${
-              studentDashboardTab === 'modalidades'
-                ? 'bg-slate-900 text-white'
-                : 'text-slate-700 hover:bg-slate-100'
-            }`}
-          >
-            <BookOpen className="w-4 h-4" />
-            <span>Exámenes Disponibles y Selector de Modalidad</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setStudentDashboardTab('mis_notas')}
-            className={`px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition-colors ${
-              studentDashboardTab === 'mis_notas'
-                ? 'bg-slate-900 text-white'
-                : 'text-slate-700 hover:bg-slate-100'
-            }`}
-          >
-            <Award className="w-4 h-4" />
-            <span>Notas Obtenidas en Exámenes Realizados ({studentAttempts.length})</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setStudentDashboardTab('diagnostico_pedagogico')}
-            className={`px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition-colors cursor-pointer ${
-              studentDashboardTab === 'diagnostico_pedagogico'
-                ? 'bg-slate-900 text-white'
-                : 'text-slate-700 hover:bg-slate-100'
-            }`}
-          >
-            <BarChart3 className="w-4 h-4" />
-            <span>Diagnóstico Pedagógico (Módulos y Bloom)</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setStudentDashboardTab('mini_retos')}
-            className={`px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition-colors cursor-pointer ${
-              studentDashboardTab === 'mini_retos'
-                ? 'bg-amber-500 text-slate-950 shadow-xs'
-                : 'bg-amber-50 text-amber-900 border border-amber-300 hover:bg-amber-100'
-            }`}
-          >
-            <Trophy className="w-4 h-4" />
-            <span>
-              🏅 Zona de Retos & Insignias (
-              {
-                ([1, 2, 3, 4, 5] as const).filter(
-                  (m) => currentStudent.progresoRetos?.[m]?.insigniaDesbloqueada
-                ).length
-              }
-              /5)
+        {/* 2. MENÚ PRINCIPAL DE VENTANAS DEL ESTUDIANTE (4 BOTONES GRANDES E IDENTIFICABLES EN WEB Y MÓVIL) */}
+        <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 shadow-xs space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-xs sm:text-sm font-bold uppercase tracking-wider text-slate-700">
+              Menú Principal del Estudiante · Seleccione una Ventana:
+            </h2>
+            <span className="text-xs text-slate-500">
+              Toque cualquiera de los 4 botones grandes para cambiar de sección
             </span>
-          </button>
-        </div>
+          </div>
 
-        {/* SUB-TAB 1: SELECTOR DE MODALIDAD DEL EXAMEN Y CONTROL ESTRICTO DE 2 INTENTOS POR MODALIDAD */}
-        {studentDashboardTab === 'modalidades' && (
-          <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs space-y-5">
-            {(!config.examenAbierto ||
-              (config.estudiantesConEstadoCerrado || []).includes(currentStudent.id)) && (
-              <div className="bg-amber-50 border-2 border-amber-300 rounded-xl p-4 flex items-start gap-3 text-xs text-amber-950">
-                <Clock className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
-                <div className="space-y-1">
-                  <div className="font-bold text-amber-900">
-                    Estado Maestro del Examen: CERRADO (Deshabilitado por el Docente para su sesión)
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            {/* Botón Grande 1: Exámenes Oficiales */}
+            <button
+              type="button"
+              onClick={() => setStudentDashboardTab('modalidades')}
+              className={`min-h-[88px] p-4 rounded-xl border text-left transition-all flex flex-col justify-between cursor-pointer ${
+                studentDashboardTab === 'modalidades'
+                  ? 'bg-slate-900 text-white border-slate-900 shadow-sm ring-2 ring-sky-500/40'
+                  : 'bg-slate-50/80 hover:bg-slate-100 text-slate-900 border-slate-200'
+              }`}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-2.5">
+                  <div
+                    className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
+                      studentDashboardTab === 'modalidades'
+                        ? 'bg-sky-500 text-white'
+                        : 'bg-sky-100 text-sky-800'
+                    }`}
+                  >
+                    <BookOpen className="w-5 h-5" />
                   </div>
-                  <p>
-                    {config.mensajeSalaEspera ||
-                      'El docente ha cerrado temporalmente el inicio de evaluaciones. Puede consultar sus notas y diagnóstico mientras el docente habilita (ABIERTO) su acceso.'}
-                  </p>
+                  <div>
+                    <div
+                      className={`text-[11px] font-mono font-bold uppercase ${
+                        studentDashboardTab === 'modalidades' ? 'text-sky-300' : 'text-sky-700'
+                      }`}
+                    >
+                      Ventana 1
+                    </div>
+                    <div className="text-sm sm:text-base font-bold leading-tight">
+                      Exámenes Oficiales
+                    </div>
+                  </div>
                 </div>
               </div>
+              <div
+                className={`mt-3 pt-2 border-t text-xs flex items-center justify-between ${
+                  studentDashboardTab === 'modalidades'
+                    ? 'border-slate-700 text-slate-200'
+                    : 'border-slate-200/80 text-slate-600'
+                }`}
+              >
+                <span>Integral y Módulos 1–5</span>
+                <span className="font-mono font-bold">
+                  {completedExamsCount}/{modalitiesOverview.length} listos
+                </span>
+              </div>
+            </button>
+
+            {/* Botón Grande 2: Mini Retos e Insignias */}
+            <button
+              type="button"
+              onClick={() => setStudentDashboardTab('mini_retos')}
+              className={`min-h-[88px] p-4 rounded-xl border text-left transition-all flex flex-col justify-between cursor-pointer ${
+                studentDashboardTab === 'mini_retos'
+                  ? 'bg-amber-500 text-slate-950 border-amber-600 shadow-sm ring-2 ring-amber-400'
+                  : 'bg-amber-50/70 hover:bg-amber-100/80 text-slate-900 border-amber-300'
+              }`}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-2.5">
+                  <div
+                    className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
+                      studentDashboardTab === 'mini_retos'
+                        ? 'bg-slate-950 text-amber-400'
+                        : 'bg-amber-200 text-amber-950'
+                    }`}
+                  >
+                    <Trophy className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div
+                      className={`text-[11px] font-mono font-bold uppercase ${
+                        studentDashboardTab === 'mini_retos' ? 'text-slate-900' : 'text-amber-900'
+                      }`}
+                    >
+                      Ventana 2
+                    </div>
+                    <div className="text-sm sm:text-base font-bold leading-tight">
+                      Mini Retos & Insignias
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div
+                className={`mt-3 pt-2 border-t text-xs flex items-center justify-between ${
+                  studentDashboardTab === 'mini_retos'
+                    ? 'border-amber-600/50 text-slate-950 font-semibold'
+                    : 'border-amber-200 text-amber-950'
+                }`}
+              >
+                <span>Retos IA Módulos 1–5</span>
+                <span className="font-mono font-bold">🏅 {unlockedBadgesCount}/5 ganadas</span>
+              </div>
+            </button>
+
+            {/* Botón Grande 3: Mis Notas y Estado General */}
+            <button
+              type="button"
+              onClick={() => setStudentDashboardTab('mis_notas')}
+              className={`min-h-[88px] p-4 rounded-xl border text-left transition-all flex flex-col justify-between cursor-pointer ${
+                studentDashboardTab === 'mis_notas'
+                  ? 'bg-slate-900 text-white border-slate-900 shadow-sm ring-2 ring-emerald-500/40'
+                  : 'bg-slate-50/80 hover:bg-slate-100 text-slate-900 border-slate-200'
+              }`}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-2.5">
+                  <div
+                    className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
+                      studentDashboardTab === 'mis_notas'
+                        ? 'bg-emerald-500 text-white'
+                        : 'bg-emerald-100 text-emerald-800'
+                    }`}
+                  >
+                    <Award className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div
+                      className={`text-[11px] font-mono font-bold uppercase ${
+                        studentDashboardTab === 'mis_notas'
+                          ? 'text-emerald-300'
+                          : 'text-emerald-700'
+                      }`}
+                    >
+                      Ventana 3
+                    </div>
+                    <div className="text-sm sm:text-base font-bold leading-tight">
+                      Mis Notas y Estado
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div
+                className={`mt-3 pt-2 border-t text-xs flex items-center justify-between ${
+                  studentDashboardTab === 'mis_notas'
+                    ? 'border-slate-700 text-slate-200'
+                    : 'border-slate-200/80 text-slate-600'
+                }`}
+              >
+                <span>Certificados y Pendientes</span>
+                <span className="font-mono font-bold">{studentAttempts.length} entregas</span>
+              </div>
+            </button>
+
+            {/* Botón Grande 4: Diagnóstico por Módulos */}
+            <button
+              type="button"
+              onClick={() => setStudentDashboardTab('diagnostico_pedagogico')}
+              className={`min-h-[88px] p-4 rounded-xl border text-left transition-all flex flex-col justify-between cursor-pointer ${
+                studentDashboardTab === 'diagnostico_pedagogico'
+                  ? 'bg-slate-900 text-white border-slate-900 shadow-sm ring-2 ring-indigo-500/40'
+                  : 'bg-slate-50/80 hover:bg-slate-100 text-slate-900 border-slate-200'
+              }`}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-2.5">
+                  <div
+                    className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
+                      studentDashboardTab === 'diagnostico_pedagogico'
+                        ? 'bg-indigo-500 text-white'
+                        : 'bg-indigo-100 text-indigo-800'
+                    }`}
+                  >
+                    <BarChart3 className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div
+                      className={`text-[11px] font-mono font-bold uppercase ${
+                        studentDashboardTab === 'diagnostico_pedagogico'
+                          ? 'text-indigo-300'
+                          : 'text-indigo-700'
+                      }`}
+                    >
+                      Ventana 4
+                    </div>
+                    <div className="text-sm sm:text-base font-bold leading-tight">
+                      Diagnóstico y Temas
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div
+                className={`mt-3 pt-2 border-t text-xs flex items-center justify-between ${
+                  studentDashboardTab === 'diagnostico_pedagogico'
+                    ? 'border-slate-700 text-slate-200'
+                    : 'border-slate-200/80 text-slate-600'
+                }`}
+              >
+                <span>Módulos 1–5 y Nivel Bloom</span>
+                <span className="font-mono font-bold">Ver Avance →</span>
+              </div>
+            </button>
+          </div>
+        </div>
+
+        {/* ================= VENTANA 1: EXÁMENES DISPONIBLES Y ESTADO DE CADA EVALUACIÓN ================= */}
+        {studentDashboardTab === 'modalidades' && (
+          <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 shadow-xs space-y-5">
+            {(!config.examenAbierto ||
+              (config.estudiantesConEstadoCerrado || []).includes(currentStudent.id)) && (
+              <div className="bg-amber-50 border-2 border-amber-300 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-amber-950">
+                <div className="flex items-start gap-3">
+                  <Clock className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+                  <div className="space-y-1">
+                    <div className="font-bold text-amber-900 text-sm">
+                      Estado Maestro del Examen: CERRADO temporalmente por el Docente
+                    </div>
+                    <p>
+                      {config.mensajeSalaEspera ||
+                        'El docente ha pausado temporalmente el inicio de exámenes. Mientras tanto, puede presentar Mini Retos o revisar sus Notas.'}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setStudentDashboardTab('mini_retos')}
+                  className="min-h-[44px] px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shrink-0 cursor-pointer"
+                >
+                  🏅 Ir a Mini Retos Disponibles →
+                </button>
+              </div>
             )}
-            <div className="space-y-1">
-              <h2 className="text-lg font-bold text-slate-900">
-                Seleccione la Modalidad de Evaluación a Presentar
-              </h2>
-              <p className="text-xs text-slate-600 leading-relaxed">
-                Usted dispone de un máximo de <strong>2 intentos independientes por cada modalidad de examen</strong> (Intento 2 carga preguntas 100% nuevas sin repetir ninguna del Intento 1). Se conserva la nota más alta: <code>Math.max(Intento1, Intento2)</code>.
-              </p>
+
+            {/* Encabezado y Filtros Claros de Estado de Exámenes */}
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-slate-100 pb-4">
+              <div className="space-y-1">
+                <span className="text-xs font-mono font-bold uppercase tracking-wider text-sky-700">
+                  Ventana 1 · Evaluaciones Oficiales
+                </span>
+                <h2 className="text-lg sm:text-xl font-bold text-slate-900">
+                  Seleccione el Examen que Desea Presentar o Consultar
+                </h2>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  Dispone de <strong>2 intentos por examen</strong> (el Intento #2 carga preguntas 100% nuevas). Se conserva su nota más alta (<code>Math.max</code>).
+                </p>
+              </div>
+
+              {/* Botones de Filtro Rápido de Estado (Adaptados a Móvil y Web) */}
+              <div className="grid grid-cols-3 sm:flex items-center gap-1.5 p-1.5 bg-slate-100 rounded-xl border border-slate-200 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setExamFilterStatus('all')}
+                  className={`min-h-[42px] px-3 py-2 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                    examFilterStatus === 'all'
+                      ? 'bg-slate-900 text-white shadow-2xs'
+                      : 'text-slate-700 hover:text-slate-900'
+                  }`}
+                >
+                  Todos ({modalitiesOverview.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setExamFilterStatus('pending')}
+                  className={`min-h-[42px] px-3 py-2 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                    examFilterStatus === 'pending'
+                      ? 'bg-sky-600 text-white shadow-2xs'
+                      : 'text-slate-700 hover:text-slate-900'
+                  }`}
+                >
+                  Disponibles
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setExamFilterStatus('completed')}
+                  className={`min-h-[42px] px-3 py-2 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                    examFilterStatus === 'completed'
+                      ? 'bg-emerald-600 text-white shadow-2xs'
+                      : 'text-slate-700 hover:text-slate-900'
+                  }`}
+                >
+                  Realizados ({completedExamsCount})
+                </button>
+              </div>
             </div>
 
             {thirdAttemptBlockedModal && (
@@ -2080,7 +2367,7 @@ export function StudentPortal({
                 <div className="bg-white rounded-lg p-3 border border-amber-200 flex flex-wrap items-center justify-between gap-3 font-mono">
                   <div className="space-y-0.5">
                     <div>
-                      Evaluación deshabilitada: <strong>{thirdAttemptBlockedModal.modalidadLabel}</strong>
+                      Evaluación completada: <strong>{thirdAttemptBlockedModal.modalidadLabel}</strong>
                     </div>
                     <div>
                       Intento 1:{' '}
@@ -2101,162 +2388,200 @@ export function StudentPortal({
                     Nota Definitiva Más Alta (Math.max): {thirdAttemptBlockedModal.bestGrade.toFixed(1)} / 5.0
                   </div>
                 </div>
-                <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-1">
                   <span className="text-amber-900 font-medium">
-                    Esta evaluación ya cumplió sus 2 intentos en el registro oficial. Puede volver al panel principal o seleccionar otro examen disponible:
+                    Esta evaluación ya cumplió sus 2 intentos oficiales. Seleccione otro examen disponible:
                   </span>
                   <div className="flex flex-wrap items-center gap-2">
                     <button
                       type="button"
                       onClick={() => setThirdAttemptBlockedModal(null)}
-                      className="px-3 py-2 rounded-lg border border-amber-400 bg-white hover:bg-amber-100 text-amber-950 font-semibold text-xs cursor-pointer"
+                      className="min-h-[44px] px-4 py-2 rounded-xl border border-amber-400 bg-white hover:bg-amber-100 text-amber-950 font-bold text-xs cursor-pointer"
                     >
-                      Volver al Panel Principal
+                      Cerrar Aviso
                     </button>
                     <button
                       type="button"
                       onClick={() => handleReturnToMainStudentPanel(selectedModality)}
-                      className="px-3.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-semibold text-xs flex items-center gap-1.5 cursor-pointer"
+                      className="min-h-[44px] px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer"
                     >
-                      <span>Elegir Otro Examen Disponible</span>
-                      <ArrowRight className="w-3.5 h-3.5" />
+                      <span>Seleccionar Otro Examen Disponible</span>
+                      <ArrowRight className="w-4 h-4" />
                     </button>
                   </div>
                 </div>
               </div>
             )}
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-              {activeModalityOptions.map((mod) => {
+            {/* Tarjetas de Exámenes Reorganizadas con Estado Claro y Botones Grandes para Móvil y Web */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {filteredModalityOptions.map((mod) => {
                 const isSelected = selectedModality === mod.id;
-                const st = getModalityAttemptStats(mod.id);
-                const isDisabledForStart = st.count >= 2 || st.isExhausted || st.isBlockedByTeacher;
+                const st = mod.stats;
+                const isMasterClosed =
+                  !config.examenAbierto ||
+                  (config.estudiantesConEstadoCerrado || []).includes(currentStudent.id);
+                const isDisabledForStart =
+                  st.count >= 2 || st.isExhausted || st.isBlockedByTeacher || isMasterClosed;
 
                 return (
                   <div
                     key={mod.id}
                     onClick={() => handleSelectExamModality(mod.id, false)}
-                    className={`text-left p-4 rounded-xl border transition-all cursor-pointer flex flex-col justify-between space-y-3 ${
+                    className={`text-left p-4 sm:p-5 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between space-y-4 ${
                       isDisabledForStart
                         ? isSelected
-                          ? 'border-amber-500 bg-amber-50/40 ring-1 ring-amber-500'
-                          : 'border-slate-200 bg-slate-100/80 opacity-85'
+                          ? 'border-amber-500 bg-amber-50/40 ring-2 ring-amber-500/50'
+                          : 'border-slate-200 bg-slate-50/90'
                         : isSelected
-                        ? 'border-sky-600 bg-sky-50/60 ring-1 ring-sky-600'
+                        ? 'border-sky-600 bg-sky-50/60 ring-2 ring-sky-600/50 shadow-xs'
                         : 'border-slate-200 hover:border-slate-300 bg-white'
                     }`}
                   >
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-xs font-mono font-semibold text-sky-800">{mod.badge}</span>
+                    <div className="space-y-2.5">
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                        <span className="font-mono font-bold text-sky-900">{mod.badge}</span>
                         <span
-                          className={`text-[11px] font-mono font-bold px-2 py-0.5 rounded ${
+                          className={`font-mono font-bold px-2.5 py-1 rounded-md ${
                             st.isBlockedByTeacher
                               ? 'bg-red-100 text-red-800'
                               : st.count >= 2 || st.isExhausted
-                              ? 'bg-amber-200 text-amber-950'
-                              : 'bg-emerald-50 text-emerald-800'
+                              ? 'bg-emerald-100 text-emerald-900'
+                              : st.count === 1
+                              ? 'bg-sky-100 text-sky-900'
+                              : 'bg-slate-100 text-slate-800'
                           }`}
                         >
                           {st.isBlockedByTeacher
                             ? '🔒 Bloqueado por Docente'
                             : st.count >= 2 || st.isExhausted
-                            ? `🔒 Deshabilitado (${st.count}/2 Intentos)`
-                            : `Disponible · Intentos: ${st.count} / ${st.maxAllowed}`}
+                            ? `✓ Completado (2/2 Intentos)`
+                            : st.count === 1
+                            ? `1 Intento Usado · Queda 1`
+                            : `⏳ Pendiente (0/${st.maxAllowed} Intentos)`}
                         </span>
                       </div>
-                      <div className="text-sm font-bold text-slate-900">{mod.title}</div>
+
+                      <h3 className="text-base font-bold text-slate-900 leading-snug">
+                        {mod.title}
+                      </h3>
                       <p className="text-xs text-slate-600 leading-relaxed">{mod.subtitle}</p>
                     </div>
 
-                    <div className="pt-2 border-t border-slate-200/80 space-y-2">
-                      {st.count > 0 && (
-                        <div className="flex items-center justify-between text-xs font-mono bg-white/80 px-2.5 py-1.5 rounded-lg border border-slate-200">
-                          <span>
-                            Intento 1: <strong>{st.att1 ? st.att1.notaColombiana.toFixed(1) : '—'}</strong>
-                            {' · '}
-                            Intento 2: <strong>{st.att2 ? st.att2.notaColombiana.toFixed(1) : '—'}</strong>
-                          </span>
-                          <span className="font-bold text-emerald-800">
-                            Nota Definitiva (Math.max): {st.bestGrade.toFixed(1)} / 5.0
-                          </span>
+                    {/* Estado de Intentos y Nota Definitiva en 3 Cajas Claras */}
+                    <div className="space-y-3 pt-3 border-t border-slate-200/80">
+                      <div className="grid grid-cols-3 gap-2 text-center font-mono text-xs">
+                        <div className="p-2 rounded-xl bg-white border border-slate-200">
+                          <div className="text-[10px] font-sans text-slate-500">Intento #1</div>
+                          <div className="font-bold text-slate-900">
+                            {st.att1 ? `${st.att1.notaColombiana.toFixed(1)}` : '—'}
+                          </div>
                         </div>
-                      )}
+                        <div className="p-2 rounded-xl bg-white border border-slate-200">
+                          <div className="text-[10px] font-sans text-slate-500">Intento #2</div>
+                          <div className="font-bold text-slate-900">
+                            {st.att2 ? `${st.att2.notaColombiana.toFixed(1)}` : '—'}
+                          </div>
+                        </div>
+                        <div
+                          className={`p-2 rounded-xl border ${
+                            st.count > 0
+                              ? st.bestGrade >= minPass
+                                ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                                : 'bg-amber-50 border-amber-200 text-amber-900'
+                              : 'bg-slate-50 border-slate-200 text-slate-500'
+                          }`}
+                        >
+                          <div className="text-[10px] font-sans font-semibold">Definitiva</div>
+                          <div className="font-bold">
+                            {st.count > 0 ? `${st.bestGrade.toFixed(1)} / 5.0` : 'Sin nota'}
+                          </div>
+                        </div>
+                      </div>
 
-                      <button
-                        type="button"
-                        disabled={isDisabledForStart}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleSelectExamModality(mod.id, true);
-                        }}
-                        className="w-full py-2 px-3 rounded-lg bg-sky-600 hover:bg-sky-700 disabled:bg-slate-200 disabled:text-slate-500 disabled:border disabled:border-slate-300 disabled:cursor-not-allowed text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                      >
-                        {st.isBlockedByTeacher ? (
-                          <span>🔒 Examen Bloqueado por Docente</span>
-                        ) : st.count >= 2 || st.isExhausted ? (
-                          <span>
-                            ✓ Examen Deshabilitado ({st.count}/2 Intentos) · Nota: {st.bestGrade.toFixed(1)} / 5.0
-                          </span>
-                        ) : (
-                          <>
+                      {/* Botón Grande de Acción Directa en Cada Tarjeta (Adaptado a Móvil min-h-[52px]) */}
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <button
+                          type="button"
+                          disabled={isDisabledForStart}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleSelectExamModality(mod.id, true);
+                          }}
+                          className="w-full min-h-[52px] py-3 px-4 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:bg-slate-200 disabled:text-slate-600 disabled:border disabled:border-slate-300 disabled:cursor-not-allowed text-white text-sm font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer shadow-2xs"
+                        >
+                          {st.isBlockedByTeacher ? (
+                            <span>🔒 Examen Bloqueado por Docente</span>
+                          ) : isMasterClosed ? (
+                            <span>⏳ Examen en Sala de Espera (Cerrado)</span>
+                          ) : st.count >= 2 || st.isExhausted ? (
                             <span>
-                              {st.count === 0
-                                ? 'Presentar Intento #1 de 2'
-                                : 'Presentar Intento #2 de 2 (Preguntas Nuevas)'}
+                              ✓ 2/2 Intentos Realizados · Nota: {st.bestGrade.toFixed(1)} / 5.0
                             </span>
-                            <ArrowRight className="w-3.5 h-3.5" />
-                          </>
+                          ) : (
+                            <>
+                              <span>
+                                {st.count === 0
+                                  ? '▶ Presentar Intento #1 de 2 Ahora'
+                                  : '▶ Presentar Intento #2 de 2 (Preguntas Nuevas)'}
+                              </span>
+                              <ArrowRight className="w-4 h-4 shrink-0" />
+                            </>
+                          )}
+                        </button>
+
+                        {st.count > 0 && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const latestAtt = st.att2 || st.att1;
+                              if (latestAtt) {
+                                setFinishedResult(latestAtt);
+                                setExamPhase('results');
+                              } else {
+                                setStudentDashboardTab('mis_notas');
+                              }
+                            }}
+                            className="min-h-[52px] px-4 py-3 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs sm:text-sm font-bold shrink-0 cursor-pointer"
+                          >
+                            Ver Certificado
+                          </button>
                         )}
-                      </button>
+                      </div>
                     </div>
                   </div>
                 );
               })}
             </div>
 
-            {/* Inducción Previa sobre la Regla de 1 Advertencia y Escala Colombiana */}
+            {/* Resumen de Reglas y Barra Inferior de Acción Rápida */}
             <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-2 text-xs text-slate-700">
               <div className="font-bold text-slate-900 flex items-center gap-2">
-                <ShieldCheck className="w-4 h-4 text-sky-700" />
+                <ShieldCheck className="w-4 h-4 text-sky-700 shrink-0" />
                 <span>
-                  Inducción Previa de Integridad Académica (Regla de 1 Advertencia) y Escala Oficial (0.0 a 5.0)
+                  Recordatorio de Reglas Oficiales · Escala 0.0 a 5.0 (Aprobado ≥ {minPass.toFixed(1)})
                 </span>
               </div>
-              <ul className="list-disc list-inside space-y-1 text-slate-600">
-                <li>
-                  Calificación en escala oficial colombiana de <strong>0.0 a 5.0</strong> (Aprobado ≥ 3.0).
-                </li>
-                <li>
-                  <strong>Temporizador Cromático:</strong> 🟢 Verde (&gt; 15 min) · 🟡 Ámbar (≤ 15 min) · 🔴 Rojo pulsante (≤ 5 min) con auto-entrega en <code>00:00</code>.
-                </li>
-                <li>
-                  <strong>Regla de 1 Advertencia Anti-Fraude:</strong> El sistema detecta salidas de la pestaña, cambio de ventanas e intentos de captura/clic derecho. Permite <strong>una única advertencia preventiva</strong>; al segundo evento, el examen queda suspendido automáticamente con nota <code>0.0</code>.
-                </li>
-              </ul>
+              <p className="text-slate-600 leading-relaxed">
+                Durante el examen activo están supervisados los cambios de pestaña, minimizado de ventana, cambio de aplicación y atajos de copia. Usted cuenta con <strong>{maxLlamadosPermitidos} llamado(s) preventivo(s)</strong> antes de la suspensión automática (0.0 / 5.0).
+              </p>
             </div>
 
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pt-2">
-              <div className="text-xs text-slate-600">
-                Modalidad seleccionada: <strong>{selectedModConfig.title}</strong> · Intentos registrados:{' '}
-                <strong>
-                  {selectedModStats.count} / {selectedModStats.maxAllowed}
-                </strong>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2 border-t border-slate-100">
+              <div className="text-xs sm:text-sm text-slate-700">
+                Seleccionado: <strong>{selectedModConfig.title}</strong> ({selectedModStats.count}/{selectedModStats.maxAllowed} intentos)
               </div>
 
-              <div className="flex flex-wrap items-center gap-2.5">
-                {(selectedModStats.count >= 2 ||
-                  selectedModStats.isExhausted ||
-                  selectedModStats.isBlockedByTeacher) && (
-                  <button
-                    type="button"
-                    onClick={() => handleReturnToMainStudentPanel(selectedModality)}
-                    className="py-2.5 px-4 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 font-semibold text-xs flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                    <span>Volver al Panel Principal / Elegir Otro Examen</span>
-                  </button>
-                )}
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => setStudentDashboardTab('mini_retos')}
+                  className="min-h-[50px] py-3 px-5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <Trophy className="w-4 h-4 shrink-0" />
+                  <span>Ir a Mini Retos e Insignias ({unlockedBadgesCount}/5)</span>
+                </button>
 
                 <button
                   type="button"
@@ -2268,28 +2593,29 @@ export function StudentPortal({
                     selectedModStats.isBlockedByTeacher
                   }
                   onClick={() => handleSelectExamModality(selectedModality, true)}
-                  className="py-3 px-6 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:bg-slate-200 disabled:text-slate-500 disabled:border disabled:border-slate-300 disabled:cursor-not-allowed text-white font-semibold text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer"
+                  className="min-h-[52px] py-3.5 px-6 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:bg-slate-200 disabled:text-slate-500 disabled:border disabled:border-slate-300 disabled:cursor-not-allowed text-white font-bold text-sm sm:text-base transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-xs"
                 >
                   {!config.examenAbierto ||
                   (config.estudiantesConEstadoCerrado || []).includes(currentStudent.id) ? (
-                    <span>■ Estado Maestro del Examen: CERRADO</span>
+                    <span>■ Examen Cerrado por Docente</span>
                   ) : selectedModStats.isBlockedByTeacher ? (
                     <span>🔒 Examen Bloqueado por Docente</span>
                   ) : selectedModStats.count >= 2 || selectedModStats.isExhausted ? (
                     <span>
-                      Inicio Deshabilitado (2/2 Intentos Cumplidos · Nota: {selectedModStats.bestGrade.toFixed(1)}/5.0)
+                      ✓ 2/2 Intentos Cumplidos · Nota: {selectedModStats.bestGrade.toFixed(1)}/5.0
                     </span>
                   ) : (
                     <>
                       <span>
                         Iniciar Intento #{selectedModStats.count + 1} de {selectedModStats.maxAllowed} Ahora
                       </span>
-                      <ArrowRight className="w-4 h-4" />
+                      <ArrowRight className="w-5 h-5 shrink-0" />
                     </>
                   )}
                 </button>
               </div>
             </div>
+
             <OptionServerSaveBar
               sectionKey="estudiante_modalidades_examen"
               label={`Modalidad Seleccionada (${selectedModConfig.title})`}
@@ -2302,100 +2628,335 @@ export function StudentPortal({
           </div>
         )}
 
-        {/* SUB-TAB 2: NOTAS OBTENIDAS EN LOS EXÁMENES REALIZADOS */}
+        {/* ================= VENTANA 3: MIS NOTAS, ESTADO GENERAL (EXÁMENES Y RETOS) Y CERTIFICADOS ================= */}
         {studentDashboardTab === 'mis_notas' && (
-          <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs space-y-4">
-            <div>
-              <h2 className="text-lg font-bold text-slate-900">
-                Historial de Notas Obtenidas en los Exámenes Realizados
-              </h2>
-              <p className="text-xs text-slate-600">
-                Consulte las calificaciones obtenidas en cada intento y abra el certificado o revisión pedagógica.
-              </p>
-            </div>
-
-            {studentAttempts.length === 0 ? (
-              <div className="p-8 text-center bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-500">
-                Aún no ha registrado entregas de exámenes en esta sesión.
+          <div className="space-y-6">
+            {/* A. Tablero Completo de Estado General: ¿Qué Exámenes y Retos he realizado y cuáles me faltan? */}
+            <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 shadow-xs space-y-5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-4">
+                <div>
+                  <span className="text-xs font-mono font-bold uppercase tracking-wider text-emerald-700">
+                    Ventana 3 · Control de Mi Progreso Académico
+                  </span>
+                  <h2 className="text-lg sm:text-xl font-bold text-slate-900">
+                    Estado General de Mis Exámenes y Mini Retos
+                  </h2>
+                  <p className="text-xs text-slate-600">
+                    Consulte en un solo lugar qué actividades ya completó, su calificación y toque cualquier actividad pendiente para ir a presentarla.
+                  </p>
+                </div>
               </div>
-            ) : (
-              <div className="overflow-x-auto border border-slate-200 rounded-xl">
-                <table className="w-full text-left border-collapse text-xs">
-                  <thead>
-                    <tr className="bg-slate-50 border-b border-slate-200 font-semibold text-slate-700">
-                      <th className="py-3 px-4">Fecha y Hora</th>
-                      <th className="py-3 px-4">Modalidad de Evaluación</th>
-                      <th className="py-3 px-4 text-center">Intento</th>
-                      <th className="py-3 px-4 text-right">Aciertos</th>
-                      <th className="py-3 px-4 text-right">Nota (0.0 - 5.0)</th>
-                      <th className="py-3 px-4">Estado</th>
-                      <th className="py-3 px-4 text-right">Detalle</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-200">
-                    {studentAttempts.map((att) => (
-                      <tr key={att.attemptId} className="hover:bg-slate-50">
-                        <td className="py-3 px-4 font-mono text-slate-600">{att.fecha}</td>
-                        <td className="py-3 px-4 font-semibold text-slate-900">{att.modalidadLabel}</td>
-                        <td className="py-3 px-4 text-center font-mono">#{att.intentoNumero}</td>
-                        <td className="py-3 px-4 text-right font-mono">
-                          {att.aciertos}/{att.totalPreguntas} ({att.porcentaje}%)
-                        </td>
-                        <td className="py-3 px-4 text-right font-mono font-bold text-sm">
-                          {att.notaColombiana.toFixed(1)} / 5.0
-                        </td>
-                        <td className="py-3 px-4 font-semibold">
-                          {att.estado === 'APROBADO' && (
-                            <span className="text-emerald-700">✓ APROBADO</span>
-                          )}
-                          {att.estado === 'REPROBADO' && (
-                            <span className="text-amber-700">✕ REPROBADO</span>
-                          )}
-                          {att.estado === 'SUSPENDIDO' && (
-                            <span className="text-red-700">⚠️ SUSPENDIDO</span>
-                          )}
-                        </td>
-                        <td className="py-3 px-4 text-right">
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                {/* Columna 1: Estado de los 6 Exámenes Oficiales */}
+                <div className="border border-slate-200 rounded-xl p-4 space-y-3 bg-slate-50/50">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                      <BookOpen className="w-4 h-4 text-sky-700" />
+                      <span>Estado de Mis 6 Exámenes Oficiales</span>
+                    </h3>
+                    <span className="text-xs font-mono font-bold text-sky-800">
+                      {completedExamsCount}/6 con nota
+                    </span>
+                  </div>
+
+                  <div className="space-y-2">
+                    {modalitiesOverview.map((m) => {
+                      const st = m.stats;
+                      const done = st.count > 0;
+                      return (
+                        <div
+                          key={m.id}
+                          className="p-3 rounded-xl bg-white border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs"
+                        >
+                          <div className="space-y-0.5">
+                            <div className="font-bold text-slate-900">{m.title}</div>
+                            <div className="text-slate-600 font-mono">
+                              {done ? (
+                                <>
+                                  <span className="text-emerald-700 font-bold">✓ Realizado</span> · Intentos: {st.count}/2 ·{' '}
+                                  <strong>Nota: {st.bestGrade.toFixed(1)} / 5.0</strong>
+                                </>
+                              ) : (
+                                <>
+                                  <span className="text-amber-700 font-bold">⏳ Pendiente por presentar</span> · Intentos: 0/2
+                                </>
+                              )}
+                            </div>
+                          </div>
+
                           <button
                             type="button"
                             onClick={() => {
-                              setFinishedResult(att);
-                              setExamPhase('results');
+                              setSelectedModality(m.id);
+                              setStudentDashboardTab('modalidades');
                             }}
-                            className="px-3 py-1.5 rounded-lg bg-slate-900 text-white font-semibold hover:bg-slate-800"
+                            className={`min-h-[42px] px-3.5 py-2 rounded-lg font-bold text-xs shrink-0 cursor-pointer ${
+                              done && st.isExhausted
+                                ? 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                                : 'bg-sky-600 text-white hover:bg-sky-700'
+                            }`}
                           >
-                            Ver Certificado / Revisión
+                            {done && st.isExhausted
+                              ? 'Ver Examen'
+                              : done
+                              ? '2º Intento →'
+                              : 'Presentar →'}
                           </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Columna 2: Estado de los 5 Mini Retos Semánticos */}
+                <div className="border border-slate-200 rounded-xl p-4 space-y-3 bg-amber-50/30">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                      <Trophy className="w-4 h-4 text-amber-600" />
+                      <span>Estado de Mis 5 Mini Retos IA</span>
+                    </h3>
+                    <span className="text-xs font-mono font-bold text-amber-900">
+                      🏅 {unlockedBadgesCount}/5 superados
+                    </span>
+                  </div>
+
+                  <div className="space-y-2">
+                    {([1, 2, 3, 4, 5] as const).map((modNum) => {
+                      const prog = currentStudent.progresoRetos?.[modNum];
+                      const won = Boolean(prog?.insigniaDesbloqueada);
+                      const used = Number(prog?.intentosUsados) || 0;
+                      const bestPct = Number(prog?.mejorPorcentaje) || 0;
+                      const suspended = Boolean(prog?.suspendidoPorTrampa);
+
+                      return (
+                        <div
+                          key={modNum}
+                          className="p-3 rounded-xl bg-white border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs"
+                        >
+                          <div className="space-y-0.5">
+                            <div className="font-bold text-slate-900">
+                              Mini Reto Semántico — Módulo {modNum}
+                            </div>
+                            <div className="text-slate-600 font-mono">
+                              {won ? (
+                                <>
+                                  <span className="text-emerald-700 font-bold">🏅 Insignia Ganada</span> · Mejor: <strong>{bestPct}%</strong> ({used}/3 int.)
+                                </>
+                              ) : suspended ? (
+                                <span className="text-red-700 font-bold">🚨 Suspendido (0.0 / 5.0)</span>
+                              ) : used > 0 ? (
+                                <>
+                                  <span className="text-amber-700 font-bold">🔄 En curso</span> · Mejor: {bestPct}% · Intentos: {used}/3
+                                </>
+                              ) : (
+                                <>
+                                  <span className="text-amber-700 font-bold">⏳ Pendiente por realizar</span> · Intentos: 0/3
+                                </>
+                              )}
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedRetoModuloJump(modNum);
+                              setStudentDashboardTab('mini_retos');
+                            }}
+                            className={`min-h-[42px] px-3.5 py-2 rounded-lg font-bold text-xs shrink-0 cursor-pointer ${
+                              won
+                                ? 'bg-emerald-100 text-emerald-900 hover:bg-emerald-200'
+                                : 'bg-amber-500 text-slate-950 hover:bg-amber-400'
+                            }`}
+                          >
+                            {won ? 'Ver Insignia' : 'Ir al Reto →'}
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
               </div>
-            )}
+            </div>
+
+            {/* B. Historial de Certificados y Exámenes Entregados (Tarjetas Grandes en Móvil + Tabla en Web) */}
+            <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 shadow-xs space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-base sm:text-lg font-bold text-slate-900">
+                    Certificados Oficiales y Revisión de Exámenes Entregados ({studentAttempts.length})
+                  </h3>
+                  <p className="text-xs text-slate-600">
+                    Toque «Ver Certificado y Revisión» en cualquier intento para abrir el desglose de preguntas y descargar el certificado.
+                  </p>
+                </div>
+                {studentAttempts.length === 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setStudentDashboardTab('modalidades')}
+                    className="min-h-[46px] px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs sm:text-sm font-bold cursor-pointer"
+                  >
+                    Ir a Presentar Mi Primer Examen →
+                  </button>
+                )}
+              </div>
+
+              {studentAttempts.length === 0 ? (
+                <div className="p-8 text-center bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm text-slate-600 space-y-3">
+                  <p>Aún no ha registrado entregas de exámenes oficiales en esta sesión.</p>
+                </div>
+              ) : (
+                <>
+                  {/* Vista Móvil: Tarjetas Grandes con Botón de Ancho Completo */}
+                  <div className="grid grid-cols-1 gap-3 md:hidden">
+                    {studentAttempts.map((att) => (
+                      <div
+                        key={att.attemptId}
+                        className="p-4 rounded-xl border border-slate-200 bg-slate-50/70 space-y-3 text-xs"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <span className="font-mono text-[11px] text-slate-500 block">
+                              {att.fecha} · Intento #{att.intentoNumero}
+                            </span>
+                            <h4 className="text-sm font-bold text-slate-900 mt-0.5">
+                              {att.modalidadLabel}
+                            </h4>
+                          </div>
+                          <div className="text-right font-mono shrink-0">
+                            <div className="text-base font-extrabold text-slate-900">
+                              {att.notaColombiana.toFixed(1)} / 5.0
+                            </div>
+                            <div className="text-[11px] font-bold">
+                              {att.estado === 'APROBADO' && (
+                                <span className="text-emerald-700">✓ APROBADO</span>
+                              )}
+                              {att.estado === 'REPROBADO' && (
+                                <span className="text-amber-700">✕ REPROBADO</span>
+                              )}
+                              {att.estado === 'SUSPENDIDO' && (
+                                <span className="text-red-700">⚠️ SUSPENDIDO</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between text-slate-600 font-mono pt-2 border-t border-slate-200/80">
+                          <span>
+                            Aciertos: <strong>{att.aciertos}/{att.totalPreguntas}</strong> ({att.porcentaje}%)
+                          </span>
+                          <span>Tiempo: {formatTime(att.tiempoEmpleadoSegundos)}</span>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setFinishedResult(att);
+                            setExamPhase('results');
+                          }}
+                          className="w-full min-h-[48px] py-3 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-2 cursor-pointer"
+                        >
+                          <FileCheck2 className="w-4 h-4" />
+                          <span>Ver Certificado Oficial y Revisión de Preguntas</span>
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Vista Web / Escritorio: Tabla Clara */}
+                  <div className="hidden md:block overflow-x-auto border border-slate-200 rounded-xl">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-slate-50 border-b border-slate-200 font-semibold text-slate-700">
+                          <th className="py-3.5 px-4">Fecha y Hora</th>
+                          <th className="py-3.5 px-4">Modalidad de Evaluación</th>
+                          <th className="py-3.5 px-4 text-center">Intento</th>
+                          <th className="py-3.5 px-4 text-right">Aciertos</th>
+                          <th className="py-3.5 px-4 text-right">Nota (0.0 - 5.0)</th>
+                          <th className="py-3.5 px-4">Estado</th>
+                          <th className="py-3.5 px-4 text-right">Acción</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-200">
+                        {studentAttempts.map((att) => (
+                          <tr key={att.attemptId} className="hover:bg-slate-50">
+                            <td className="py-3.5 px-4 font-mono text-slate-600">{att.fecha}</td>
+                            <td className="py-3.5 px-4 font-semibold text-slate-900">{att.modalidadLabel}</td>
+                            <td className="py-3.5 px-4 text-center font-mono">#{att.intentoNumero}</td>
+                            <td className="py-3.5 px-4 text-right font-mono tabular-nums">
+                              {att.aciertos}/{att.totalPreguntas} ({att.porcentaje}%)
+                            </td>
+                            <td className="py-3.5 px-4 text-right font-mono tabular-nums font-bold text-sm">
+                              {att.notaColombiana.toFixed(1)} / 5.0
+                            </td>
+                            <td className="py-3.5 px-4 font-semibold">
+                              {att.estado === 'APROBADO' && (
+                                <span className="text-emerald-700">✓ APROBADO</span>
+                              )}
+                              {att.estado === 'REPROBADO' && (
+                                <span className="text-amber-700">✕ REPROBADO</span>
+                              )}
+                              {att.estado === 'SUSPENDIDO' && (
+                                <span className="text-red-700">⚠️ SUSPENDIDO</span>
+                              )}
+                            </td>
+                            <td className="py-3.5 px-4 text-right">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setFinishedResult(att);
+                                  setExamPhase('results');
+                                }}
+                                className="min-h-[38px] px-3.5 py-2 rounded-lg bg-slate-900 text-white font-bold hover:bg-slate-800 cursor-pointer"
+                              >
+                                Ver Certificado / Revisión
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* C. Gráfica Comparativa de Rendimiento Estudiantil */}
+            <StudentPerformanceDashboard
+              studentId={currentStudent.id}
+              studentName={currentStudent.nombre}
+              studentAttempts={studentAttempts}
+              allAttempts={attempts}
+              minPassingGrade={minPass}
+            />
           </div>
         )}
 
-        {/* SUB-TAB 3: PESTAÑA DIAGNÓSTICO PEDAGÓGICO (MÓDULOS Y TAXONOMÍA DE BLOOM) */}
+        {/* ================= VENTANA 4: DIAGNÓSTICO PEDAGÓGICO (MÓDULOS Y TAXONOMÍA DE BLOOM) ================= */}
         {studentDashboardTab === 'diagnostico_pedagogico' && (
-          <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs space-y-6">
-            <div>
-              <h2 className="text-lg font-bold text-slate-900">
-                Diagnóstico por Competencias y Rendimiento por Módulos
-              </h2>
-              <p className="text-xs text-slate-600">
-                Desglose porcentual de aciertos en los Módulos del currículo, clasificación por nivel cognitivo (Taxonomía de Bloom) y conceptos por reforzar.
-              </p>
+          <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 shadow-xs space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
+              <div>
+                <span className="text-xs font-mono font-bold uppercase tracking-wider text-indigo-700">
+                  Ventana 4 · Análisis por Competencias
+                </span>
+                <h2 className="text-lg sm:text-xl font-bold text-slate-900">
+                  Diagnóstico por Módulos Curriculares y Nivel Cognitivo Bloom
+                </h2>
+                <p className="text-xs text-slate-600">
+                  Identifique su porcentaje de dominio en cada módulo y acceda con un toque al Examen o Mini Reto de refuerzo.
+                </p>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              {/* Desglose por Módulos */}
-              <div className="border border-slate-200 rounded-xl p-5 space-y-4">
+              {/* Desglose por Módulos con Botones Directos a Examen y Reto */}
+              <div className="border border-slate-200 rounded-xl p-4 sm:p-5 space-y-4">
                 <h3 className="text-sm font-bold text-slate-900">
-                  Desglose Porcentual de Aciertos por Módulo Curricular
+                  Dominio por Módulo Curricular (Módulos 1 al 5)
                 </h3>
-                <div className="space-y-3">
-                  {[1, 2, 3, 4, 5].map((m) => {
+                <div className="space-y-4">
+                  {([1, 2, 3, 4, 5] as const).map((m) => {
                     const st = studentDiagnostics.modStats[m];
                     const pct = st.total > 0 ? Math.round((st.correct / st.total) * 100) : 0;
                     const level =
@@ -2407,14 +2968,14 @@ export function StudentPortal({
                         ? '▲ Aceptable'
                         : '■ Requiere Refuerzo';
                     return (
-                      <div key={m} className="space-y-1">
-                        <div className="flex justify-between text-xs">
-                          <span className="font-semibold text-slate-800">Módulo {m}</span>
+                      <div key={m} className="p-3 rounded-xl bg-slate-50 border border-slate-200/80 space-y-2">
+                        <div className="flex flex-wrap justify-between items-center gap-1 text-xs">
+                          <span className="font-bold text-slate-900">Módulo {m}</span>
                           <span className="font-mono">
                             {pct}% ({st.correct}/{st.total}) · <strong>{level}</strong>
                           </span>
                         </div>
-                        <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
+                        <div className="w-full h-2.5 bg-slate-200 rounded-full overflow-hidden">
                           <div
                             className={`h-full rounded-full ${
                               pct >= 75
@@ -2426,76 +2987,100 @@ export function StudentPortal({
                             style={{ width: `${pct}%` }}
                           />
                         </div>
+                        <div className="grid grid-cols-2 gap-2 pt-1">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedModality(`mod${m}` as ExamModality);
+                              setStudentDashboardTab('modalidades');
+                            }}
+                            className="min-h-[40px] px-3 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-100 text-slate-800 text-xs font-bold cursor-pointer"
+                          >
+                            Ir a Examen Mód. {m}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedRetoModuloJump(m);
+                              setStudentDashboardTab('mini_retos');
+                            }}
+                            className="min-h-[40px] px-3 py-1.5 rounded-lg bg-amber-500/90 hover:bg-amber-400 text-slate-950 text-xs font-bold cursor-pointer"
+                          >
+                            🏅 Ir a Reto Mód. {m}
+                          </button>
+                        </div>
                       </div>
                     );
                   })}
                 </div>
               </div>
 
-              {/* Desglose por Taxonomía de Bloom */}
-              <div className="border border-slate-200 rounded-xl p-5 space-y-4">
-                <h3 className="text-sm font-bold text-slate-900">
-                  Clasificación por Nivel Cognitivo (Taxonomía de Bloom)
-                </h3>
-                <div className="space-y-3">
-                  {(
-                    ['Conocer', 'Comprensión', 'Aplicación', 'Análisis', 'Evaluación'] as BloomLevel[]
-                  ).map((b) => {
-                    const st = studentDiagnostics.bloomStats[b];
-                    const pct = st.total > 0 ? Math.round((st.correct / st.total) * 100) : 0;
-                    return (
-                      <div key={b} className="space-y-1">
-                        <div className="flex justify-between text-xs">
-                          <span className="font-semibold text-slate-800">{b}</span>
-                          <span className="font-mono">
-                            {pct}% ({st.correct}/{st.total} reactivos)
+              {/* Desglose por Taxonomía de Bloom y Temas Prioritarios */}
+              <div className="space-y-5">
+                <div className="border border-slate-200 rounded-xl p-4 sm:p-5 space-y-4">
+                  <h3 className="text-sm font-bold text-slate-900">
+                    Clasificación por Nivel Cognitivo (Taxonomía de Bloom)
+                  </h3>
+                  <div className="space-y-3">
+                    {(
+                      ['Conocer', 'Comprensión', 'Aplicación', 'Análisis', 'Evaluación'] as BloomLevel[]
+                    ).map((b) => {
+                      const st = studentDiagnostics.bloomStats[b];
+                      const pct = st.total > 0 ? Math.round((st.correct / st.total) * 100) : 0;
+                      return (
+                        <div key={b} className="space-y-1">
+                          <div className="flex justify-between text-xs">
+                            <span className="font-semibold text-slate-800">{b}</span>
+                            <span className="font-mono">
+                              {pct}% ({st.correct}/{st.total} reactivos)
+                            </span>
+                          </div>
+                          <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
+                            <div
+                              className="h-full bg-slate-800 rounded-full"
+                              style={{ width: `${pct}%` }}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Conceptos con Mayor Tasa de Error */}
+                <div className="border border-slate-200 rounded-xl p-4 sm:p-5 space-y-3">
+                  <h3 className="text-sm font-bold text-slate-900">
+                    Conceptos Prioritarios para Refuerzo Académico
+                  </h3>
+                  {studentDiagnostics.weakTopics.length === 0 ? (
+                    <p className="text-xs text-slate-500">
+                      No se registran conceptos con tasa de error o aún no ha completado intentos.
+                    </p>
+                  ) : (
+                    <div className="grid grid-cols-1 gap-2.5">
+                      {studentDiagnostics.weakTopics.map((wt, i) => (
+                        <div
+                          key={i}
+                          className="p-3 rounded-lg bg-amber-50/70 border border-amber-200 flex items-center justify-between gap-2 text-xs"
+                        >
+                          <div>
+                            <span className="font-mono font-bold text-amber-900">Módulo {wt.modulo}:</span>{' '}
+                            <span className="font-medium text-slate-900">{wt.tema}</span>
+                          </div>
+                          <span className="font-mono font-bold text-red-700 shrink-0">
+                            {wt.errorRate}% error
                           </span>
                         </div>
-                        <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
-                          <div
-                            className="h-full bg-slate-800 rounded-full"
-                            style={{ width: `${pct}%` }}
-                          />
-                        </div>
-                      </div>
-                    );
-                  })}
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
-            </div>
-
-            {/* Conceptos con Mayor Tasa de Error */}
-            <div className="border border-slate-200 rounded-xl p-5 space-y-3">
-              <h3 className="text-sm font-bold text-slate-900">
-                Conceptos Prioritarios para Refuerzo Académico
-              </h3>
-              {studentDiagnostics.weakTopics.length === 0 ? (
-                <p className="text-xs text-slate-500">
-                  No se registran conceptos con tasa de error o aún no ha completado intentos.
-                </p>
-              ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  {studentDiagnostics.weakTopics.map((wt, i) => (
-                    <div
-                      key={i}
-                      className="p-3 rounded-lg bg-amber-50/70 border border-amber-200 flex items-center justify-between gap-2 text-xs"
-                    >
-                      <div>
-                        <span className="font-mono font-bold text-amber-900">Módulo {wt.modulo}:</span>{' '}
-                        <span className="font-medium text-slate-900">{wt.tema}</span>
-                      </div>
-                      <span className="font-mono font-bold text-red-700 shrink-0">
-                        {wt.errorRate}% error
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
             </div>
           </div>
         )}
 
-        {/* SUB-TAB 4: ZONA DE RETOS & INSIGNIAS (GAMIFICACIÓN CON EVALUACIÓN SEMÁNTICA POR IA) */}
+        {/* ================= VENTANA 2: ZONA DE MINI RETOS & INSIGNIAS (GAMIFICACIÓN CON IA) ================= */}
         {studentDashboardTab === 'mini_retos' && (
           <StudentMiniRetosZone
             student={currentStudent}
@@ -2505,8 +3090,70 @@ export function StudentPortal({
             questions={safeQuestions}
             config={config}
             customMiniRetos={customMiniRetos}
+            initialModulo={selectedRetoModuloJump}
+            onGoToExams={(mod) => {
+              if (mod) {
+                setSelectedModality(`mod${mod}` as ExamModality);
+              }
+              setStudentDashboardTab('modalidades');
+            }}
           />
         )}
+
+        {/* BARRA INFERIOR FIJA DE NAVEGACIÓN RÁPIDA EN MÓVIL (Botones Grandes Adaptados a Pantalla Móvil) */}
+        <div className="sm:hidden fixed bottom-0 left-0 right-0 z-30 bg-white border-t border-slate-200 px-2 py-1.5 grid grid-cols-4 gap-1.5 shadow-lg no-print">
+          <button
+            type="button"
+            onClick={() => setStudentDashboardTab('modalidades')}
+            className={`min-h-[50px] rounded-xl flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-colors cursor-pointer ${
+              studentDashboardTab === 'modalidades'
+                ? 'bg-slate-900 text-white'
+                : 'text-slate-700 hover:bg-slate-100'
+            }`}
+          >
+            <BookOpen className="w-4 h-4" />
+            <span>Exámenes</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setStudentDashboardTab('mini_retos')}
+            className={`min-h-[50px] rounded-xl flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-colors cursor-pointer ${
+              studentDashboardTab === 'mini_retos'
+                ? 'bg-amber-500 text-slate-950'
+                : 'text-amber-900 bg-amber-50/70'
+            }`}
+          >
+            <Trophy className="w-4 h-4" />
+            <span>Retos ({unlockedBadgesCount}/5)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setStudentDashboardTab('mis_notas')}
+            className={`min-h-[50px] rounded-xl flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-colors cursor-pointer ${
+              studentDashboardTab === 'mis_notas'
+                ? 'bg-slate-900 text-white'
+                : 'text-slate-700 hover:bg-slate-100'
+            }`}
+          >
+            <Award className="w-4 h-4" />
+            <span>Mis Notas</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setStudentDashboardTab('diagnostico_pedagogico')}
+            className={`min-h-[50px] rounded-xl flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-colors cursor-pointer ${
+              studentDashboardTab === 'diagnostico_pedagogico'
+                ? 'bg-slate-900 text-white'
+                : 'text-slate-700 hover:bg-slate-100'
+            }`}
+          >
+            <BarChart3 className="w-4 h-4" />
+            <span>Avance</span>
+          </button>
+        </div>
 
         {/* MODAL: MODIFICAR DATOS DEL ESTUDIANTE (ID SOLO LECTURA, NOMBRE Y CÓDIGO EDITABLES) */}
         {editProfileModalOpen && (
@@ -3093,15 +3740,15 @@ export function StudentPortal({
             })}
           </div>
 
-          {/* Bottom Question Navigation */}
-          <div className="pt-4 border-t border-slate-100 flex items-center justify-between gap-3">
+          {/* Bottom Question Navigation — Botones Grandes Adaptados a Móvil y Web */}
+          <div className="pt-4 border-t border-slate-100 grid grid-cols-2 sm:flex sm:items-center sm:justify-between gap-3">
             <button
               type="button"
               disabled={currentIndex === 0}
               onClick={() => setCurrentIndex((i) => Math.max(0, i - 1))}
-              className="px-4 py-2.5 rounded-xl border border-slate-300 disabled:opacity-40 text-xs font-semibold text-slate-700 hover:bg-slate-50 flex items-center gap-1.5 cursor-pointer"
+              className="min-h-[50px] px-4 py-3 rounded-xl border border-slate-300 disabled:opacity-40 text-xs sm:text-sm font-bold text-slate-800 hover:bg-slate-50 flex items-center justify-center gap-1.5 cursor-pointer"
             >
-              <ArrowLeft className="w-4 h-4" />
+              <ArrowLeft className="w-4 h-4 shrink-0" />
               <span>Anterior</span>
             </button>
 
@@ -3109,19 +3756,19 @@ export function StudentPortal({
               <button
                 type="button"
                 onClick={() => setCurrentIndex((i) => Math.min(activeQuestions.length - 1, i + 1))}
-                className="px-5 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                className="min-h-[50px] px-5 py-3 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs"
               >
-                <span>Siguiente Pregunta</span>
-                <ArrowRight className="w-4 h-4" />
+                <span>Siguiente</span>
+                <ArrowRight className="w-4 h-4 shrink-0" />
               </button>
             ) : (
               <button
                 type="button"
                 onClick={() => setConfirmSubmitModal(true)}
-                className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                className="min-h-[50px] px-5 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs"
               >
-                <FileCheck2 className="w-4 h-4" />
-                <span>Revisar y Entregar Evaluación</span>
+                <FileCheck2 className="w-4 h-4 shrink-0" />
+                <span>Revisar y Entregar</span>
               </button>
             )}
           </div>
@@ -3501,18 +4148,18 @@ export function StudentPortal({
             </div>
           )}
 
-          {/* Action Buttons: Print Certificate, Start 2nd Attempt, or Return to Student Panel to Take Another Exam */}
-          <div className="flex flex-wrap items-center justify-between gap-3 pt-2 no-print">
+          {/* Action Buttons: Print Certificate, Start 2nd Attempt, or Return to Student Panel (Adaptados a Móvil y Web) */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2 no-print">
             <button
               type="button"
               onClick={() => window.print()}
-              className="px-4 py-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-800 flex items-center gap-2 cursor-pointer"
+              className="min-h-[50px] w-full sm:w-auto px-4 py-3 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-xs sm:text-sm font-bold text-slate-800 flex items-center justify-center gap-2 cursor-pointer"
             >
-              <Printer className="w-4 h-4" />
+              <Printer className="w-4 h-4 shrink-0" />
               <span>Imprimir Certificado Oficial (PDF)</span>
             </button>
 
-            <div className="flex flex-wrap items-center gap-3">
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full sm:w-auto">
               {canStartSecondAttempt && (
                 <button
                   type="button"
@@ -3522,10 +4169,10 @@ export function StudentPortal({
                     setExamPhase('modality_select');
                     setInductionModalOpen(true);
                   }}
-                  className="px-5 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold flex items-center gap-2 cursor-pointer"
+                  className="min-h-[50px] w-full sm:w-auto px-5 py-3 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs sm:text-sm font-bold flex items-center justify-center gap-2 cursor-pointer shadow-2xs"
                 >
                   <span>Iniciar Segundo Intento (Preguntas Nuevas)</span>
-                  <ArrowRight className="w-4 h-4" />
+                  <ArrowRight className="w-4 h-4 shrink-0" />
                 </button>
               )}
 
@@ -3540,12 +4187,12 @@ export function StudentPortal({
                     setExamPhase('modality_select');
                   }
                 }}
-                className="px-5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center gap-2 cursor-pointer"
+                className="min-h-[50px] w-full sm:w-auto px-5 py-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs sm:text-sm font-bold flex items-center justify-center gap-2 cursor-pointer shadow-2xs"
               >
-                <BookOpen className="w-4 h-4" />
+                <BookOpen className="w-4 h-4 shrink-0" />
                 <span>
                   {modStats.count >= 2 || modStats.isExhausted
-                    ? 'Volver al Panel Principal del Estudiante (Iniciar Otro Examen)'
+                    ? 'Volver al Panel Principal (Elegir Otro Examen)'
                     : 'Volver al Panel Principal del Estudiante'}
                 </span>
               </button>

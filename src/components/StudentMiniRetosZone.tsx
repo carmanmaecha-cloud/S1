@@ -57,6 +57,8 @@ interface StudentMiniRetosZoneProps {
   questions: Question[];
   config: SystemConfig;
   customMiniRetos: CustomMiniRetoTemplate[];
+  initialModulo?: 1 | 2 | 3 | 4 | 5;
+  onGoToExams?: (modulo?: 1 | 2 | 3 | 4 | 5) => void;
 }
 
 const RETO_DURATION_SECONDS = 8 * 60; // 8 minutos máximos por intento de Mini Reto
@@ -160,10 +162,18 @@ export function StudentMiniRetosZone({
   onRecordAntiCheatEvent,
   questions,
   config,
-  customMiniRetos
+  customMiniRetos,
+  initialModulo,
+  onGoToExams
 }: StudentMiniRetosZoneProps) {
   const { handleExecuteServerSave } = useServerSave();
-  const [selectedModulo, setSelectedModulo] = useState<1 | 2 | 3 | 4 | 5>(1);
+  const [selectedModulo, setSelectedModulo] = useState<1 | 2 | 3 | 4 | 5>(initialModulo || 1);
+
+  useEffect(() => {
+    if (initialModulo && initialModulo >= 1 && initialModulo <= 5) {
+      setSelectedModulo(initialModulo);
+    }
+  }, [initialModulo]);
   const [selectedMechanicFilter, setSelectedMechanicFilter] = useState<
     MiniRetoMechanicId | 'random'
   >('random');
@@ -1214,122 +1224,146 @@ export function StudentMiniRetosZone({
           </div>
         </div>
 
-        {/* Grid of 5 Module Collectible Badges */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
-          {OFFICIAL_BADGES.map((badge) => {
-            const prog = retoProgressMap[badge.modulo];
-            const isUnlocked = prog.insigniaDesbloqueada;
-            const isSuspended = Boolean(prog.suspendidoPorTrampa);
-            const isDisabledByTeacher = blockedModulesForStudent.includes(badge.modulo);
-            const isLockedByFail =
-              !isUnlocked && (isSuspended || prog.bloqueadoPorFallo || prog.intentosUsados >= 3);
-            const isSelected = selectedModulo === badge.modulo;
+        {/* Paso 1: Selector Claro de los 5 Módulos de Retos (Adaptado a Móvil y Web) */}
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-300">
+            <span className="font-bold text-amber-300 uppercase tracking-wider">
+              Paso 1 · Toque un Módulo (1 al 5) para ver su estado o iniciar el reto:
+            </span>
+            <span className="font-mono text-[11px] text-slate-300">
+              Módulo activo seleccionado: <strong className="text-white">Módulo {selectedModulo}</strong>
+            </span>
+          </div>
 
-            return (
-              <button
-                key={badge.modulo}
-                type="button"
-                disabled={Boolean(activeReto)}
-                onClick={() => {
-                  setSelectedModulo(badge.modulo);
-                  setActiveReto(null);
-                  setLastAttemptResult(null);
-                  setErrorMessage(null);
-                }}
-                className={`text-left p-4 rounded-xl border transition-all flex flex-col justify-between cursor-pointer ${
-                  isUnlocked
-                    ? isSelected
-                      ? 'bg-amber-500/20 border-amber-400 ring-2 ring-amber-400/60'
-                      : 'bg-amber-500/10 border-amber-500/40 hover:border-amber-400'
-                    : isSuspended
-                    ? 'bg-red-950/70 border-red-500 ring-1 ring-red-500'
-                    : isDisabledByTeacher
-                    ? isSelected
-                      ? 'bg-slate-900/90 border-slate-500 ring-2 ring-slate-400/50 opacity-85'
-                      : 'bg-slate-900/60 border-slate-800 opacity-65'
-                    : isLockedByFail
-                    ? isSelected
-                      ? 'bg-red-950/50 border-red-500 ring-2 ring-red-500/50'
-                      : 'bg-slate-800/50 border-red-800/60 opacity-85'
-                    : isSelected
-                    ? 'bg-sky-500/20 border-sky-400 ring-2 ring-sky-400/50'
-                    : 'bg-slate-800/70 border-slate-700 hover:border-slate-500'
-                }`}
-              >
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between gap-1">
-                    <span className="text-2xl">
-                      {isUnlocked
-                        ? badge.icono
-                        : isSuspended
-                        ? '🚨'
-                        : isDisabledByTeacher
-                        ? '🔒'
-                        : isLockedByFail
-                        ? '🔒'
-                        : '🛡️'}
-                    </span>
-                    <span
-                      className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-full ${
-                        isUnlocked
-                          ? 'bg-amber-400 text-slate-950'
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+            {OFFICIAL_BADGES.map((badge) => {
+              const prog = retoProgressMap[badge.modulo];
+              const isUnlocked = prog.insigniaDesbloqueada;
+              const isSuspended = Boolean(prog.suspendidoPorTrampa);
+              const isDisabledByTeacher = blockedModulesForStudent.includes(badge.modulo);
+              const isLockedByFail =
+                !isUnlocked && (isSuspended || prog.bloqueadoPorFallo || prog.intentosUsados >= 3);
+              const isSelected = selectedModulo === badge.modulo;
+
+              return (
+                <button
+                  key={badge.modulo}
+                  type="button"
+                  disabled={Boolean(activeReto)}
+                  onClick={() => {
+                    setSelectedModulo(badge.modulo);
+                    setActiveReto(null);
+                    setLastAttemptResult(null);
+                    setErrorMessage(null);
+                  }}
+                  className={`text-left p-4 rounded-xl border transition-all flex flex-col justify-between min-h-[140px] cursor-pointer ${
+                    isUnlocked
+                      ? isSelected
+                        ? 'bg-amber-500/25 border-amber-400 ring-2 ring-amber-400'
+                        : 'bg-amber-500/10 border-amber-500/40 hover:border-amber-400'
+                      : isSuspended
+                      ? 'bg-red-950/70 border-red-500 ring-1 ring-red-500'
+                      : isDisabledByTeacher
+                      ? isSelected
+                        ? 'bg-slate-900/90 border-slate-500 ring-2 ring-slate-400/50 opacity-85'
+                        : 'bg-slate-900/60 border-slate-800 opacity-65'
+                      : isLockedByFail
+                      ? isSelected
+                        ? 'bg-red-950/50 border-red-500 ring-2 ring-red-500/50'
+                        : 'bg-slate-800/50 border-red-800/60 opacity-85'
+                      : isSelected
+                      ? 'bg-sky-500/25 border-sky-400 ring-2 ring-sky-400'
+                      : 'bg-slate-800/80 border-slate-700 hover:border-slate-500'
+                  }`}
+                >
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-2xl">
+                        {isUnlocked
+                          ? badge.icono
                           : isSuspended
-                          ? 'bg-red-600 text-white'
+                          ? '🚨'
                           : isDisabledByTeacher
-                          ? 'bg-slate-700 text-slate-300 border border-slate-600'
+                          ? '🔒'
                           : isLockedByFail
-                          ? 'bg-red-500/20 text-red-300 border border-red-500/40'
-                          : 'bg-sky-500/20 text-sky-200 border border-sky-400/30'
-                      }`}
-                    >
-                      {isUnlocked
-                        ? '🏅 DESBLOQUEADA'
-                        : isSuspended
-                        ? '0.0 SUSPENDIDO'
-                        : isDisabledByTeacher
-                        ? '🔒 INACTIVO DOCENTE'
-                        : isLockedByFail
-                        ? 'AGOTADO (3/3)'
-                        : `⏳ PENDIENTE (${prog.intentosUsados}/3)`}
-                    </span>
+                          ? '🔒'
+                          : '🛡️'}
+                      </span>
+                      <span
+                        className={`text-[11px] font-mono font-bold px-2.5 py-1 rounded-md ${
+                          isUnlocked
+                            ? 'bg-amber-400 text-slate-950'
+                            : isSuspended
+                            ? 'bg-red-600 text-white'
+                            : isDisabledByTeacher
+                            ? 'bg-slate-700 text-slate-300 border border-slate-600'
+                            : isLockedByFail
+                            ? 'bg-red-500/20 text-red-300 border border-red-500/40'
+                            : 'bg-sky-500/20 text-sky-200 border border-sky-400/30'
+                        }`}
+                      >
+                        {isUnlocked
+                          ? '🏅 SUPERADO'
+                          : isSuspended
+                          ? '0.0 SUSPENDIDO'
+                          : isDisabledByTeacher
+                          ? '🔒 INACTIVO'
+                          : isLockedByFail
+                          ? 'AGOTADO (3/3)'
+                          : `⏳ PENDIENTE (${prog.intentosUsados}/3)`}
+                      </span>
+                    </div>
+
+                    <div>
+                      <div className="text-xs font-mono font-bold uppercase tracking-wider text-sky-300">
+                        Módulo {badge.modulo}
+                      </div>
+                      <div
+                        className={`text-sm font-bold leading-snug mt-0.5 ${
+                          isUnlocked ? 'text-amber-300' : 'text-white'
+                        }`}
+                      >
+                        {badge.tituloPrincipal}
+                      </div>
+                      <p className="text-xs text-slate-300 mt-1 line-clamp-2 leading-relaxed">
+                        {badge.leyendaReconocimiento}
+                      </p>
+                    </div>
                   </div>
 
-                  <div>
-                    <div className="text-[11px] font-mono uppercase tracking-wider text-slate-400">
-                      Módulo {badge.modulo}
+                  <div className="pt-3 mt-3 border-t border-slate-700/80 space-y-2">
+                    <div className="flex items-center justify-between text-xs font-mono">
+                      <span className="text-slate-400">Mejor nota:</span>
+                      <span
+                        className={`font-bold ${
+                          isSuspended
+                            ? 'text-red-400'
+                            : prog.mejorPorcentaje >= thresholdPct
+                            ? 'text-emerald-400'
+                            : prog.mejorPorcentaje > 0
+                            ? 'text-amber-300'
+                            : 'text-slate-400'
+                        }`}
+                      >
+                        {isSuspended ? '0.0 / 5.0' : `${prog.mejorPorcentaje}%`}
+                      </span>
                     </div>
                     <div
-                      className={`text-xs font-bold leading-snug ${
-                        isUnlocked ? 'text-amber-300' : 'text-white'
+                      className={`w-full py-2 px-2.5 rounded-lg text-center text-xs font-bold transition-colors ${
+                        isSelected
+                          ? 'bg-white text-slate-950 shadow-2xs'
+                          : 'bg-slate-900/90 text-slate-200 border border-slate-700'
                       }`}
                     >
-                      {badge.tituloPrincipal}
+                      {isSelected
+                        ? `✓ Módulo ${badge.modulo} Seleccionado`
+                        : `Seleccionar Módulo ${badge.modulo} →`}
                     </div>
-                    <p className="text-[11px] text-slate-300 mt-1 line-clamp-2 leading-relaxed">
-                      {badge.leyendaReconocimiento}
-                    </p>
                   </div>
-                </div>
-
-                <div className="pt-3 mt-3 border-t border-slate-700/80 flex items-center justify-between text-[11px] font-mono">
-                  <span className="text-slate-400">Mejor afinidad:</span>
-                  <span
-                    className={`font-bold ${
-                      isSuspended
-                        ? 'text-red-400'
-                        : prog.mejorPorcentaje >= thresholdPct
-                        ? 'text-emerald-400'
-                        : prog.mejorPorcentaje > 0
-                        ? 'text-amber-300'
-                        : 'text-slate-500'
-                    }`}
-                  >
-                    {isSuspended ? '0.0 / 5.0' : `${prog.mejorPorcentaje}%`}
-                  </span>
-                </div>
-              </button>
-            );
-          })}
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         {/* Distinción Especial (5/5) Banner */}
@@ -1416,21 +1450,21 @@ export function StudentMiniRetosZone({
             </h3>
           </div>
 
-          {/* Selector de Mecánica o Sorteo Aleatorio */}
+          {/* Selector de Mecánica o Sorteo Aleatorio — Botones Grandes Adaptados a Móvil y Web */}
           {!currentModProgress.insigniaDesbloqueada &&
             !currentModProgress.bloqueadoPorFallo &&
             !currentModProgress.suspendidoPorTrampa &&
             !isSelectedModuloDisabledByTeacher &&
             currentModProgress.intentosUsados < 3 &&
             accessStatus.allowed && (
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 w-full lg:w-auto">
                 <select
                   value={selectedMechanicFilter}
                   disabled={Boolean(activeReto)}
                   onChange={(e) =>
                     setSelectedMechanicFilter(e.target.value as MiniRetoMechanicId | 'random')
                   }
-                  className="px-3 py-2 rounded-lg border border-slate-300 text-xs font-semibold text-slate-800 bg-slate-50"
+                  className="min-h-[48px] px-3.5 py-2.5 rounded-xl border border-slate-300 text-xs sm:text-sm font-semibold text-slate-800 bg-slate-50 w-full sm:w-auto"
                 >
                   <option value="random">🎲 Mecánica Aleatoria (12 Dinámicas Disponibles)</option>
                   {MINI_RETO_MECHANICS.map((m) => (
@@ -1445,7 +1479,7 @@ export function StudentMiniRetosZone({
                     type="button"
                     disabled={isGeneratingReto || isEvaluating}
                     onClick={() => handleStartOrRenewReto(selectedModulo)}
-                    className="px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:bg-slate-300 text-white text-xs font-bold flex items-center gap-2 transition-colors cursor-pointer"
+                    className="min-h-[52px] px-5 py-3 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:bg-slate-300 text-white text-sm font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer shadow-xs w-full sm:w-auto"
                   >
                     {isGeneratingReto ? (
                       <>
@@ -1454,9 +1488,9 @@ export function StudentMiniRetosZone({
                       </>
                     ) : (
                       <>
-                        <Sparkles className="w-4 h-4" />
+                        <Sparkles className="w-4 h-4 shrink-0" />
                         <span>
-                          Iniciar Intento {currentModProgress.intentosUsados + 1} de 3 (Modo Seguro)
+                          Iniciar Reto Módulo {selectedModulo} (Intento {currentModProgress.intentosUsados + 1} de 3)
                         </span>
                       </>
                     )}
@@ -1775,16 +1809,16 @@ export function StudentMiniRetosZone({
                 />
               </div>
 
-              <div className="flex items-center justify-between gap-3 pt-1">
-                <span className="text-[11px] text-slate-500">
-                  🔒 Cualquier intento de copiar, pegar o reescribir texto copiado anula el reto con{' '}
-                  <strong>0.0 / 5.0 (SUSPENDIDO)</strong>.
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2">
+                <span className="text-xs text-slate-600">
+                  🔒 Prohibido copiar, pegar o reescribir texto externo (sanción automática{' '}
+                  <strong>0.0 / 5.0 SUSPENDIDO</strong>).
                 </span>
 
                 <button
                   type="submit"
                   disabled={isEvaluating || studentAnswer.trim().length < 8}
-                  className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white text-xs font-bold flex items-center gap-2 transition-colors cursor-pointer shrink-0"
+                  className="min-h-[52px] w-full sm:w-auto px-6 py-3.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white text-sm font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer shrink-0 shadow-xs"
                 >
                   {isEvaluating ? (
                     <>
@@ -1794,7 +1828,7 @@ export function StudentMiniRetosZone({
                   ) : (
                     <>
                       <Send className="w-4 h-4" />
-                      <span>Enviar Respuesta para Veredicto Semántico</span>
+                      <span>Enviar Mi Respuesta para Calificación IA</span>
                     </>
                   )}
                 </button>
@@ -1928,15 +1962,37 @@ export function StudentMiniRetosZone({
           !isSelectedModuloDisabledByTeacher &&
           currentModProgress.intentosUsados < 3 &&
           accessStatus.allowed && (
-            <div className="bg-slate-50 border border-dashed border-slate-300 rounded-2xl p-6 text-center space-y-3">
-              <div className="text-3xl">{currentBadgeDef.icono}</div>
-              <div className="max-w-xl mx-auto space-y-1">
-                <h4 className="text-sm font-bold text-slate-900">
-                  ¿Listo para conquistar la Insignia «{currentBadgeDef.tituloPrincipal}»?
+            <div className="bg-slate-50 border border-dashed border-slate-300 rounded-2xl p-6 text-center space-y-4">
+              <div className="text-4xl">{currentBadgeDef.icono}</div>
+              <div className="max-w-xl mx-auto space-y-1.5">
+                <h4 className="text-base font-bold text-slate-900">
+                  ¿Listo para conquistar la Insignia «{currentBadgeDef.tituloPrincipal}» (Módulo {selectedModulo})?
                 </h4>
-                <p className="text-xs text-slate-600 leading-relaxed">
-                  Al hacer clic en <strong>«Iniciar Intento {currentModProgress.intentosUsados + 1} de 3 (Modo Seguro)»</strong>, se activará el entorno supervisado (pantalla completa, bloqueo de copia/pegado/atajos y biometría de escritura) y se sorteará un reactivo inédito del Módulo {selectedModulo}.
+                <p className="text-xs sm:text-sm text-slate-600 leading-relaxed">
+                  Al tocar el botón inferior se sorteará un caso práctico del <strong>Módulo {selectedModulo}</strong>. Tienes <strong>{3 - currentModProgress.intentosUsados} intento(s) disponible(s)</strong> de 3 para superar el {thresholdPct}% de afinidad semántica.
                 </p>
+              </div>
+              <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-1">
+                <button
+                  type="button"
+                  disabled={isGeneratingReto || isEvaluating}
+                  onClick={() => handleStartOrRenewReto(selectedModulo)}
+                  className="min-h-[52px] w-full sm:w-auto px-6 py-3.5 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:bg-slate-300 text-white text-sm sm:text-base font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer shadow-xs"
+                >
+                  <Sparkles className="w-5 h-5 shrink-0" />
+                  <span>
+                    Comenzar Mini Reto del Módulo {selectedModulo} Ahora (Intento {currentModProgress.intentosUsados + 1} de 3)
+                  </span>
+                </button>
+                {onGoToExams && (
+                  <button
+                    type="button"
+                    onClick={() => onGoToExams(selectedModulo)}
+                    className="min-h-[48px] w-full sm:w-auto px-5 py-3 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs sm:text-sm font-bold cursor-pointer"
+                  >
+                    Ir al Examen Oficial del Módulo {selectedModulo} →
+                  </button>
+                )}
               </div>
             </div>
           )}
