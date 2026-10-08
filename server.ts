@@ -23,10 +23,84 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const DATA_DIR = path.join(__dirname, 'data');
+const IS_VERCEL = Boolean(process.env.VERCEL);
+const DATA_DIR = IS_VERCEL ? '/tmp/evaluaplus-data' : path.join(__dirname, 'data');
 const CENTRAL_DB_PATH = path.join(DATA_DIR, 'evaluaplus-central-db.json');
 const AUDIT_LOG_PATH = path.join(DATA_DIR, 'evaluaplus-save-audit.json');
 const SNAPSHOT_DB_PATH = path.join(DATA_DIR, 'evaluaplus-questions-snapshot.json');
+
+const REDIS_KEY_CENTRAL_DB = 'evaluaplus:central_db:v1';
+const REDIS_KEY_SNAPSHOT = 'evaluaplus:questions_snapshot:v1';
+
+function getUpstashConfig(): { url: string; token: string } | null {
+  let url =
+    process.env.UPSTASH_REDIS_REST_URL ||
+    process.env.KV_REST_API_URL ||
+    process.env.STORAGE_REST_API_URL ||
+    process.env.REDIS_REST_API_URL ||
+    '';
+  let token =
+    process.env.UPSTASH_REDIS_REST_TOKEN ||
+    process.env.KV_REST_API_TOKEN ||
+    process.env.STORAGE_REST_API_TOKEN ||
+    process.env.REDIS_REST_API_TOKEN ||
+    '';
+
+  if (!url || !token) {
+    for (const [k, v] of Object.entries(process.env)) {
+      if (!v) continue;
+      if (!url && (k.endsWith('_REST_API_URL') || k.endsWith('_REDIS_REST_URL'))) {
+        url = v;
+      }
+      if (!token && (k.endsWith('_REST_API_TOKEN') || k.endsWith('_REDIS_REST_TOKEN'))) {
+        token = v;
+      }
+    }
+  }
+
+  const cleanUrl = url.replace(/\/+$/, '');
+  if (cleanUrl && token) {
+    return { url: cleanUrl, token };
+  }
+  return null;
+}
+
+async function loadFromUpstashRedis<T>(key: string): Promise<T | null> {
+  const cfg = getUpstashConfig();
+  if (!cfg) return null;
+  try {
+    const res = await fetch(`${cfg.url}/get/${encodeURIComponent(key)}`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${cfg.token}`
+      }
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { result?: string | null };
+    if (!data || !data.result) return null;
+    return typeof data.result === 'string' ? JSON.parse(data.result) : (data.result as T);
+  } catch (err) {
+    console.error(`Error reading ${key} from Upstash Redis:`, err);
+    return null;
+  }
+}
+
+async function saveToUpstashRedis(key: string, value: unknown): Promise<void> {
+  const cfg = getUpstashConfig();
+  if (!cfg) return;
+  try {
+    await fetch(`${cfg.url}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${cfg.token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(['SET', key, JSON.stringify(value)])
+    });
+  } catch (err) {
+    console.error(`Error saving ${key} to Upstash Redis:`, err);
+  }
+}
 
 const DEFAULT_SERVER_CONFIG: SystemConfig = {
   examenAbierto: true,
@@ -189,6 +263,8 @@ function saveCentralDbToDisk(
       // ignore audit log errors
     }
   }
+
+  void saveToUpstashRedis(REDIS_KEY_CENTRAL_DB, db);
 }
 
 function loadQuestionsSnapshotFromDisk(): Question[] | null {
@@ -214,11 +290,13 @@ function saveQuestionsSnapshotToDisk(snapshot: Question[] | null): void {
       if (fs.existsSync(SNAPSHOT_DB_PATH)) {
         fs.unlinkSync(SNAPSHOT_DB_PATH);
       }
+      void saveToUpstashRedis(REDIS_KEY_SNAPSHOT, []);
       return;
     }
     const tmpPath = `${SNAPSHOT_DB_PATH}.tmp`;
     fs.writeFileSync(tmpPath, JSON.stringify(snapshot), 'utf-8');
     fs.renameSync(tmpPath, SNAPSHOT_DB_PATH);
+    void saveToUpstashRedis(REDIS_KEY_SNAPSHOT, snapshot);
   } catch (err) {
     console.error('Error saving questions snapshot to disk:', err);
   }
@@ -226,6 +304,32 @@ function saveQuestionsSnapshotToDisk(snapshot: Question[] | null): void {
 
 let centralDb: CentralDatabaseState = loadCentralDbFromDisk();
 let questionsSnapshotCache: Question[] | null = loadQuestionsSnapshotFromDisk();
+let lastRedisSyncMs = 0;
+
+async function syncFromUpstashIfConfigured(force = false): Promise<void> {
+  if (!getUpstashConfig()) return;
+  const now = Date.now();
+  if (!force && !IS_VERCEL && now - lastRedisSyncMs < 5000) return;
+  lastRedisSyncMs = now;
+  const remoteDb = await loadFromUpstashRedis<any>(REDIS_KEY_CENTRAL_DB);
+  if (remoteDb && typeof remoteDb === 'object') {
+    const parsedRemote = parseRawDbObject(remoteDb);
+    if (
+      force ||
+      IS_VERCEL ||
+      parsedRemote.revision >= centralDb.revision ||
+      !centralDb.migratedFromClient
+    ) {
+      centralDb = parsedRemote;
+    }
+  }
+  const remoteSnap = await loadFromUpstashRedis<Question[]>(REDIS_KEY_SNAPSHOT);
+  if (Array.isArray(remoteSnap) && remoteSnap.length > 0) {
+    questionsSnapshotCache = remoteSnap;
+  }
+}
+
+void syncFromUpstashIfConfigured(true);
 
 function getGenAIClient(): GoogleGenAI | null {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -240,20 +344,24 @@ function getGenAIClient(): GoogleGenAI | null {
   });
 }
 
-async function startServer() {
-  const app = express();
-  const PORT = Number(process.env.PORT) || 3000;
+export const app = express();
+const PORT = Number(process.env.PORT) || 3000;
 
-  // Allow up to 50MB payloads for large question banks (1060+ questions) and full system backups
-  app.use(express.json({ limit: '50mb' }));
+// Allow up to 50MB payloads for large question banks (1060+ questions) and full system backups
+app.use(express.json({ limit: '50mb' }));
 
-  // Prevent browser/proxy caching on all centralized state API endpoints
-  app.use('/api/state', (_req, res, next) => {
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-    next();
-  });
+// Prevent browser/proxy caching on all centralized state API endpoints & sync with Upstash Redis if configured
+app.use('/api/state', async (_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  try {
+    await syncFromUpstashIfConfigured();
+  } catch {
+    // ignore transient Redis read error
+  }
+  next();
+});
 
   // ============================================================================
   // CENTRALIZED SERVER PERSISTENCE & AUTOMATIC SYNC ENDPOINTS (/api/state/*)
@@ -1050,6 +1158,7 @@ REGLA DE SEGURIDAD CRÍTICA:
     }
   });
 
+async function startServer() {
   const distPath = path.join(__dirname, 'dist');
   const distIndexHtml = path.join(distPath, 'index.html');
 
@@ -1071,4 +1180,8 @@ REGLA DE SEGURIDAD CRÍTICA:
   });
 }
 
-startServer();
+if (!IS_VERCEL) {
+  startServer();
+}
+
+export default app;
