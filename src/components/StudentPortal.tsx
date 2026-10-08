@@ -11,7 +11,11 @@ import {
   CustomMiniRetoTemplate
 } from '../types';
 import { computePayloadChecksum, generateDeterministicAccessCode } from '../data/students';
-import { INITIAL_QUESTIONS, normalizeQuestionList } from '../data/questions';
+import {
+  INITIAL_QUESTIONS,
+  normalizeQuestionList,
+  equalizeQuestionPsychometrics
+} from '../data/questions';
 import {
   StudentPerformanceDashboard,
   ZeroTrialSimulatorModal
@@ -827,8 +831,9 @@ export function StudentPortal({
       chosenRaw = shuffleArray(fallbackPool).slice(0, targetCount);
     }
 
-    // Sanitize payload for client: omit `correcta` and `justificacion`, and optionally shuffle options A/B/C/D
-    const sanitized: SanitizedQuestion[] = chosenRaw.map((q) => {
+    // Sanitize payload for client: equalize psychometrics ("con cascarita" + equal length + mini-explanation in all options), omit `correcta` and `justificacion`, and shuffle options A/B/C/D
+    const sanitized: SanitizedQuestion[] = chosenRaw.map((rawQ, idx) => {
+      const q = equalizeQuestionPsychometrics(rawQ, idx);
       const safeOpts = q.opciones || {
         A: 'Opción A',
         B: 'Opción B',

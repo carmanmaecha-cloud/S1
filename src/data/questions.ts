@@ -830,7 +830,7 @@ export function normalizeQuestion(raw: any, idx = 0): Question {
     else if (opD.toUpperCase() === rawCorr) correctaFinal = 'D';
   }
 
-  return {
+  const baseQuestion: Question = {
     id: String(raw?.id || `MM-M${modulo}-${String(idx + 1).padStart(3, '0')}`),
     modulo,
     tema: temaFinal,
@@ -859,6 +859,163 @@ export function normalizeQuestion(raw: any, idx = 0): Question {
     ),
     casoGrafico: raw?.casoGrafico
   };
+
+  return equalizeQuestionPsychometrics(baseQuestion, idx);
+}
+
+/**
+ * Pool de "Cascaritas" (Trampas Conceptuales Plausibles con Mini-Explicación Técnica por Módulo)
+ * Diseñadas para que los distractores cortos adquieran la misma extensión, estructura sintáctica
+ * (paréntesis técnicos + cláusula justificativa) y rigor aparente que la opción correcta,
+ * evitando que el estudiante adivine por longitud ("la más larga") o por presencia de explicación.
+ */
+const CASCARITA_CLAUSES_BY_MODULE: Record<1 | 2 | 3 | 4 | 5, string[]> = {
+  1: [
+    ' (Auditoría de Densidad Comercial Directa), dado que permite estandarizar la cuota de participación frente a los puntos de venta formales del corredor urbano sin alterar la estructura de costos fijos.',
+    ' (Índice de Elasticidad Cruzada Sectorial), porque prioriza la defensa del margen bruto operativo ante variaciones de precios en los comercios tradicionales de la zona céntrica.',
+    ' (Matriz de Concentración Geográfica Territorial), con el fin de asegurar primero el retorno sobre el inventario físico antes de evaluar sustitutos externos o canales digitales.',
+    ' (Modelo de Saturación de Oferta Primaria), ya que focaliza el presupuesto comercial en igualar los atributos tangibles del competidor líder del barrio.'
+  ],
+  2: [
+    ' (Heurística de Racionalización Post-Compra y Valor Percibido Nominal), dado que el comprador local prioriza el ahorro monetario inmediato por encima de los disparadores simbólicos o de pertenencia social.',
+    ' (Condicionamiento Operante de Frecuencia Transaccional), porque asume que la repetición del estímulo promocional anula la influencia de los grupos de referencia y del entorno familiar.',
+    ' (Teoría de la Utilidad Marginal Directa del Consumidor), con el propósito de estandarizar el mensaje publicitario sin fragmentar la oferta por variables subculturales o emocionales.',
+    ' (Efecto de Anclaje Funcional de Corto Plazo), ya que busca acelerar el cierre en mostrador apelando únicamente a las especificaciones técnicas del producto.'
+  ],
+  3: [
+    ' (Muestreo de Conveniencia Operativa con Validación Interna), dado que reduce los tiempos de trabajo de campo y permite proyectar la demanda a partir de la percepción histórica del equipo de ventas.',
+    ' (Índice de Correlación Descriptiva Univariada), porque prioriza el volumen bruto de encuestas recolectadas sobre la neutralidad semántica o el control de sesgos del instrumento.',
+    ' (Protocolo de Inferencia Estadística Cerrada), con el fin de consolidar rápidamente indicadores financieros internos sin requerir observación etnográfica ni pruebas piloto.',
+    ' (Estandarización Paramétrica de Tendencia Central), ya que evita la dispersión de opiniones abiertas y facilita la tabulación inmediata en hojas de cálculo.'
+  ],
+  4: [
+    ' (Estrategia de Cobertura Masiva Homogénea — Mass Marketing Optimization), dado que maximiza el alcance bruto de la pauta publicitaria y diluye el costo unitario por impresión en todo el municipio.',
+    ' (Segmentación Macro-Demográfica por Rango Etario e Ingreso Nominal), porque agrupa a toda la población bajo variables censales fijas sin incurrir en costos adicionales de personalización por estilo de vida.',
+    ' (Matriz de Estandarización Comercial Unificada), con el propósito de ofrecer un único catálogo y mensaje promocional que simplifique la operación logística del negocio.',
+    ' (Modelo de Agregación de Demanda Indiferenciada), ya que prioriza el volumen total de tráfico en el punto de venta por encima de la micro-segmentación conductual o RFM.'
+  ],
+  5: [
+    ' (Automatización Transaccional Unicanal de Alcance Masivo), dado que concentra todo el presupuesto en pauta de impresiones pagadas delegando el cierre exclusivamente al algoritmo de la red social.',
+    ' (Estrategia de Presencia Multicanal Independiente — Siloed Channel Management), porque administra el punto físico y las redes sociales con precios, catálogos y metas separadas para evitar cruces operativos.',
+    ' (Optimización de Tráfico Frío por Volumen de Clics — CPC Bruto), con el fin de maximizar las visitas al perfil digital sin requerir integración conversacional ni seguimiento post-venta.',
+    ' (Protocolo de Difusión Unidireccional Automatizada), ya que reemplaza la atención consultiva por envíos masivos programados para reducir la carga operativa del equipo.'
+  ]
+};
+
+/**
+ * Suaviza palabras "delatoras" (absolutos o exageraciones caricaturescas en distractores antiguos)
+ * para convertirlas en lenguaje gerencial plausible ("con cascarita").
+ */
+function sanitizeGiveawayWordsInDistractor(text: string): string {
+  return text
+    .replace(/\bpara siempre\b/gi, 'durante el ciclo semestral operativo')
+    .replace(/\bbajo amenaza de multa\b/gi, 'mediante cláusulas de permanencia contractual')
+    .replace(/\bcomo castigo por no comprar\b/gi, 'para compensar el costo financiero de inactividad')
+    .replace(/\b3:00 de la mañana\b/gi, 'horarios de baja saturación publicitaria')
+    .replace(/\bcolecciona helicópteros en Suiza\b/gi, 'registra alto poder adquisitivo fuera del área de influencia local')
+    .replace(/\bestatura en centímetros\b/gi, 'parámetros biométricos y censales estandarizados')
+    .replace(/\bcambie de gustos cada diez minutos\b/gi, 'presente alta volatilidad estacional en sus preferencias')
+    .replace(/\bCerrar el negocio inmediatamente\b/gi, 'Suspender temporalmente la línea de producto actual para reestructurar costos')
+    .replace(/\bIgnorar por completo\b/gi, 'Postergar tácticamente el análisis de')
+    .replace(/\bNo hacer nada\b/gi, 'Mantener invariable la estrategia comercial vigente');
+}
+
+/**
+ * Ecualizador Psicométrico y Anti-Heurístico de Reactivos:
+ * 1. Neutraliza el sesgo de "la respuesta más larga es la correcta".
+ * 2. Si la respuesta correcta tiene mini-explicación o paréntesis técnico, dota a los distractores
+ *    cortos de una "cascarita" (término técnico en paréntesis + mini-explicación plausible).
+ * 3. Garantiza que todas las opciones tengan una extensión similar y que al menos 1 o 2 distractores
+ *    con cascarita igualen o superen ligeramente en longitud a la opción correcta.
+ * 4. Funciona tanto en el banco incluido como al cargar una nueva base de datos de +1.000 preguntas.
+ */
+export function equalizeQuestionPsychometrics(q: Question, seedIdx = 0): Question {
+  if (!q || !q.opciones) return q;
+
+  const mod: 1 | 2 | 3 | 4 | 5 =
+    q.modulo >= 1 && q.modulo <= 5 ? (q.modulo as 1 | 2 | 3 | 4 | 5) : 1;
+  const correctLetter: 'A' | 'B' | 'C' | 'D' =
+    q.correcta === 'A' || q.correcta === 'B' || q.correcta === 'C' || q.correcta === 'D'
+      ? q.correcta
+      : 'A';
+
+  const correctText = String(q.opciones[correctLetter] || '').trim();
+  if (!correctText) return q;
+
+  const correctLen = correctText.length;
+  const correctHasExplanation =
+    correctText.includes('(') ||
+    /\b(porque|dado que|ya que|debido a|con el fin de|permitiendo|lo que permite)\b/i.test(
+      correctText
+    );
+
+  const pool = CASCARITA_CLAUSES_BY_MODULE[mod] || CASCARITA_CLAUSES_BY_MODULE[1];
+  const letters: ('A' | 'B' | 'C' | 'D')[] = ['A', 'B', 'C', 'D'];
+
+  // Hash determinista por ID de pregunta para que la ecualización sea estable
+  let idHash = seedIdx;
+  for (let i = 0; i < (q.id || '').length; i++) {
+    idHash = (idHash * 31 + q.id.charCodeAt(i)) >>> 0;
+  }
+
+  const newOpciones: Record<'A' | 'B' | 'C' | 'D', string> = {
+    A: q.opciones.A,
+    B: q.opciones.B,
+    C: q.opciones.C,
+    D: q.opciones.D
+  };
+
+  let distractorOffset = 0;
+  for (const letter of letters) {
+    if (letter === correctLetter) {
+      newOpciones[letter] = correctText;
+      continue;
+    }
+
+    let distText = sanitizeGiveawayWordsInDistractor(String(q.opciones[letter] || '').trim());
+    if (!distText) distText = `Alternativa operativa estándar del Módulo ${mod}.`;
+
+    const distHasExplanation =
+      distText.includes('(') ||
+      /\b(porque|dado que|ya que|debido a|con el fin de|permitiendo)\b/i.test(distText);
+
+    // Si el distractor es notoriamente más corto que la correcta (< 82% de su longitud)
+    // o si la correcta tiene mini-explicación y el distractor no la tiene:
+    const needsCascarita =
+      (correctLen >= 75 && distText.length < correctLen * 0.82) ||
+      (correctHasExplanation && !distHasExplanation && distText.length < correctLen * 0.9);
+
+    if (needsCascarita) {
+      const cleanBase = distText.replace(/\.+$/, '').trim();
+      const clauseIdx = (idHash + distractorOffset) % pool.length;
+      const chosenClause = pool[clauseIdx];
+
+      // Ajustar para que todos tengan extensión homogénea y al menos un distractor supere o iguale a la correcta
+      let combined = `${cleanBase}${chosenClause}`;
+      // Si el resultado excede demasiado (más de 130% de la correcta y más de 230 caracteres), recortar suavemente en la última coma si aplica
+      if (combined.length > Math.max(correctLen * 1.32, 235) && combined.includes(',')) {
+        const commaParts = combined.split(',');
+        if (commaParts.length > 2) {
+          combined = `${commaParts.slice(0, -1).join(',')}.`;
+        }
+      }
+      newOpciones[letter] = combined;
+    } else {
+      newOpciones[letter] = distText;
+    }
+
+    distractorOffset++;
+  }
+
+  return {
+    ...q,
+    opciones: newOpciones
+  };
+}
+
+export function equalizeQuestionBank(questions: Question[]): Question[] {
+  if (!Array.isArray(questions)) return [];
+  return questions.map((q, idx) => equalizeQuestionPsychometrics(q, idx));
 }
 
 export function extractRawQuestionsArray(input: any): any[] {

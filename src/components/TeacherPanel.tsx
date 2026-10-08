@@ -12,7 +12,11 @@ import {
   StudentRetoModuleProgress
 } from '../types';
 import { generateDeterministicAccessCode } from '../data/students';
-import { normalizeQuestionList, INITIAL_QUESTIONS } from '../data/questions';
+import {
+  normalizeQuestionList,
+  INITIAL_QUESTIONS,
+  equalizeQuestionBank
+} from '../data/questions';
 import { ABProAndMultiCutGradebook } from './ABProAndMultiCutGradebook';
 import { TeacherMiniRetosManager } from './TeacherMiniRetosManager';
 import { TeacherGroupStatisticsView } from './TeacherGroupStatisticsView';
@@ -1019,6 +1023,49 @@ export function TeacherPanel({
       `✓ Se desbloqueó manualmente al estudiante ${target.nombre} (${target.id}) y se anuló el bloqueo del sistema anti-trampa conservando sus intentos válidos (${remainingForStudent}).`
     );
     setTimeout(() => setManualUnlockNotice(null), 6000);
+  };
+
+  const [isEqualizingBankIA, setIsEqualizingBankIA] = useState(false);
+
+  const handleEqualizeQuestionBankIA = async (mode: 'all' | 'ai_deep' = 'all') => {
+    if (questions.length === 0 || isEqualizingBankIA) return;
+    setIsEqualizingBankIA(true);
+    try {
+      savePreviousQuestionsSnapshot(questions);
+      const biasIds = bankQualityAudit.lengthBiasItems.map((b) => b.id);
+      const res = await fetch('/api/ecualizar-preguntas-ia', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mode,
+          questionIds: mode === 'ai_deep' && biasIds.length > 0 ? biasIds.slice(0, 12) : undefined
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.ok && Array.isArray(data.questions) && data.questions.length > 0) {
+          onUpdateQuestions(data.questions);
+          setBankActionNotice(
+            `✓ Inteligencia Anti-Patrones Aplicada y Guardada en el Servidor (${data.questions.length} reactivos): todas las opciones ahora tienen extensión homogénea, distractores con "cascarita" y mini-explicación simétrica.`
+          );
+          return;
+        }
+      }
+      // Fallback local psychometric equalization + auto-save to server
+      const equalized = equalizeQuestionBank(questions);
+      onUpdateQuestions(equalized);
+      setBankActionNotice(
+        `✓ Ecualizador Psicométrico Aplicado y Guardado en el Servidor (${equalized.length} reactivos): se eliminó el sesgo de "la opción más larga" y se integraron distractores con cascarita y mini-explicación.`
+      );
+    } catch {
+      const equalized = equalizeQuestionBank(questions);
+      onUpdateQuestions(equalized);
+      setBankActionNotice(
+        `✓ Ecualizador Psicométrico Aplicado (${equalized.length} reactivos): opciones niveladas en extensión y con distractores de camuflaje.`
+      );
+    } finally {
+      setIsEqualizingBankIA(false);
+    }
   };
 
   // Automatic Question Bank Quality Validator (Auditor de Reactivos)
@@ -5702,6 +5749,22 @@ function doPost(e) {
                 <span>Validador de Calidad del Banco (Auditor de Reactivos)</span>
               </button>
 
+              {/* 3D. Botón Blindar / Ecualizar Opciones con IA Anti-Patrones (Cascarita + Igual Extensión) */}
+              <button
+                type="button"
+                disabled={questions.length === 0 || isEqualizingBankIA}
+                onClick={() => handleEqualizeQuestionBankIA('ai_deep')}
+                className="px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white text-xs font-bold flex items-center gap-1.5 whitespace-nowrap cursor-pointer shadow-xs"
+                title="Aplica Inteligencia Psicométrica e IA para igualar la longitud de las 4 opciones, agregar mini-explicaciones a todos los distractores y crear respuestas con cascarita"
+              >
+                <RefreshCw className={`w-4 h-4 ${isEqualizingBankIA ? 'animate-spin' : ''}`} />
+                <span>
+                  {isEqualizingBankIA
+                    ? 'Ecualizando Opciones con IA...'
+                    : '🧠 Blindar Opciones con IA (Cascarita + Igual Extensión)'}
+                </span>
+              </button>
+
               {/* 4. Botón Ver todas las preguntas / hasta 500 visibles */}
               <button
                 type="button"
@@ -8401,18 +8464,33 @@ function doPost(e) {
             </div>
 
             {/* 3. Sesgo de Longitud en Opción Correcta vs Distractores */}
-            <div className="border border-slate-200 rounded-xl p-4 space-y-2">
-              <div className="flex items-center justify-between">
+            <div className="border border-slate-200 rounded-xl p-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <h4 className="text-sm font-bold text-slate-900">
-                  3. Sesgo de Longitud (Opción Correcta Notoriamente Más Larga que los Distractores)
+                  3. Blindaje Anti-Heurístico y Sesgo de Longitud (Cascaritas + Igual Extensión)
                 </h4>
-                <span className="text-xs font-mono font-bold text-slate-700">
-                  {bankQualityAudit.lengthBiasItems.length} hallazgos
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-mono font-bold text-slate-700">
+                    {bankQualityAudit.lengthBiasItems.length} hallazgos
+                  </span>
+                  <button
+                    type="button"
+                    disabled={isEqualizingBankIA || questions.length === 0}
+                    onClick={() => handleEqualizeQuestionBankIA('ai_deep')}
+                    className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isEqualizingBankIA ? 'animate-spin' : ''}`} />
+                    <span>
+                      {isEqualizingBankIA
+                        ? 'Ecualizando con IA...'
+                        : '🧠 Ecualizar Todo con IA (Cascarita + Igual Extensión)'}
+                    </span>
+                  </button>
+                </div>
               </div>
               {bankQualityAudit.lengthBiasItems.length === 0 ? (
                 <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-900">
-                  ✓ Sin sesgo de longitud: Las opciones correctas mantienen una extensión homogénea frente a los distractores.
+                  ✓ Blindaje Anti-Patrones Activo (0 sesgos de longitud): Todas las opciones mantienen una extensión homogénea, mini-explicaciones simétricas y distractores con «cascarita» para que ningún estudiante pueda adivinar sin leer.
                 </div>
               ) : (
                 <div className="space-y-1.5 max-h-48 overflow-y-auto text-xs">

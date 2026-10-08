@@ -14,7 +14,12 @@ import type {
   CustomMiniRetoTemplate
 } from './src/types.ts';
 import { INITIAL_STUDENTS } from './src/data/students.ts';
-import { INITIAL_QUESTIONS, normalizeQuestionList } from './src/data/questions.ts';
+import {
+  INITIAL_QUESTIONS,
+  normalizeQuestionList,
+  equalizeQuestionPsychometrics,
+  equalizeQuestionBank
+} from './src/data/questions.ts';
 import { INITIAL_CUSTOM_MINI_RETOS } from './src/utils/miniRetosEngine.ts';
 
 dotenv.config();
@@ -1161,6 +1166,142 @@ REGLA DE SEGURIDAD CRÍTICA:
       return res.status(500).json({
         ok: false,
         error: err?.message || 'Error al evaluar la respuesta con IA.'
+      });
+    }
+  });
+
+  // Endpoint 3: Ecualizar Psicométricamente con IA (Distractores con Cascarita + Igual Extensión + Mini-Explicación)
+  app.post('/api/ecualizar-preguntas-ia', async (req, res) => {
+    try {
+      const { questionIds, mode = 'all' } = req.body || {};
+      const targetIdsSet = Array.isArray(questionIds) ? new Set(questionIds.map(String)) : null;
+
+      // Save snapshot before modifying the bank
+      if (centralDb.questions.length > 0) {
+        questionsSnapshotCache = centralDb.questions;
+        saveQuestionsSnapshotToDisk(questionsSnapshotCache);
+      }
+
+      const ai = getGenAIClient();
+      let aiRefinedCount = 0;
+
+      // First pass: deterministic psychometric equalization on all targeted (or all) questions
+      let updatedBank = centralDb.questions.map((q, idx) => {
+        if (targetIdsSet && !targetIdsSet.has(q.id)) return q;
+        return equalizeQuestionPsychometrics(q, idx);
+      });
+
+      // Second pass: if Gemini API is available and mode is 'ai_sample' or specific questionIds (up to 12 per request for speed), refine with Gemini
+      if (ai && (mode === 'ai_deep' || (targetIdsSet && targetIdsSet.size <= 15))) {
+        const candidatesForAI = updatedBank
+          .filter((q) => (targetIdsSet ? targetIdsSet.has(q.id) : true))
+          .slice(0, 10);
+
+        if (candidatesForAI.length > 0) {
+          try {
+            const prompt = `Actúa como psicometrista experto en evaluación universitaria de Marketing Digital.
+Reescribe ÚNICAMENTE los 3 distractores (las opciones INCORRECTAS) de cada una de las siguientes preguntas de examen para eliminar por completo la trampa estudiantil de "elegir la respuesta más larga o la única que tiene explicación".
+
+REGLAS OBLIGATORIAS PARA CADA PREGUNTA:
+1. NO cambies la letra correcta ni el sentido verdadero de la opción correcta.
+2. Si la opción correcta tiene una mini-explicación o paréntesis técnico, TODOS los 3 distractores también deben incluir un concepto real en paréntesis y una mini-explicación comercial que suene muy convincente ("respuesta con cascarita": usa terminología real de marketing pero aplicada de forma sutilmente incorrecta para el caso).
+3. Todas las 4 opciones (A, B, C, D) deben tener prácticamente la MISMA extensión (número de palabras/caracteres), y en al menos 2 distractores la longitud debe ser igual o ligeramente mayor (5% a 12% más larga) que la respuesta correcta.
+4. Elimina palabras absurdas o absolutas ("nunca", "siempre", "jamás", "cerrar el local").
+
+PREGUNTAS A ECUALIZAR:
+${JSON.stringify(
+  candidatesForAI.map((q) => ({
+    id: q.id,
+    modulo: q.modulo,
+    tema: q.tema,
+    enunciado: q.enunciado,
+    correcta: q.correcta,
+    opciones: q.opciones
+  }))
+)}`;
+
+            const response = await ai.models.generateContent({
+              model: 'gemini-3.8-flash',
+              contents: prompt,
+              config: {
+                systemInstruction:
+                  'Eres un psicometrista experto en diseño de exámenes de alta exigencia académica con distractores de camuflaje ("con cascarita") de igual longitud y rigor técnico.',
+                responseMimeType: 'application/json',
+                responseSchema: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      id: { type: Type.STRING },
+                      A: { type: Type.STRING },
+                      B: { type: Type.STRING },
+                      C: { type: Type.STRING },
+                      D: { type: Type.STRING }
+                    },
+                    required: ['id', 'A', 'B', 'C', 'D']
+                  }
+                }
+              }
+            });
+
+            const parsedAI = JSON.parse(response.text?.trim() || '[]');
+            if (Array.isArray(parsedAI)) {
+              const aiMap = new Map<string, { A: string; B: string; C: string; D: string }>();
+              for (const item of parsedAI) {
+                if (item && item.id && item.A && item.B && item.C && item.D) {
+                  aiMap.set(String(item.id), {
+                    A: String(item.A),
+                    B: String(item.B),
+                    C: String(item.C),
+                    D: String(item.D)
+                  });
+                }
+              }
+              updatedBank = updatedBank.map((q) => {
+                const hit = aiMap.get(q.id);
+                if (!hit) return q;
+                aiRefinedCount++;
+                return {
+                  ...q,
+                  opciones: {
+                    A: q.correcta === 'A' ? q.opciones.A : hit.A,
+                    B: q.correcta === 'B' ? q.opciones.B : hit.B,
+                    C: q.correcta === 'C' ? q.opciones.C : hit.C,
+                    D: q.correcta === 'D' ? q.opciones.D : hit.D
+                  }
+                };
+              });
+            }
+          } catch {
+            // Keep deterministic psychometric equalization if Gemini call times out
+          }
+        }
+      }
+
+      centralDb.questions = equalizeQuestionBank(updatedBank);
+      centralDb.questionsRevision += 1;
+      centralDb.revision += 1;
+      centralDb.lastModifiedIso = new Date().toISOString();
+      saveCentralDbToDisk(
+        centralDb,
+        'EcualizadorIA',
+        `Ecualización psicométrica y camuflaje de opciones con cascarita (${centralDb.questions.length} reactivos)`
+      );
+
+      return res.json({
+        ok: true,
+        revision: centralDb.revision,
+        questionsRevision: centralDb.questionsRevision,
+        lastModifiedIso: centralDb.lastModifiedIso,
+        questionsCount: centralDb.questions.length,
+        aiRefinedCount,
+        questions: centralDb.questions,
+        previousQuestionsSnapshotCount: questionsSnapshotCache ? questionsSnapshotCache.length : 0
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        ok: false,
+        error: err?.message || 'Error al ecualizar psicométricamente el banco de preguntas.'
       });
     }
   });
