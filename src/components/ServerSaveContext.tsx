@@ -74,15 +74,8 @@ export function ServerSaveProvider({
   const [lastGlobalSavedAt, setLastGlobalSavedAt] = useState<string | null>(null);
   const [isGlobalSaving, setIsGlobalSaving] = useState(false);
 
-  const markSectionDirty = useCallback((sectionKey: string, description = 'Cambios pendientes por guardar') => {
-    setDirtySections((prev) => ({
-      ...prev,
-      [sectionKey]: description
-    }));
-  }, []);
-
   const saveSectionToServer = useCallback(
-    async (sectionKey: string, description = 'Guardado manual en Base de Datos del Servidor') => {
+    async (sectionKey: string, description = 'Guardado en Base de Datos del Servidor') => {
       setSavingSections((prev) => ({ ...prev, [sectionKey]: true }));
       setIsGlobalSaving(true);
       try {
@@ -95,6 +88,7 @@ export function ServerSaveProvider({
           }));
           setLastGlobalSavedAt(timeStr);
           setDirtySections((prev) => {
+            if (!prev[sectionKey]) return prev;
             const next = { ...prev };
             delete next[sectionKey];
             return next;
@@ -107,6 +101,21 @@ export function ServerSaveProvider({
       }
     },
     [onExecuteServerSave]
+  );
+
+  const markSectionDirty = useCallback(
+    (sectionKey: string, description = 'Cambios pendientes por guardar') => {
+      // Student panel changes are always persisted automatically to the Server Database
+      if (sectionKey.startsWith('estudiante_')) {
+        void saveSectionToServer(sectionKey, description);
+        return;
+      }
+      setDirtySections((prev) => ({
+        ...prev,
+        [sectionKey]: description
+      }));
+    },
+    [saveSectionToServer]
   );
 
   const saveAllToServer = useCallback(
@@ -215,6 +224,7 @@ interface OptionServerSaveBarProps {
   compact?: boolean;
   dark?: boolean;
   alwaysShow?: boolean;
+  autoSave?: boolean;
   onBeforeSave?: () => void;
 }
 
@@ -225,6 +235,7 @@ export function OptionServerSaveBar({
   compact = false,
   dark = false,
   alwaysShow = true,
+  autoSave,
   onBeforeSave
 }: OptionServerSaveBarProps) {
   const {
@@ -236,6 +247,8 @@ export function OptionServerSaveBar({
   } = useServerSave();
   const [localError, setLocalError] = useState<string | null>(null);
   const [justSavedFlash, setJustSavedFlash] = useState(false);
+
+  const isAutoSave = autoSave ?? sectionKey.startsWith('estudiante_');
 
   const serializedWatch =
     watchValue !== undefined
@@ -253,10 +266,23 @@ export function OptionServerSaveBar({
   useEffect(() => {
     if (serializedWatch === undefined) return;
     if (prevWatchRef.current !== undefined && prevWatchRef.current !== serializedWatch) {
-      markSectionDirty(sectionKey, `Cambio realizado en «${label}»`);
+      if (isAutoSave) {
+        onBeforeSave?.();
+        void saveSectionToServer(
+          sectionKey,
+          `Actualización automática en «${label}»`
+        ).then((res) => {
+          if (res.ok) {
+            setJustSavedFlash(true);
+            setTimeout(() => setJustSavedFlash(false), 4500);
+          }
+        });
+      } else {
+        markSectionDirty(sectionKey, `Cambio realizado en «${label}»`);
+      }
     }
     prevWatchRef.current = serializedWatch;
-  }, [serializedWatch, sectionKey, label, markSectionDirty]);
+  }, [serializedWatch, sectionKey, label, isAutoSave, markSectionDirty, saveSectionToServer, onBeforeSave]);
 
   const isDirty = Boolean(dirtySections[sectionKey]);
   const isSaving = Boolean(savingSections[sectionKey]);
@@ -280,6 +306,130 @@ export function OptionServerSaveBar({
       setTimeout(() => setJustSavedFlash(false), 6000);
     }
   };
+
+  if (isAutoSave) {
+    if (compact) {
+      return (
+        <div
+          className={`no-print mt-2 pt-2 border-t flex flex-wrap items-center justify-between gap-2 text-[11px] transition-all ${
+            dark ? 'border-slate-700/80' : 'border-slate-200/80'
+          }`}
+        >
+          <div className="flex items-center gap-1.5">
+            {isSaving ? (
+              <span
+                className={`font-mono flex items-center gap-1.5 font-semibold ${
+                  dark ? 'text-amber-300' : 'text-amber-700'
+                }`}
+              >
+                <RefreshCw className="w-3.5 h-3.5 shrink-0 animate-spin" />
+                <span>Cambios detectados · Actualizando automáticamente en BD del Servidor...</span>
+              </span>
+            ) : (
+              <span
+                className={`font-mono flex items-center gap-1.5 font-semibold ${
+                  dark ? 'text-emerald-300' : 'text-emerald-700'
+                }`}
+              >
+                <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                <span>
+                  ✓ Actualización automática en Base de Datos del Servidor ({savedTime || 'En tiempo real'})
+                </span>
+              </span>
+            )}
+          </div>
+          <span
+            className={`px-2 py-0.5 rounded-md font-mono text-[10px] font-bold ${
+              dark
+                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                : 'bg-emerald-100 text-emerald-900 border border-emerald-300'
+            }`}
+          >
+            ⚡ Sincronización Automática
+          </span>
+        </div>
+      );
+    }
+
+    return (
+      <div
+        className={`no-print rounded-xl p-3 border flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 transition-all ${
+          isSaving
+            ? dark
+              ? 'bg-amber-500/20 border-amber-400 text-white'
+              : 'bg-amber-50 border-amber-400 text-slate-900 shadow-xs'
+            : justSavedFlash
+            ? dark
+              ? 'bg-emerald-950/60 border-emerald-500/60 text-emerald-200'
+              : 'bg-emerald-50 border-emerald-300 text-emerald-950'
+            : dark
+            ? 'bg-slate-900/70 border-slate-700 text-slate-200'
+            : 'bg-slate-50 border-slate-200 text-slate-700'
+        }`}
+      >
+        <div className="flex items-center gap-2 text-xs">
+          {isSaving ? (
+            <RefreshCw
+              className={`w-4 h-4 shrink-0 animate-spin ${
+                dark ? 'text-amber-300' : 'text-amber-600'
+              }`}
+            />
+          ) : (
+            <Database
+              className={`w-4 h-4 shrink-0 ${
+                justSavedFlash
+                  ? 'text-emerald-600'
+                  : dark
+                  ? 'text-emerald-400'
+                  : 'text-emerald-600'
+              }`}
+            />
+          )}
+          <div>
+            <span className="font-bold">{label}: </span>
+            {isSaving ? (
+              <span className={dark ? 'text-amber-200 font-semibold' : 'text-amber-900 font-semibold'}>
+                Cambios detectados — Actualizando automáticamente en la Base de Datos del Servidor...
+              </span>
+            ) : savedTime ? (
+              <span className={dark ? 'text-emerald-300 font-mono' : 'text-emerald-800 font-mono'}>
+                ✓ Cambios detectados actualizados automáticamente en la Base de Datos del Servidor ({savedTime})
+              </span>
+            ) : (
+              <span className={dark ? 'text-slate-300' : 'text-slate-600'}>
+                ✓ Sincronización automática activa con la Base de Datos del Servidor Central (Tiempo real).
+              </span>
+            )}
+            {localError && (
+              <div className="text-[11px] text-red-600 font-semibold mt-0.5">{localError}</div>
+            )}
+          </div>
+        </div>
+
+        <div
+          className={`px-3 py-1.5 rounded-xl text-xs font-extrabold flex items-center justify-center gap-1.5 shrink-0 ${
+            isSaving
+              ? 'bg-amber-500 text-slate-950'
+              : dark
+              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+              : 'bg-emerald-100 text-emerald-900 border border-emerald-300'
+          }`}
+        >
+          {isSaving ? (
+            <>
+              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              <span>Actualizando BD del Servidor...</span>
+            </>
+          ) : (
+            <>
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              <span>⚡ Guardado Automático en Servidor</span>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   if (compact) {
     return (

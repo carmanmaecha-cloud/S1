@@ -10,6 +10,7 @@ export default defineConfig(() => {
     resolve: {
       alias: {
         '@': path.resolve(import.meta.dirname || __dirname, '.'),
+        'react-is': path.resolve(import.meta.dirname || __dirname, 'src/shims/react-is.ts'),
       },
     },
     build: {

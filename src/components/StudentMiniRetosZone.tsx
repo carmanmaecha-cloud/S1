@@ -20,7 +20,7 @@ import {
   normalizeSpanishText
 } from '../utils/miniRetosEngine';
 import { INITIAL_QUESTIONS } from '../data/questions';
-import { OptionServerSaveBar } from './ServerSaveContext';
+import { OptionServerSaveBar, useServerSave } from './ServerSaveContext';
 import {
   Trophy,
   Sparkles,
@@ -147,6 +147,7 @@ export function StudentMiniRetosZone({
   config,
   customMiniRetos
 }: StudentMiniRetosZoneProps) {
+  const { handleExecuteServerSave } = useServerSave();
   const [selectedModulo, setSelectedModulo] = useState<1 | 2 | 3 | 4 | 5>(1);
   const [selectedMechanicFilter, setSelectedMechanicFilter] = useState<
     MiniRetoMechanicId | 'random'
@@ -385,12 +386,16 @@ export function StudentMiniRetosZone({
       }
 
       onUpdateStudentProfile(updatedStudent);
+      void handleExecuteServerSave(
+        'estudiante_vitrina_insignias',
+        `Actualización automática de Mini Reto M${activeReto.modulo} en Base de Datos del Servidor`
+      );
       setLastAttemptResult(suspendedAttempt);
       setRetoWarningModalText(null);
       setActiveReto(null);
       setIsEvaluating(false);
     },
-    [activeReto, retoProgressMap, student, studentAnswer, thresholdPct, onUpdateStudentProfile]
+    [activeReto, retoProgressMap, student, studentAnswer, thresholdPct, onUpdateStudentProfile, handleExecuteServerSave]
   );
 
   // Active Anti-Cheat Event Listeners while a Mini Reto is open
@@ -920,6 +925,10 @@ export function StudentMiniRetosZone({
     }
 
     onUpdateStudentProfile(updatedStudent);
+    void handleExecuteServerSave(
+      'estudiante_vitrina_insignias',
+      `Actualización automática de Mini Reto M${activeReto.modulo} (${finalEvaluation.porcentajeIA}%) en Base de Datos del Servidor`
+    );
     setLastAttemptResult(attemptRecord);
     setActiveReto(null);
     setIsEvaluating(false);
@@ -1107,6 +1116,7 @@ export function StudentMiniRetosZone({
         <OptionServerSaveBar
           sectionKey="estudiante_vitrina_insignias"
           label="Vitrina de Insignias y Progreso de Mini Retos"
+          autoSave={true}
           watchValue={{
             progresoRetos: student.progresoRetos,
             histLen: (student.historialIntentosRetos || []).length
@@ -1713,6 +1723,7 @@ export function StudentMiniRetosZone({
         <OptionServerSaveBar
           sectionKey="estudiante_modulo_reto_activo"
           label={`Progreso de Mini Retos — Módulo ${selectedModulo}`}
+          autoSave={true}
           watchValue={{
             modulo: selectedModulo,
             intentos: currentModProgress.intentosUsados,

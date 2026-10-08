@@ -17,7 +17,7 @@ import {
   ZeroTrialSimulatorModal
 } from './StudentPerformanceDashboard';
 import { StudentMiniRetosZone } from './StudentMiniRetosZone';
-import { OptionServerSaveBar } from './ServerSaveContext';
+import { OptionServerSaveBar, useServerSave } from './ServerSaveContext';
 import { useAuthSession } from '../context/AuthContext';
 import {
   ShieldCheck,
@@ -239,6 +239,7 @@ export function StudentPortal({
     setSelectedModality: persistSelectedModality,
     setStudentExamPhase: persistStudentExamPhase
   } = useAuthSession();
+  const { handleExecuteServerSave } = useServerSave();
 
   const [verifiedStudentId, setVerifiedStudentId] = useState<string | null>(() =>
     authState.studentSessionActive && authState.verifiedStudentId
@@ -630,7 +631,11 @@ export function StudentPortal({
       codigoAcceso: cleanCode
     };
     onUpdateStudentProfile(updated);
-    setProfileSaveMsg('✓ Sus datos (Nombre y Código de Acceso) han sido actualizados correctamente.');
+    void handleExecuteServerSave(
+      'estudiante_perfil_datos',
+      `Actualización automática de perfil del estudiante (${updated.nombre})`
+    );
+    setProfileSaveMsg('✓ Sus datos (Nombre y Código de Acceso) se actualizaron automáticamente en la Base de Datos del Servidor.');
     setTimeout(() => {
       setProfileSaveMsg(null);
       setEditProfileModalOpen(false);
@@ -1074,6 +1079,10 @@ export function StudentPortal({
         pantallaMaximizada: true
       });
       onRecordAttempt(result, updatedStudent);
+      void handleExecuteServerSave(
+        'estudiante_certificado_resultados',
+        `Registro automático de examen (${modConfig.title} - Intento #${currentAttemptNumber} - Nota: ${rawNota.toFixed(1)})`
+      );
       setFinishedResult(result);
       setConfirmSubmitModal(false);
       setDrawerOpen(false);
@@ -1094,7 +1103,8 @@ export function StudentPortal({
       config.notaMinimaAprobacion,
       onUpdateLiveSession,
       onRecordAttempt,
-      onSaveActiveExamBackup
+      onSaveActiveExamBackup,
+      handleExecuteServerSave
     ]
   );
 
@@ -1618,6 +1628,7 @@ export function StudentPortal({
         <OptionServerSaveBar
           sectionKey="estudiante_perfil_datos"
           label={`Sesión y Datos del Estudiante (${currentStudent.nombre})`}
+          autoSave={true}
           watchValue={{
             nombre: currentStudent.nombre,
             codigoAcceso: currentStudent.codigoAcceso,
@@ -1949,6 +1960,7 @@ export function StudentPortal({
             <OptionServerSaveBar
               sectionKey="estudiante_modalidades_examen"
               label={`Modalidad Seleccionada (${selectedModConfig.title})`}
+              autoSave={true}
               watchValue={{
                 selectedModality,
                 attemptsCount: studentAttempts.length
@@ -2233,6 +2245,7 @@ export function StudentPortal({
                 <OptionServerSaveBar
                   sectionKey="estudiante_modal_datos"
                   label="Datos de Perfil del Estudiante"
+                  autoSave={true}
                   watchValue={{ profileNameInput, profileCodeInput }}
                   compact={true}
                 />
@@ -2662,6 +2675,7 @@ export function StudentPortal({
           <OptionServerSaveBar
             sectionKey="estudiante_examen_en_curso"
             label={`Progreso de Respuestas del Examen (${answeredCount}/${activeQuestions.length})`}
+            autoSave={true}
             watchValue={{
               answeredCount,
               markedCount,
@@ -3074,6 +3088,7 @@ export function StudentPortal({
           <OptionServerSaveBar
             sectionKey="estudiante_certificado_resultados"
             label="Certificado y Calificación Oficial en Servidor"
+            autoSave={true}
             watchValue={finishedResult.attemptId}
           />
         </div>
