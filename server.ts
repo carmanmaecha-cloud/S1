@@ -350,12 +350,17 @@ const PORT = Number(process.env.PORT) || 3000;
 app.use(express.json({ limit: '50mb' }));
 
 // Prevent browser/proxy caching on all centralized state API endpoints & sync with Upstash Redis if configured
-app.use('/api/state', async (_req, res, next) => {
+app.use('/api/state', async (req, res, next) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
   try {
-    await syncFromUpstashIfConfigured();
+    const forceSync = req.query.force === 'true' || req.query.force === '1';
+    if (forceSync && !getUpstashConfig()) {
+      centralDb = loadCentralDbFromDisk();
+      questionsSnapshotCache = loadQuestionsSnapshotFromDisk();
+    }
+    await syncFromUpstashIfConfigured(forceSync);
   } catch {
     // ignore transient Redis read error
   }
@@ -366,8 +371,9 @@ app.use('/api/state', async (_req, res, next) => {
   // CENTRALIZED SERVER PERSISTENCE & AUTOMATIC SYNC ENDPOINTS (/api/state/*)
   // ============================================================================
 
-  // 1. GET /api/state — Fetch authoritative server state (always returns live data; only skips 740 questions when unchanged)
+  // 1. GET /api/state — Fetch authoritative server state (always returns live data; only skips 740 questions when unchanged unless force=true)
   app.get('/api/state', (req, res) => {
+    const forceFull = req.query.force === 'true' || req.query.force === '1';
     const clientRev = req.query.clientRevision !== undefined ? Number(req.query.clientRevision) : -1;
     const clientQRev =
       req.query.clientQuestionsRevision !== undefined
@@ -388,8 +394,10 @@ app.use('/api/state', async (_req, res, next) => {
 
     const snapshotCount = questionsSnapshotCache ? questionsSnapshotCache.length : 0;
     const isUpToDate =
-      clientRev === centralDb.revision && clientQRev === centralDb.questionsRevision;
-    const includeQuestions = clientQRev !== centralDb.questionsRevision;
+      !forceFull &&
+      clientRev === centralDb.revision &&
+      clientQRev === centralDb.questionsRevision;
+    const includeQuestions = forceFull || clientQRev !== centralDb.questionsRevision;
 
     return res.json({
       upToDate: isUpToDate,

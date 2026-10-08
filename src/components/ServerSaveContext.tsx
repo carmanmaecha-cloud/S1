@@ -20,6 +20,7 @@ interface ServerSaveContextValue {
     description?: string,
     requiresConfirmation?: boolean
   ) => void;
+  clearDirtyState: () => void;
   saveSectionToServer: (
     sectionKey: string,
     description?: string
@@ -43,6 +44,7 @@ export function useServerSave(): ServerSaveContextValue {
       lastGlobalSavedAt: null,
       isGlobalSaving: false,
       markSectionDirty: () => {},
+      clearDirtyState: () => {},
       saveSectionToServer: async (): Promise<ServerSaveResponse> => ({
         ok: true,
         savedAtFormatted: new Date().toLocaleTimeString('es-CO')
@@ -178,6 +180,14 @@ export function ServerSaveProvider({
     [onExecuteServerSave, dirtySections]
   );
 
+  const clearDirtyState = useCallback(() => {
+    Object.values(autoSaveTimersRef.current).forEach((t) => clearTimeout(t));
+    autoSaveTimersRef.current = {};
+    setDirtySections({});
+    setSavingSections({});
+    setAutoSaveBannerInfo(null);
+  }, []);
+
   const handleExecuteServerSave = useCallback(
     async (sectionKey = 'global_save', description = 'Guardado en Base de Datos del Servidor') => {
       if (sectionKey === 'global_save') {
@@ -199,6 +209,7 @@ export function ServerSaveProvider({
         lastGlobalSavedAt,
         isGlobalSaving,
         markSectionDirty,
+        clearDirtyState,
         saveSectionToServer,
         saveAllToServer,
         handleExecuteServerSave

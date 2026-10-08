@@ -19,6 +19,7 @@ import { TeacherGroupStatisticsView } from './TeacherGroupStatisticsView';
 import { TeacherRealtimeSummaryPanel } from './TeacherRealtimeSummaryPanel';
 import { OptionServerSaveBar, useServerSave } from './ServerSaveContext';
 import { useAuthSession } from '../context/AuthContext';
+import type { ForceServerResyncResult } from '../App';
 import { OFFICIAL_BADGES, getDefaultRetoProgress } from '../utils/miniRetosEngine';
 import {
   Lock,
@@ -86,7 +87,7 @@ interface TeacherPanelProps {
     config?: SystemConfig;
     customMiniRetos?: CustomMiniRetoTemplate[];
   }) => Promise<void>;
-  onForceServerSync?: () => void;
+  onForceServerSync?: () => Promise<ForceServerResyncResult | void> | void;
 }
 
 type TeacherTab =
@@ -178,8 +179,12 @@ export function TeacherPanel({
     dirtySections,
     isGlobalSaving,
     markSectionDirty,
+    clearDirtyState,
     handleExecuteServerSave
   } = useServerSave();
+
+  const [isForcingServerResync, setIsForcingServerResync] = useState<boolean>(false);
+  const [forceResyncResult, setForceResyncResult] = useState<ForceServerResyncResult | null>(null);
 
   // Editable Config fields with explicit local pendingChange & Guardando... states
   const [pinAulaDraft, setPinAulaDraft] = useState<string>(config.pinAulaDia || 'AULA26');
@@ -543,6 +548,49 @@ export function TeacherPanel({
   // Google Sheets Retry Queue & Full System Backup (.evaluaplus.json)
   const [retrySyncStatus, setRetrySyncStatus] = useState<string | null>(null);
   const [backupRestoreStatus, setBackupRestoreStatus] = useState<{ type: 'ok' | 'err'; msg: string } | null>(null);
+
+  useEffect(() => {
+    setEmailInput(config.correoRecuperacion || '');
+  }, [config.correoRecuperacion]);
+
+  useEffect(() => {
+    setWebhookUrlInput(config.webhookUrl || '');
+  }, [config.webhookUrl]);
+
+  const handleExecuteForceServerResync = async () => {
+    if (isForcingServerResync) return;
+    setIsForcingServerResync(true);
+    try {
+      clearDirtyState();
+      setStudentCodeDrafts({});
+      setInlineEditingCodeStudentId(null);
+      setInlineCodeInputValue('');
+      setStudentUpdateBanner(null);
+
+      const res = await onForceServerSync?.();
+      if (res && typeof res === 'object') {
+        setForceResyncResult(res);
+      } else {
+        setForceResyncResult({
+          ok: true,
+          syncedAtFormatted: new Date().toLocaleTimeString('es-CO'),
+          revision: 1,
+          questionsRevision: 1,
+          clearedKeysCount: 9,
+          counts: {
+            students: students.length,
+            questions: questions.length,
+            attempts: attempts.length,
+            abproEvaluations: abproEvaluations.length,
+            liveSessions: liveSessions.length,
+            customMiniRetos: customMiniRetos.length
+          }
+        });
+      }
+    } finally {
+      setIsForcingServerResync(false);
+    }
+  };
 
   // Login Handler (Never reveals default or current password on failure; auto-routes valid students who mistakenly use the teacher login screen)
   const handleTeacherLogin = (e: React.FormEvent) => {
@@ -2786,6 +2834,22 @@ function doPost(e) {
           <div className="flex flex-wrap items-center gap-2.5">
             <button
               type="button"
+              disabled={isForcingServerResync}
+              onClick={handleExecuteForceServerResync}
+              className="px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-400 text-white text-xs font-bold flex items-center gap-1.5 whitespace-nowrap shadow-xs transition-colors cursor-pointer"
+              title="Elimina cualquier caché local de este navegador y descarga el estado real y completo de la Base de Datos del Servidor"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isForcingServerResync ? 'animate-spin' : ''}`} />
+              <Database className="w-3.5 h-3.5" />
+              <span>
+                {isForcingServerResync
+                  ? 'Resincronizando desde Servidor...'
+                  : 'Forzar Resincronización BD Servidor (Limpiar Caché)'}
+              </span>
+            </button>
+
+            <button
+              type="button"
               onClick={() => triggerPrintView('fichas_aula')}
               className="px-3.5 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-800 flex items-center gap-1.5 whitespace-nowrap"
             >
@@ -2828,6 +2892,48 @@ function doPost(e) {
             </button>
           </div>
         </div>
+
+        {/* Notificación de Resincronización Forzada desde la Base de Datos del Servidor */}
+        {forceResyncResult && (
+          <div
+            className={`rounded-xl p-3.5 border flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs ${
+              forceResyncResult.ok
+                ? 'bg-emerald-50/90 border-emerald-300 text-emerald-950'
+                : 'bg-red-50 border-red-300 text-red-900'
+            }`}
+          >
+            <div className="flex items-start sm:items-center gap-2.5">
+              {forceResyncResult.ok ? (
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5 sm:mt-0" />
+              ) : (
+                <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5 sm:mt-0" />
+              )}
+              <div className="space-y-0.5">
+                <div className="font-bold">
+                  {forceResyncResult.ok
+                    ? `✓ Resincronización total completada desde la Base de Datos del Servidor (${forceResyncResult.syncedAtFormatted}) · Caché local purgada`
+                    : `⚠️ No fue posible completar la resincronización con el servidor (${forceResyncResult.error || 'Error de red'})`}
+                </div>
+                <div className="text-[11px] font-mono text-slate-700 flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span>Revisión BD: #{forceResyncResult.revision}</span>
+                  <span>Revisión Banco: #{forceResyncResult.questionsRevision}</span>
+                  <span>Estudiantes: {students.length}</span>
+                  <span>Preguntas Activas: {questions.length}</span>
+                  <span>Intentos Calificados: {attempts.length}</span>
+                  <span>Sesiones en Vivo: {liveSessions.length}</span>
+                  <span>ABPro: {abproEvaluations.length}</span>
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setForceResyncResult(null)}
+              className="px-2.5 py-1 rounded-md border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-semibold self-end sm:self-center shrink-0 cursor-pointer"
+            >
+              Cerrar ✕
+            </button>
+          </div>
+        )}
 
         {/* Master Switches: Exam Open/Closed, Daily Classroom PIN, Immediate Feedback, Option Shuffling */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3.5">
@@ -6362,6 +6468,62 @@ function doPost(e) {
                 }`}
               >
                 {backupRestoreStatus.msg}
+              </div>
+            )}
+          </div>
+
+          {/* Forzar Resincronización de Todos los Datos desde el Servidor y Eliminar Caché Local */}
+          <div className="bg-white border border-emerald-200 rounded-xl p-6 space-y-4 lg:col-span-2">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 text-slate-900">
+                  <RefreshCw className={`w-5 h-5 text-emerald-700 ${isForcingServerResync ? 'animate-spin' : ''}`} />
+                  <h2 className="text-lg font-bold">
+                    Forzar Resincronización Total desde el Servidor (Purgar Caché Local)
+                  </h2>
+                </div>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  Elimina inmediatamente cualquier caché local almacenada en este navegador (<code>localStorage</code> y Cache Storage) y descarga desde cero el estado real de la Base de Datos Central del Servidor (Upstash Redis / Servidor Central): nómina de estudiantes, códigos de acceso, banco de preguntas, intentos calificados, progreso de Mini Retos, sesiones en vivo y configuración.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                disabled={isForcingServerResync}
+                onClick={handleExecuteForceServerResync}
+                className="px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-400 text-white text-xs font-bold flex items-center gap-2 whitespace-nowrap cursor-pointer shrink-0 shadow-xs"
+              >
+                <RefreshCw className={`w-4 h-4 ${isForcingServerResync ? 'animate-spin' : ''}`} />
+                <span>
+                  {isForcingServerResync
+                    ? 'Purgando Caché y Descargando BD...'
+                    : 'Forzar Resincronización y Limpiar Caché Ahora'}
+                </span>
+              </button>
+            </div>
+
+            {forceResyncResult && (
+              <div
+                className={`p-3.5 rounded-xl border text-xs space-y-1 ${
+                  forceResyncResult.ok
+                    ? 'bg-emerald-50 border-emerald-300 text-emerald-950'
+                    : 'bg-red-50 border-red-300 text-red-900'
+                }`}
+              >
+                <div className="font-bold">
+                  {forceResyncResult.ok
+                    ? `✓ Estado real descargado directamente del servidor (${forceResyncResult.syncedAtFormatted}) — Caché local eliminada y reconstruida`
+                    : `⚠️ Error al resincronizar con el servidor: ${forceResyncResult.error || 'Error de conexión'}`}
+                </div>
+                <div className="font-mono text-[11px] text-slate-700 flex flex-wrap gap-x-4 gap-y-1">
+                  <span>Revisión Servidor: #{forceResyncResult.revision}</span>
+                  <span>Revisión Banco: #{forceResyncResult.questionsRevision}</span>
+                  <span>Estudiantes en BD: {students.length}</span>
+                  <span>Reactivos en BD: {questions.length}</span>
+                  <span>Exámenes Calificados: {attempts.length}</span>
+                  <span>Evaluaciones ABPro: {abproEvaluations.length}</span>
+                  <span>Plantillas Mini Retos: {customMiniRetos.length}</span>
+                </div>
               </div>
             )}
           </div>

@@ -21,6 +21,24 @@ import { TeacherPanel } from './components/TeacherPanel';
 import { ServerSaveProvider, ServerSaveResponse } from './components/ServerSaveContext';
 import { AuthProvider, useAuthSession } from './context/AuthContext';
 
+export interface ForceServerResyncResult {
+  ok: boolean;
+  syncedAtFormatted: string;
+  revision: number;
+  questionsRevision: number;
+  lastModifiedIso?: string;
+  clearedKeysCount: number;
+  counts: {
+    students: number;
+    questions: number;
+    attempts: number;
+    abproEvaluations: number;
+    liveSessions: number;
+    customMiniRetos: number;
+  };
+  error?: string;
+}
+
 const STORAGE_KEYS = {
   STUDENTS: 'evaluaplus_students_v2',
   QUESTIONS: 'evaluaplus_questions_v3_unificado_2026',
@@ -30,7 +48,8 @@ const STORAGE_KEYS = {
   ABPRO: 'evaluaplus_abpro_v2',
   CONFIG: 'evaluaplus_config_v2',
   CUSTOM_MINI_RETOS: 'evaluaplus_custom_mini_retos_v1',
-  LEGACY_SNAPSHOT: 'evaluaplus_prev_questions_snapshot_v1'
+  LEGACY_SNAPSHOT: 'evaluaplus_prev_questions_snapshot_v1',
+  ACTIVE_EXAM_BACKUP: 'evaluaplus_active_exam_backup_v2'
 };
 
 const DEFAULT_CONFIG: SystemConfig = {
@@ -278,28 +297,84 @@ function AppContent() {
 
   // Pull & synchronize authoritative state from the centralized server
   const fetchAndApplyServerState = useCallback(
-    async (forceFullPull = false) => {
+    async (
+      forceFullPull = false,
+      purgeLocalCache = false
+    ): Promise<ForceServerResyncResult | null> => {
       // Do not overwrite state while a local mutation is currently being sent to the server
-      if (pendingWritesCountRef.current > 0 && !forceFullPull) {
-        return;
+      if (pendingWritesCountRef.current > 0 && !forceFullPull && !purgeLocalCache) {
+        return null;
+      }
+
+      let clearedKeysCount = 0;
+      if (purgeLocalCache) {
+        try {
+          const keysToPurge = new Set<string>(Object.values(STORAGE_KEYS));
+          for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k && k.startsWith('evaluaplus_') && k !== 'evaluaplus_global_auth_session_v1') {
+              keysToPurge.add(k);
+            }
+          }
+          keysToPurge.forEach((k) => {
+            if (localStorage.getItem(k) !== null) {
+              clearedKeysCount += 1;
+            }
+            localStorage.removeItem(k);
+          });
+        } catch {
+          // ignore localStorage access errors
+        }
+
+        try {
+          if (typeof window !== 'undefined' && 'caches' in window) {
+            const cacheNames = await window.caches.keys();
+            await Promise.all(cacheNames.map((name) => window.caches.delete(name)));
+          }
+        } catch {
+          // ignore Cache Storage errors
+        }
+
+        serverRevisionRef.current = -1;
+        questionsRevisionRef.current = -1;
       }
 
       const fetchStartedAt = Date.now();
 
       try {
-        const cRev = forceFullPull ? -1 : serverRevisionRef.current;
-        const qRev = forceFullPull ? -1 : questionsRevisionRef.current;
+        const cRev = forceFullPull || purgeLocalCache ? -1 : serverRevisionRef.current;
+        const qRev = forceFullPull || purgeLocalCache ? -1 : questionsRevisionRef.current;
+        const forceParam = forceFullPull || purgeLocalCache ? '&force=true' : '';
         const res = await fetch(
-          `/api/state?clientRevision=${cRev}&clientQuestionsRevision=${qRev}&_t=${fetchStartedAt}`,
+          `/api/state?clientRevision=${cRev}&clientQuestionsRevision=${qRev}${forceParam}&_t=${fetchStartedAt}`,
           {
             method: 'GET',
             cache: 'no-store',
-            headers: { Accept: 'application/json' }
+            headers: {
+              Accept: 'application/json',
+              'Cache-Control': 'no-cache, no-store, must-revalidate',
+              Pragma: 'no-cache'
+            }
           }
         );
         if (!res.ok) {
           setIsServerHydrated(true);
-          return;
+          return {
+            ok: false,
+            syncedAtFormatted: new Date().toLocaleTimeString('es-CO'),
+            revision: serverRevisionRef.current,
+            questionsRevision: questionsRevisionRef.current,
+            clearedKeysCount,
+            counts: {
+              students: stateRef.current.students.length,
+              questions: stateRef.current.questions.length,
+              attempts: stateRef.current.attempts.length,
+              abproEvaluations: stateRef.current.abproEvaluations.length,
+              liveSessions: stateRef.current.liveSessions.length,
+              customMiniRetos: stateRef.current.customMiniRetos.length
+            },
+            error: `El servidor respondió con código ${res.status}`
+          };
         }
 
         const data = await res.json();
@@ -308,13 +383,19 @@ function AppContent() {
         if (
           (pendingWritesCountRef.current > 0 ||
             lastMutationStartedAtRef.current >= fetchStartedAt) &&
-          !forceFullPull
+          !forceFullPull &&
+          !purgeLocalCache
         ) {
-          return;
+          return null;
         }
 
         // One-time migration: if the server was just initialized from scratch and this browser already had custom state
-        if (data.migratedFromClient === false && serverRevisionRef.current === -1) {
+        // Never run client-to-server migration when the teacher explicitly forced a resync from the server!
+        if (
+          !purgeLocalCache &&
+          data.migratedFromClient === false &&
+          serverRevisionRef.current === -1
+        ) {
           const hasLocalCustomizations =
             Boolean(localStorage.getItem(STORAGE_KEYS.QUESTIONS)) ||
             Boolean(localStorage.getItem(STORAGE_KEYS.ATTEMPTS)) ||
@@ -332,7 +413,7 @@ function AppContent() {
               questionsBankExplicitlyCleared: stateRef.current.questionsBankExplicitlyCleared
             });
             setIsServerHydrated(true);
-            return;
+            return null;
           }
         }
 
@@ -340,11 +421,26 @@ function AppContent() {
           setPreviousQuestionsSnapshotCount(data.previousQuestionsSnapshotCount);
         }
 
-        if (data.upToDate) {
+        if (data.upToDate && !purgeLocalCache && !forceFullPull) {
           serverRevisionRef.current = data.revision;
           questionsRevisionRef.current = data.questionsRevision;
           setIsServerHydrated(true);
-          return;
+          return {
+            ok: true,
+            syncedAtFormatted: new Date().toLocaleTimeString('es-CO'),
+            revision: data.revision,
+            questionsRevision: data.questionsRevision,
+            lastModifiedIso: data.lastModifiedIso,
+            clearedKeysCount,
+            counts: {
+              students: stateRef.current.students.length,
+              questions: stateRef.current.questions.length,
+              attempts: stateRef.current.attempts.length,
+              abproEvaluations: stateRef.current.abproEvaluations.length,
+              liveSessions: stateRef.current.liveSessions.length,
+              customMiniRetos: stateRef.current.customMiniRetos.length
+            }
+          };
         }
 
         if (typeof data.revision === 'number') {
@@ -356,6 +452,7 @@ function AppContent() {
 
         if (typeof data.questionsBankExplicitlyCleared === 'boolean') {
           setQuestionsBankExplicitlyCleared(data.questionsBankExplicitlyCleared);
+          stateRef.current.questionsBankExplicitlyCleared = data.questionsBankExplicitlyCleared;
           safeWriteLocalStorage(
             STORAGE_KEYS.QUESTIONS_CLEARED,
             data.questionsBankExplicitlyCleared
@@ -410,14 +507,68 @@ function AppContent() {
         if (data.activeExamsByStudent && typeof data.activeExamsByStudent === 'object') {
           setActiveExamsByStudent(data.activeExamsByStudent);
         }
-      } catch {
+
+        return {
+          ok: true,
+          syncedAtFormatted: new Date().toLocaleTimeString('es-CO'),
+          revision: serverRevisionRef.current,
+          questionsRevision: questionsRevisionRef.current,
+          lastModifiedIso: data.lastModifiedIso,
+          clearedKeysCount,
+          counts: {
+            students: stateRef.current.students.length,
+            questions: stateRef.current.questions.length,
+            attempts: stateRef.current.attempts.length,
+            abproEvaluations: stateRef.current.abproEvaluations.length,
+            liveSessions: stateRef.current.liveSessions.length,
+            customMiniRetos: stateRef.current.customMiniRetos.length
+          }
+        };
+      } catch (err: any) {
         // Offline resilience: continue with local cached state if server is temporarily unreachable
+        return {
+          ok: false,
+          syncedAtFormatted: new Date().toLocaleTimeString('es-CO'),
+          revision: serverRevisionRef.current,
+          questionsRevision: questionsRevisionRef.current,
+          clearedKeysCount,
+          counts: {
+            students: stateRef.current.students.length,
+            questions: stateRef.current.questions.length,
+            attempts: stateRef.current.attempts.length,
+            abproEvaluations: stateRef.current.abproEvaluations.length,
+            liveSessions: stateRef.current.liveSessions.length,
+            customMiniRetos: stateRef.current.customMiniRetos.length
+          },
+          error: err?.message || 'Error de conexión al consultar la Base de Datos del Servidor'
+        };
       } finally {
         setIsServerHydrated(true);
       }
     },
     [pushServerMutation]
   );
+
+  // Explicit forced resynchronization from server database clearing all local cache
+  const handleForceResyncAndClearLocalCache = useCallback(async (): Promise<ForceServerResyncResult> => {
+    const res = await fetchAndApplyServerState(true, true);
+    if (res) return res;
+    return {
+      ok: true,
+      syncedAtFormatted: new Date().toLocaleTimeString('es-CO'),
+      revision: serverRevisionRef.current,
+      questionsRevision: questionsRevisionRef.current,
+      clearedKeysCount: Object.keys(STORAGE_KEYS).length,
+      counts: {
+        students: stateRef.current.students.length,
+        questions: stateRef.current.questions.length,
+        attempts: stateRef.current.attempts.length,
+        abproEvaluations: stateRef.current.abproEvaluations.length,
+        liveSessions: stateRef.current.liveSessions.length,
+        customMiniRetos: stateRef.current.customMiniRetos.length
+      }
+    };
+  }, [fetchAndApplyServerState]);
 
   // Initial authoritative hydration on mount + Periodic multi-device synchronization (Every 2.5 seconds) + Focus sync
   useEffect(() => {
@@ -941,7 +1092,7 @@ function AppContent() {
             customMiniRetos={customMiniRetos}
             onUpdateCustomMiniRetos={handleUpdateCustomMiniRetos}
             onFullSystemRestore={handleFullSystemRestore}
-            onForceServerSync={() => fetchAndApplyServerState(false)}
+            onForceServerSync={handleForceResyncAndClearLocalCache}
           />
         )}
       </main>
