@@ -717,32 +717,32 @@ export function TeacherGroupStatisticsView({
           </div>
         </div>
 
-        <div className="overflow-x-auto border border-slate-200 rounded-xl max-h-96">
-          <table className="w-full text-left border-collapse text-xs">
+        <div className="w-full overflow-y-auto overflow-x-hidden border border-slate-200 rounded-xl max-h-96 bg-white">
+          <table className="w-full table-auto text-left border-collapse text-[11px]">
             <thead className="sticky top-0 bg-slate-50 border-b border-slate-200 font-semibold text-slate-700 z-10">
               <tr>
-                <th className="py-3 px-4">ID Estudiante</th>
-                <th className="py-3 px-4">Nombre del Estudiante</th>
-                <th className="py-3 px-4 text-center">Progreso Integral</th>
-                <th className="py-3 px-4 text-right">Intento 1</th>
-                <th className="py-3 px-4 text-right">Intento 2</th>
-                <th className="py-3 px-4 text-right">Nota Definitiva</th>
-                <th className="py-3 px-4 text-center">Insignias Retos</th>
-                <th className="py-3 px-4">Nivel de Competencia Alcanzado</th>
+                <th className="py-2.5 px-3">ID Estudiante</th>
+                <th className="py-2.5 px-3">Nombre del Estudiante</th>
+                <th className="py-2.5 px-3 text-center">Progreso Integral</th>
+                <th className="py-2.5 px-2.5 text-right">Intento 1</th>
+                <th className="py-2.5 px-2.5 text-right">Intento 2</th>
+                <th className="py-2.5 px-3 text-right">Nota Definitiva</th>
+                <th className="py-2.5 px-2.5 text-center">Insignias Retos</th>
+                <th className="py-2.5 px-3">Nivel de Competencia Alcanzado</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200">
               {studentAnalytics.map((row) => (
                 <tr key={row.student.id} className="hover:bg-slate-50/80">
-                  <td className="py-2.5 px-4 font-mono font-semibold text-slate-900">
+                  <td className="py-2 px-3 font-mono font-semibold text-slate-900">
                     {row.student.id}
                   </td>
-                  <td className="py-2.5 px-4 font-medium text-slate-900">
+                  <td className="py-2 px-3 font-medium text-slate-900 leading-tight">
                     {row.student.nombre}
                   </td>
-                  <td className="py-2.5 px-4">
+                  <td className="py-2 px-3">
                     <div className="flex items-center gap-2">
-                      <div className="w-20 h-2 bg-slate-100 rounded-full overflow-hidden">
+                      <div className="w-16 h-2 bg-slate-100 rounded-full overflow-hidden">
                         <div
                           className="h-full bg-sky-600 rounded-full"
                           style={{ width: `${row.progresoIntegralPct}%` }}
@@ -753,23 +753,23 @@ export function TeacherGroupStatisticsView({
                       </span>
                     </div>
                   </td>
-                  <td className="py-2.5 px-4 text-right font-mono">
+                  <td className="py-2 px-2.5 text-right font-mono">
                     {row.notaIntento1 !== null ? row.notaIntento1.toFixed(1) : '—'}
                   </td>
-                  <td className="py-2.5 px-4 text-right font-mono">
+                  <td className="py-2 px-2.5 text-right font-mono">
                     {row.notaIntento2 !== null ? row.notaIntento2.toFixed(1) : '—'}
                   </td>
-                  <td className="py-2.5 px-4 text-right font-mono font-bold text-slate-900">
+                  <td className="py-2 px-3 text-right font-mono font-bold text-slate-900">
                     {row.attemptsCount > 0 || row.student.suspendido
                       ? `${row.notaDefinitiva.toFixed(1)} / 5.0`
                       : '—'}
                   </td>
-                  <td className="py-2.5 px-4 text-center font-mono font-bold text-amber-800">
+                  <td className="py-2 px-2.5 text-center font-mono font-bold text-amber-800">
                     {row.unlockedBadges} / 5
                   </td>
-                  <td className="py-2.5 px-4">
+                  <td className="py-2 px-3">
                     <span
-                      className={`px-2.5 py-1 rounded-full font-bold text-[11px] inline-block ${
+                      className={`px-2 py-0.5 rounded-full font-bold text-[10px] inline-block ${
                         row.shortCompetencia === 'Sobresaliente'
                           ? 'bg-emerald-100 text-emerald-900'
                           : row.shortCompetencia === 'Destacado'

@@ -362,39 +362,39 @@ export function ABProAndMultiCutGradebook({
             </div>
           </div>
 
-          <div className="overflow-x-auto border border-slate-200 rounded-xl">
-            <table className="w-full text-left border-collapse text-xs">
+          <div className="w-full border border-slate-200 rounded-xl overflow-hidden bg-white">
+            <table className="w-full table-auto text-left border-collapse text-[11px]">
               <thead>
                 <tr className="bg-slate-50 border-b border-slate-200 font-semibold text-slate-700">
-                  <th className="py-3 px-3">Estudiante</th>
-                  <th className="py-3 px-2 text-center" title="Módulo 1: Introducción al Mapeo">Mód 1</th>
-                  <th className="py-3 px-2 text-center" title="Módulo 2: Comportamiento del Consumidor">Mód 2</th>
-                  <th className="py-3 px-2 text-center" title="Módulo 3: Investigación de Mercados">Mód 3</th>
-                  <th className="py-3 px-2 text-center" title="Módulo 4: Segmentación y Posicionamiento">Mód 4</th>
-                  <th className="py-3 px-2 text-center" title="Módulo 5: Tendencias y Omnicanalidad">Mód 5</th>
-                  <th className="py-3 px-2 text-center" title="Examen Integral (5 Módulos)">Integral</th>
-                  <th className="py-3 px-3 text-right bg-slate-100/80">Teoría ({config.ponderacionTeoriaPct ?? 60}%)</th>
-                  <th className="py-3 px-3 text-right bg-sky-50/70">ABPro ({100 - (config.ponderacionTeoriaPct ?? 60)}%)</th>
-                  <th className="py-3 px-3 text-right font-bold bg-emerald-50/70">Final Curso</th>
-                  <th className="py-3 px-3 text-right">Acción ABPro</th>
+                  <th className="py-2.5 px-2.5">Estudiante</th>
+                  <th className="py-2.5 px-1.5 text-center" title="Módulo 1: Introducción al Mapeo">Mód 1</th>
+                  <th className="py-2.5 px-1.5 text-center" title="Módulo 2: Comportamiento del Consumidor">Mód 2</th>
+                  <th className="py-2.5 px-1.5 text-center" title="Módulo 3: Investigación de Mercados">Mód 3</th>
+                  <th className="py-2.5 px-1.5 text-center" title="Módulo 4: Segmentación y Posicionamiento">Mód 4</th>
+                  <th className="py-2.5 px-1.5 text-center" title="Módulo 5: Tendencias y Omnicanalidad">Mód 5</th>
+                  <th className="py-2.5 px-1.5 text-center" title="Examen Integral (5 Módulos)">Integral</th>
+                  <th className="py-2.5 px-2 text-right bg-slate-100/80">Teoría ({config.ponderacionTeoriaPct ?? 60}%)</th>
+                  <th className="py-2.5 px-2 text-right bg-sky-50/70">ABPro ({100 - (config.ponderacionTeoriaPct ?? 60)}%)</th>
+                  <th className="py-2.5 px-2 text-right font-bold bg-emerald-50/70">Final Curso</th>
+                  <th className="py-2.5 px-2.5 text-right">Acción ABPro</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200">
                 {multiCutRows.map((r) => (
                   <tr key={r.student.id} className="hover:bg-slate-50/80">
-                    <td className="py-2.5 px-3">
-                      <div className="font-semibold text-slate-900">{r.student.nombre}</div>
-                      <div className="text-[11px] font-mono text-slate-500">
+                    <td className="py-2 px-2.5">
+                      <div className="font-semibold text-slate-900 leading-tight">{r.student.nombre}</div>
+                      <div className="text-[10px] font-mono text-slate-500">
                         ID: {r.student.id}
                         {r.abpro?.nombreMiPyme && (
-                          <span className="ml-2 text-sky-700 font-sans font-medium">
+                          <span className="ml-1.5 text-sky-700 font-sans font-medium">
                             · MiPyme: {r.abpro.nombreMiPyme}
                           </span>
                         )}
                       </div>
                     </td>
                     {[r.mod1, r.mod2, r.mod3, r.mod4, r.mod5, r.integral].map((val, idx) => (
-                      <td key={idx} className="py-2.5 px-2 text-center font-mono tabular-nums">
+                      <td key={idx} className="py-2 px-1.5 text-center font-mono tabular-nums">
                         {val !== null ? (
                           <span
                             className={`font-semibold ${
@@ -408,15 +408,15 @@ export function ABProAndMultiCutGradebook({
                         )}
                       </td>
                     ))}
-                    <td className="py-2.5 px-3 text-right font-mono font-bold bg-slate-50/60 tabular-nums">
+                    <td className="py-2 px-2 text-right font-mono font-bold bg-slate-50/60 tabular-nums">
                       {r.student.intentosUsados > 0 || r.student.suspendido
                         ? r.notaTeoricaDef.toFixed(1)
                         : '—'}
                     </td>
-                    <td className="py-2.5 px-3 text-right font-mono font-bold bg-sky-50/40 text-sky-900 tabular-nums">
+                    <td className="py-2 px-2 text-right font-mono font-bold bg-sky-50/40 text-sky-900 tabular-nums">
                       {r.notaABPro !== null ? r.notaABPro.toFixed(1) : '—'}
                     </td>
-                    <td className="py-2.5 px-3 text-right font-mono font-bold text-sm bg-emerald-50/40 tabular-nums">
+                    <td className="py-2 px-2 text-right font-mono font-bold text-xs bg-emerald-50/40 tabular-nums">
                       {r.student.intentosUsados > 0 || r.notaABPro !== null || r.student.suspendido ? (
                         <span
                           className={
@@ -429,14 +429,14 @@ export function ABProAndMultiCutGradebook({
                         '—'
                       )}
                     </td>
-                    <td className="py-2.5 px-3 text-right">
+                    <td className="py-2 px-2.5 text-right">
                       <button
                         type="button"
                         onClick={() => {
                           handleSelectStudentForABPro(r.student.id);
                           setSubView('abpro_rubrica');
                         }}
-                        className="px-2.5 py-1 rounded border border-sky-200 bg-sky-50 hover:bg-sky-100 text-sky-800 font-semibold whitespace-nowrap"
+                        className="px-2 py-1 rounded border border-sky-200 bg-sky-50 hover:bg-sky-100 text-sky-800 font-semibold text-[10px]"
                       >
                         {r.notaABPro !== null ? 'Editar ABPro' : 'Calificar ABPro'}
                       </button>

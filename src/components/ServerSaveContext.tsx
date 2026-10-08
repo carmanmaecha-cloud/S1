@@ -15,7 +15,11 @@ interface ServerSaveContextValue {
   savedTimestamps: Record<string, string>;
   lastGlobalSavedAt: string | null;
   isGlobalSaving: boolean;
-  markSectionDirty: (sectionKey: string, description?: string) => void;
+  markSectionDirty: (
+    sectionKey: string,
+    description?: string,
+    requiresConfirmation?: boolean
+  ) => void;
   saveSectionToServer: (
     sectionKey: string,
     description?: string
@@ -73,11 +77,26 @@ export function ServerSaveProvider({
   const [savedTimestamps, setSavedTimestamps] = useState<Record<string, string>>({});
   const [lastGlobalSavedAt, setLastGlobalSavedAt] = useState<string | null>(null);
   const [isGlobalSaving, setIsGlobalSaving] = useState(false);
+  const [autoSaveBannerInfo, setAutoSaveBannerInfo] = useState<{
+    status: 'saving' | 'saved';
+    description: string;
+    timeStr?: string;
+  } | null>(null);
+
+  const autoSaveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const bannerHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const saveSectionToServer = useCallback(
-    async (sectionKey: string, description = 'Guardado en Base de Datos del Servidor') => {
+    async (sectionKey: string, description = 'Guardado automático en Base de Datos del Servidor') => {
       setSavingSections((prev) => ({ ...prev, [sectionKey]: true }));
       setIsGlobalSaving(true);
+      setAutoSaveBannerInfo({
+        status: 'saving',
+        description
+      });
+      if (bannerHideTimerRef.current) {
+        clearTimeout(bannerHideTimerRef.current);
+      }
       try {
         const res = await onExecuteServerSave(sectionKey, description);
         if (res.ok) {
@@ -93,6 +112,14 @@ export function ServerSaveProvider({
             delete next[sectionKey];
             return next;
           });
+          setAutoSaveBannerInfo({
+            status: 'saved',
+            description,
+            timeStr
+          });
+          bannerHideTimerRef.current = setTimeout(() => {
+            setAutoSaveBannerInfo(null);
+          }, 3200);
         }
         return res;
       } finally {
@@ -104,10 +131,18 @@ export function ServerSaveProvider({
   );
 
   const markSectionDirty = useCallback(
-    (sectionKey: string, description = 'Cambios pendientes por guardar') => {
-      // Student panel changes are always persisted automatically to the Server Database
-      if (sectionKey.startsWith('estudiante_')) {
-        void saveSectionToServer(sectionKey, description);
+    (
+      sectionKey: string,
+      description = 'Actualización automática en Base de Datos del Servidor',
+      requiresConfirmation = false
+    ) => {
+      if (!requiresConfirmation) {
+        if (autoSaveTimersRef.current[sectionKey]) {
+          clearTimeout(autoSaveTimersRef.current[sectionKey]);
+        }
+        autoSaveTimersRef.current[sectionKey] = setTimeout(() => {
+          void saveSectionToServer(sectionKey, description);
+        }, 350);
         return;
       }
       setDirtySections((prev) => ({
@@ -171,7 +206,32 @@ export function ServerSaveProvider({
     >
       {children}
 
-      {/* Barra Flotante Global cuando hay cambios realizados en cualquier opción */}
+      {/* Indicador Flotante de Actualización Automática cuando se detectan cambios */}
+      {pendingEntries.length === 0 && autoSaveBannerInfo && (
+        <div className="no-print fixed bottom-4 right-4 z-50 max-w-md bg-slate-900/95 backdrop-blur-md text-white border border-emerald-400/70 rounded-2xl px-4 py-2.5 shadow-xl flex items-center gap-3 animate-in fade-in slide-in-from-bottom-2">
+          <div className="w-7 h-7 rounded-xl bg-emerald-500/20 border border-emerald-400/50 flex items-center justify-center shrink-0">
+            {autoSaveBannerInfo.status === 'saving' ? (
+              <RefreshCw className="w-3.5 h-3.5 text-amber-300 animate-spin" />
+            ) : (
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+            )}
+          </div>
+          <div className="text-xs">
+            <div className="font-extrabold text-emerald-300 uppercase tracking-wide flex items-center gap-1.5">
+              <span>
+                {autoSaveBannerInfo.status === 'saving'
+                  ? 'Cambios detectados · Actualizando automáticamente...'
+                  : `✓ Base de Datos del Servidor actualizada (${autoSaveBannerInfo.timeStr})`}
+              </span>
+            </div>
+            <div className="text-[11px] text-slate-300 line-clamp-1">
+              {autoSaveBannerInfo.description}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Barra Flotante Global únicamente cuando algún cambio específico requiera confirmación expresa */}
       {pendingEntries.length > 0 && (
         <div className="no-print fixed bottom-4 left-1/2 -translate-x-1/2 z-50 w-[95%] max-w-3xl bg-slate-900/95 backdrop-blur-md text-white border-2 border-amber-400 rounded-2xl px-4 py-3 shadow-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 animate-in fade-in slide-in-from-bottom-3">
           <div className="flex items-center gap-2.5">
@@ -180,13 +240,13 @@ export function ServerSaveProvider({
             </div>
             <div>
               <div className="text-xs font-extrabold text-amber-300 uppercase tracking-wide flex items-center gap-1.5">
-                <span>Cambios detectados ({pendingEntries.length})</span>
+                <span>Confirmación requerida ({pendingEntries.length})</span>
                 <span className="text-[10px] bg-amber-400 text-slate-950 px-2 py-0.5 rounded-full font-mono font-bold">
                   Base de Datos del Servidor
                 </span>
               </div>
               <div className="text-xs text-slate-200 line-clamp-1">
-                {pendingEntries[pendingEntries.length - 1][1]} — Haz clic en «Guardar Cambios» para confirmar en el servidor.
+                {pendingEntries[pendingEntries.length - 1][1]} — Confirma para aplicar en el servidor.
               </div>
             </div>
           </div>
@@ -207,7 +267,7 @@ export function ServerSaveProvider({
             ) : (
               <>
                 <Save className="w-4 h-4" />
-                <span>💾 Guardar Cambios en Servidor Ahora</span>
+                <span>✓ Confirmar y Guardar en Servidor</span>
               </>
             )}
           </button>
@@ -248,7 +308,7 @@ export function OptionServerSaveBar({
   const [localError, setLocalError] = useState<string | null>(null);
   const [justSavedFlash, setJustSavedFlash] = useState(false);
 
-  const isAutoSave = autoSave ?? sectionKey.startsWith('estudiante_');
+  const isAutoSave = autoSave ?? true;
 
   const serializedWatch =
     watchValue !== undefined

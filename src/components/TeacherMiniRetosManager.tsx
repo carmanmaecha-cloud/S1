@@ -775,17 +775,17 @@ export function TeacherMiniRetosManager({
               </div>
             </div>
 
-            <div className="overflow-x-auto max-h-80 border border-slate-200 rounded-xl">
-              <table className="w-full text-left border-collapse text-xs">
+            <div className="w-full overflow-y-auto overflow-x-hidden max-h-80 border border-slate-200 rounded-xl bg-white">
+              <table className="w-full table-auto text-left border-collapse text-[11px]">
                 <thead className="bg-slate-100 text-slate-700 sticky top-0 z-10">
                   <tr>
-                    <th className="py-2.5 px-3 font-bold">Estudiante (ID)</th>
-                    <th className="py-2.5 px-3 font-bold text-center">M1: Cartógrafo 🧭</th>
-                    <th className="py-2.5 px-3 font-bold text-center">M2: Psicólogo 🧠</th>
-                    <th className="py-2.5 px-3 font-bold text-center">M3: Sherlock 🕵️‍♂️</th>
-                    <th className="py-2.5 px-3 font-bold text-center">M4: Arquitecto 🎯</th>
-                    <th className="py-2.5 px-3 font-bold text-center">M5: Omnicanal 🚀</th>
-                    <th className="py-2.5 px-3 font-bold text-center">Total Colección</th>
+                    <th className="py-2 px-2.5 font-bold">Estudiante (ID)</th>
+                    <th className="py-2 px-2 font-bold text-center">M1: Cartógrafo 🧭</th>
+                    <th className="py-2 px-2 font-bold text-center">M2: Psicólogo 🧠</th>
+                    <th className="py-2 px-2 font-bold text-center">M3: Sherlock 🕵️‍♂️</th>
+                    <th className="py-2 px-2 font-bold text-center">M4: Arquitecto 🎯</th>
+                    <th className="py-2 px-2 font-bold text-center">M5: Omnicanal 🚀</th>
+                    <th className="py-2 px-2.5 font-bold text-center">Total Colección</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200">
@@ -1531,11 +1531,11 @@ export function TeacherMiniRetosManager({
             </div>
 
             {/* Tabla Interactiva por Estudiante: Selección + Acceso General + Módulos M1..M5 por Estudiante */}
-            <div className="overflow-x-auto max-h-[460px] border border-slate-200 rounded-xl">
-              <table className="w-full text-left border-collapse text-xs">
+            <div className="w-full overflow-y-auto overflow-x-hidden max-h-[460px] border border-slate-200 rounded-xl bg-white">
+              <table className="w-full table-auto text-left border-collapse text-[11px]">
                 <thead className="bg-slate-100 text-slate-700 sticky top-0 z-10">
                   <tr>
-                    <th className="py-2.5 px-3 w-10 text-center">
+                    <th className="py-2 px-2.5 w-9 text-center">
                       <input
                         type="checkbox"
                         checked={

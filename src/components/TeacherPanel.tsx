@@ -16,6 +16,7 @@ import { normalizeQuestionList, INITIAL_QUESTIONS } from '../data/questions';
 import { ABProAndMultiCutGradebook } from './ABProAndMultiCutGradebook';
 import { TeacherMiniRetosManager } from './TeacherMiniRetosManager';
 import { TeacherGroupStatisticsView } from './TeacherGroupStatisticsView';
+import { TeacherRealtimeSummaryPanel } from './TeacherRealtimeSummaryPanel';
 import { OptionServerSaveBar, useServerSave } from './ServerSaveContext';
 import { useAuthSession } from '../context/AuthContext';
 import { OFFICIAL_BADGES, getDefaultRetoProgress } from '../utils/miniRetosEngine';
@@ -513,6 +514,7 @@ export function TeacherPanel({
   const [bulkQFeedback, setBulkQFeedback] = useState<string | null>(null);
   const [showQStructureModal, setShowQStructureModal] = useState(false);
   const [confirmClearAllQuestions, setConfirmClearAllQuestions] = useState(false);
+  const [confirmRestoreOfficialBank, setConfirmRestoreOfficialBank] = useState(false);
   const [previousQuestionsSnapshot, setPreviousQuestionsSnapshot] = useState<Question[] | null>(
     null
   );
@@ -1652,12 +1654,57 @@ export function TeacherPanel({
       });
       await handleExecuteServerSave(
         'parametros_y_horarios_examen',
-        'Parámetros del Constructor de Pruebas guardados en BD del Servidor'
+        'Parámetros del Constructor de Pruebas actualizados automáticamente en BD del Servidor'
       );
     } finally {
       setIsSavingExamParams(false);
     }
   };
+
+  // Guardado automático de PIN de Aula al detectar cambios
+  useEffect(() => {
+    if (!pendingPinAulaChange || isSavingPinAula || pinAulaDraft.trim().length < 3) return;
+    const timer = setTimeout(() => {
+      void handleSavePinAula();
+    }, 650);
+    return () => clearTimeout(timer);
+  }, [pinAulaDraft, pendingPinAulaChange, isSavingPinAula]);
+
+  // Guardado automático de Mensaje de Sala de Espera al detectar cambios
+  useEffect(() => {
+    if (!pendingMensajeSalaChange || isSavingMensajeSala) return;
+    const timer = setTimeout(() => {
+      void handleSaveMensajeSala();
+    }, 700);
+    return () => clearTimeout(timer);
+  }, [mensajeSalaDraft, pendingMensajeSalaChange, isSavingMensajeSala]);
+
+  // Guardado automático de Parámetros del Constructor de Pruebas al detectar cambios
+  useEffect(() => {
+    if (!pendingExamParamsChange || isSavingExamParams) return;
+    const timer = setTimeout(() => {
+      void handleSaveExamParams();
+    }, 650);
+    return () => clearTimeout(timer);
+  }, [examParamsDraft, pendingExamParamsChange, isSavingExamParams]);
+
+  // Guardado automático de Códigos de Acceso en la tabla de estudiantes al detectar cambios
+  useEffect(() => {
+    const entries = Object.entries(studentCodeDrafts);
+    if (entries.length === 0 || savingStudentCodeId) return;
+    const timer = setTimeout(() => {
+      for (const [stId, draftVal] of entries) {
+        const st = students.find((s) => s.id === stId);
+        if (!st) continue;
+        const clean = draftVal.trim().toUpperCase();
+        if (clean.length >= 4 && clean.length <= 24 && clean !== st.codigoAcceso.trim().toUpperCase()) {
+          void handleSaveDirectStudentCode(st, clean);
+          break;
+        }
+      }
+    }, 750);
+    return () => clearTimeout(timer);
+  }, [studentCodeDrafts, students, savingStudentCodeId]);
 
   // Bulk Import Students Handler (Excel / CSV)
   const handleBulkImportStudents = () => {
@@ -2054,9 +2101,10 @@ export function TeacherPanel({
   const handleRestoreOfficialUnifiedBank = () => {
     savePreviousQuestionsSnapshot(questions);
     onUpdateQuestions(INITIAL_QUESTIONS);
+    setConfirmRestoreOfficialBank(false);
     setQCurrentPage(1);
     setBankActionNotice(
-      `✓ Banco de Preguntas actualizado al Banco Oficial Unificado 2026 (${INITIAL_QUESTIONS.length} reactivos activos en los Módulos 1 al 5).`
+      `✓ Banco de Preguntas actualizado y guardado automáticamente en el Servidor con el Banco Oficial Unificado 2026 (${INITIAL_QUESTIONS.length} reactivos activos en los Módulos 1 al 5).`
     );
   };
 
@@ -2133,13 +2181,40 @@ export function TeacherPanel({
       commitTeacherConfigUpdate({ ...config, webhookUrl: webhookUrlInput.trim() });
       await handleExecuteServerSave(
         'integraciones_webhook',
-        'URL de Webhook Google Sheets guardada en BD del Servidor'
+        'URL de Webhook Google Sheets actualizada automáticamente en BD del Servidor'
       );
-      setWebhookStatus('✓ URL del Webhook guardada y confirmada en la Base de Datos del Servidor.');
+      setWebhookStatus('✓ URL del Webhook actualizada automáticamente en la Base de Datos del Servidor.');
     } finally {
       setIsSavingWebhook(false);
     }
   };
+
+  // Guardado automático de Correo de Recuperación al detectar cambios válidos
+  useEffect(() => {
+    if (!pendingEmailChange || isSavingEmail || !emailInput.includes('.')) return;
+    const timer = setTimeout(() => {
+      setIsSavingEmail(true);
+      commitTeacherConfigUpdate({ ...config, correoRecuperacion: emailInput.trim() });
+      void handleExecuteServerSave(
+        'seguridad_y_respaldo',
+        `Correo oficial (${emailInput.trim()}) actualizado automáticamente en BD del Servidor`
+      ).finally(() => {
+        setIsSavingEmail(false);
+        setEmailSaveStatus('✓ Correo oficial actualizado automáticamente en la Base de Datos del Servidor.');
+        setTimeout(() => setEmailSaveStatus(null), 4000);
+      });
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [emailInput, pendingEmailChange, isSavingEmail]);
+
+  // Guardado automático de URL de Webhook al detectar cambios
+  useEffect(() => {
+    if (!pendingWebhookChange || isSavingWebhook) return;
+    const timer = setTimeout(() => {
+      void handleSaveWebhookUrl();
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [webhookUrlInput, pendingWebhookChange, isSavingWebhook]);
 
   // Live Webhook Ping
   const handleTestWebhook = async () => {
@@ -2694,7 +2769,7 @@ function doPost(e) {
 
   // ================= MAIN TEACHER DASHBOARD VIEW =================
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+    <div className="w-full max-w-[1640px] mx-auto px-2 sm:px-4 lg:px-6 py-5 space-y-6 overflow-x-hidden">
       {/* Top Bar: Master Classroom Controls & Quick Actions */}
       <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs space-y-4">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-slate-100 pb-4">
@@ -2898,8 +2973,9 @@ function doPost(e) {
                 </button>
               </div>
               {pendingPinAulaChange && (
-                <div className="text-[10px] font-bold text-amber-800">
-                  ● Cambios pendientes de guardar en servidor
+                <div className="text-[10px] font-bold text-amber-800 flex items-center gap-1">
+                  <RefreshCw className="w-2.5 h-2.5 animate-spin" />
+                  <span>Actualizando automáticamente en BD del Servidor...</span>
                 </div>
               )}
             </div>
@@ -3540,19 +3616,38 @@ function doPost(e) {
                 key={t.id}
                 type="button"
                 onClick={() => setActiveTab(t.id as TeacherTab)}
-                className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap ${
+                className={`px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors ${
                   active
                     ? 'bg-slate-900 text-white'
                     : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                 }`}
               >
-                <Icon className="w-3.5 h-3.5" />
+                <Icon className="w-3.5 h-3.5 shrink-0" />
                 <span>{t.label}</span>
               </button>
             );
           })}
         </div>
       </div>
+
+      {/* ================= PANEL DE RESUMEN EN TIEMPO REAL (RECHARTS) ================= */}
+      <TeacherRealtimeSummaryPanel
+        students={students}
+        attempts={attempts}
+        liveSessions={liveSessions}
+        config={config}
+        onNavigateTab={(tab) => setActiveTab(tab as TeacherTab)}
+        onSelectStudentForAudit={(studentId) => {
+          setActiveTab('estudiantes');
+          setSelectedAuditStudentId(studentId);
+          setAuditActiveMode('retos');
+          setAuditRetoModuloFilter('ALL');
+          setTimeout(() => {
+            const el = document.getElementById('auditoria-inline-estudiante');
+            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }, 120);
+        }}
+      />
 
       {/* ================= TAB 1: ESTUDIANTES Y CÓDIGOS (CRUD COMPLETO + REINICIAR SIN WINDOW.CONFIRM) ================= */}
       {activeTab === 'estudiantes' && (
@@ -3830,12 +3925,12 @@ function doPost(e) {
             </div>
           </div>
 
-          {/* Students Table */}
-          <div className="overflow-x-auto border border-slate-200 rounded-xl">
-            <table className="w-full text-left border-collapse">
+          {/* Students Table — Ajustada al 100% del ancho sin barra de desplazamiento horizontal */}
+          <div className="w-full border border-slate-200 rounded-xl overflow-hidden bg-white">
+            <table className="w-full table-auto text-left border-collapse">
               <thead>
-                <tr className="bg-slate-50 border-b border-slate-200 text-xs font-semibold text-slate-700">
-                  <th className="py-3 px-3 w-8">
+                <tr className="bg-slate-50 border-b border-slate-200 text-[11px] font-bold text-slate-700 leading-tight">
+                  <th className="py-2.5 px-2 w-7 text-center">
                     <input
                       type="checkbox"
                       checked={
@@ -3852,14 +3947,14 @@ function doPost(e) {
                       aria-label="Seleccionar todos los estudiantes filtrados"
                     />
                   </th>
-                  <th className="py-3 px-4">ID de Estudiante</th>
-                  <th className="py-3 px-4">Nombre Completo</th>
-                  <th className="py-3 px-4">Código de Acceso</th>
-                  <th className="py-3 px-4 text-center">Intentos</th>
-                  <th className="py-3 px-4 text-center">Insignias Retos (5/5)</th>
-                  <th className="py-3 px-4">
-                    <div className="flex items-center justify-between gap-2">
-                      <span>Bloqueo / Desbloqueo de Exámenes por Estudiante</span>
+                  <th className="py-2.5 px-2 w-[92px]">ID Estudiante</th>
+                  <th className="py-2.5 px-2.5 min-w-[130px]">Nombre Completo</th>
+                  <th className="py-2.5 px-2 w-[175px]">Código de Acceso</th>
+                  <th className="py-2.5 px-1.5 text-center w-[58px]">Intentos</th>
+                  <th className="py-2.5 px-2 text-center w-[112px]">Insignias (5/5)</th>
+                  <th className="py-2.5 px-2">
+                    <div className="flex flex-wrap items-center justify-between gap-1">
+                      <span>Bloqueo / Desbloqueo y Auditoría</span>
                       {selectedStudentIdsForBatch.length > 0 && (
                         <button
                           type="button"
@@ -3867,27 +3962,27 @@ function doPost(e) {
                             setBatchExamBlockNotice(null);
                             setBatchExamBlockModalOpen(true);
                           }}
-                          className="px-2 py-0.5 rounded bg-sky-600 hover:bg-sky-700 text-white text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer"
+                          className="px-1.5 py-0.5 rounded bg-sky-600 hover:bg-sky-700 text-white text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer"
                           title="Editar esta columna para todos los estudiantes seleccionados a la vez"
                         >
-                          <Edit3 className="w-3 h-3" />
-                          <span>Editar Lote ({selectedStudentIdsForBatch.length})</span>
+                          <Edit3 className="w-2.5 h-2.5" />
+                          <span>Lote ({selectedStudentIdsForBatch.length})</span>
                         </button>
                       )}
                     </div>
                   </th>
-                  <th className="py-3 px-4">Suspensión / Infracción y Concepto</th>
-                  <th className="py-3 px-4 text-right">Acciones Administrativas</th>
+                  <th className="py-2.5 px-2 w-[135px]">Suspensión / Concepto</th>
+                  <th className="py-2.5 px-2 text-right w-[215px]">Acciones Administrativas</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-200 text-xs">
+              <tbody className="divide-y divide-slate-200 text-[11px] leading-snug">
                 {filteredStudents.map((st) => {
                   const canReset = st.intentosUsados > 0 || st.suspendido || true;
                   const blockedCount = st.examenesBloqueados?.length || 0;
                   const isChecked = selectedStudentIdsForBatch.includes(st.id);
                   return (
-                    <tr key={st.id} className="hover:bg-slate-50/80 transition-colors">
-                      <td className="py-3 px-3">
+                    <tr key={st.id} className="hover:bg-slate-50/80 transition-colors align-middle">
+                      <td className="py-2 px-2 text-center">
                         <input
                           type="checkbox"
                           checked={isChecked}
@@ -3903,11 +3998,13 @@ function doPost(e) {
                           aria-label={`Seleccionar estudiante ${st.nombre}`}
                         />
                       </td>
-                      <td className="py-3 px-4 font-mono font-semibold text-slate-900 whitespace-nowrap">
+                      <td className="py-2 px-2 font-mono font-semibold text-slate-900 break-all">
                         {st.id}
                       </td>
-                      <td className="py-3 px-4 font-medium text-slate-900">{st.nombre}</td>
-                      <td className="py-3 px-4 font-mono font-bold text-sky-800 whitespace-nowrap">
+                      <td className="py-2 px-2.5 font-medium text-slate-900 break-words">
+                        {st.nombre}
+                      </td>
+                      <td className="py-2 px-2 font-mono font-bold text-sky-800">
                         {(() => {
                           const currentDraftCode =
                             studentCodeDrafts[st.id] !== undefined
@@ -3924,7 +4021,7 @@ function doPost(e) {
                           return (
                             <div className="space-y-1">
                               <div
-                                className={`inline-flex items-center gap-1.5 rounded-lg p-1 transition-colors ${
+                                className={`inline-flex flex-wrap items-center gap-1 rounded-lg p-1 transition-colors ${
                                   pendingChange
                                     ? 'bg-amber-50 border-2 border-amber-400 shadow-xs'
                                     : 'bg-slate-50 border border-slate-200'
@@ -3960,13 +4057,13 @@ function doPost(e) {
                                     }
                                   }}
                                   aria-label={`Código de acceso de ${st.nombre}`}
-                                  className="w-32 px-2 py-1 rounded border border-slate-300 bg-white text-xs font-mono font-bold uppercase text-sky-900 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                                  className="w-[104px] px-1.5 py-0.5 rounded border border-slate-300 bg-white text-[11px] font-mono font-bold uppercase text-sky-900 focus:outline-none focus:ring-2 focus:ring-sky-500"
                                 />
                                 <button
                                   type="button"
                                   disabled={!pendingChange || isRowSaving}
                                   onClick={() => handleSaveDirectStudentCode(st)}
-                                  className={`px-2.5 py-1 rounded text-[11px] font-bold inline-flex items-center gap-1 transition-colors ${
+                                  className={`px-1.5 py-0.5 rounded text-[10px] font-bold inline-flex items-center gap-1 transition-colors ${
                                     pendingChange || isRowSaving
                                       ? 'bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer shadow-xs'
                                       : 'bg-slate-200 text-slate-400 cursor-not-allowed'
@@ -3978,14 +4075,11 @@ function doPost(e) {
                                   }
                                 >
                                   {isRowSaving ? (
-                                    <>
-                                      <RefreshCw className="w-3 h-3 animate-spin" />
-                                      <span>Guardando...</span>
-                                    </>
+                                    <RefreshCw className="w-2.5 h-2.5 animate-spin" />
                                   ) : (
                                     <>
-                                      <Save className="w-3 h-3" />
-                                      <span>Guardar Cambios</span>
+                                      <Save className="w-2.5 h-2.5" />
+                                      <span>Guardar</span>
                                     </>
                                   )}
                                 </button>
@@ -3999,7 +4093,7 @@ function doPost(e) {
                                         return next;
                                       });
                                     }}
-                                    className="px-1.5 py-1 rounded border border-slate-300 bg-white text-slate-600 hover:bg-slate-100 text-[10px] font-semibold cursor-pointer"
+                                    className="px-1 py-0.5 rounded border border-slate-300 bg-white text-slate-600 hover:bg-slate-100 text-[10px] font-semibold cursor-pointer"
                                     title="Descartar cambio pendiente"
                                   >
                                     ✕
@@ -4008,19 +4102,19 @@ function doPost(e) {
                               </div>
                               {pendingChange && (
                                 <div className="text-[10px] font-sans font-bold text-amber-800 flex items-center gap-1">
-                                  <AlertTriangle className="w-3 h-3 text-amber-600 shrink-0" />
-                                  <span>Cambio pendiente — clic en «Guardar Cambios»</span>
+                                  <RefreshCw className="w-2.5 h-2.5 text-amber-600 shrink-0 animate-spin" />
+                                  <span>Auto-guardando...</span>
                                 </div>
                               )}
                             </div>
                           );
                         })()}
                       </td>
-                      <td className="py-3 px-4 text-center font-mono tabular-nums">
-                        {st.intentosUsados} / {st.maxIntentosPermitidos ?? 2}
+                      <td className="py-2 px-1.5 text-center font-mono tabular-nums font-semibold">
+                        {st.intentosUsados}/{st.maxIntentosPermitidos ?? 2}
                       </td>
-                      <td className="py-3 px-4 text-center">
-                        <div className="inline-flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1">
+                      <td className="py-2 px-2 text-center">
+                        <div className="inline-flex items-center gap-0.5 bg-slate-50 border border-slate-200 rounded-lg px-1.5 py-0.5">
                           {OFFICIAL_BADGES.map((b) => {
                             const unlocked = Boolean(
                               st.progresoRetos?.[b.modulo]?.insigniaDesbloqueada
@@ -4031,7 +4125,7 @@ function doPost(e) {
                                 title={`Módulo ${b.modulo}: ${b.tituloPrincipal} (${
                                   unlocked ? 'Desbloqueada' : 'Pendiente'
                                 })`}
-                                className={`text-sm ${unlocked ? 'opacity-100' : 'opacity-25 grayscale'}`}
+                                className={`text-xs ${unlocked ? 'opacity-100' : 'opacity-25 grayscale'}`}
                               >
                                 {b.icono}
                               </span>
@@ -4042,19 +4136,19 @@ function doPost(e) {
                           ) && (
                             <span
                               title="Distinción Especial: Maestro Estratega PRU (5/5)"
-                              className="text-sm ml-0.5"
+                              className="text-xs ml-0.5"
                             >
                               🏆
                             </span>
                           )}
                         </div>
                       </td>
-                      <td className="py-3 px-4">
-                        <div className="flex flex-wrap items-center gap-1.5">
+                      <td className="py-2 px-2">
+                        <div className="flex flex-wrap items-center gap-1">
                           <button
                             type="button"
                             onClick={() => setExamBlockModalStudentId(st.id)}
-                            className={`px-2.5 py-1.5 rounded-lg border font-semibold inline-flex items-center gap-1.5 cursor-pointer ${
+                            className={`px-2 py-1 rounded-md border font-semibold inline-flex items-center gap-1 text-[10px] cursor-pointer ${
                               blockedCount === 6
                                 ? 'border-red-300 bg-red-100 text-red-900'
                                 : blockedCount > 0
@@ -4064,16 +4158,16 @@ function doPost(e) {
                             title="Haga clic para bloquear o desbloquear exámenes específicos para este estudiante"
                           >
                             {blockedCount > 0 ? (
-                              <Lock className="w-3.5 h-3.5 text-red-600" />
+                              <Lock className="w-3 h-3 text-red-600 shrink-0" />
                             ) : (
-                              <Unlock className="w-3.5 h-3.5 text-emerald-600" />
+                              <Unlock className="w-3 h-3 text-emerald-600 shrink-0" />
                             )}
                             <span>
                               {blockedCount === 6
-                                ? 'Todos Bloqueados (6/6)'
+                                ? '6/6 Bloq.'
                                 : blockedCount > 0
-                                ? `${blockedCount} Bloqueado(s) · ${6 - blockedCount} Activo(s)`
-                                : 'Todos Habilitados (6/6)'}
+                                ? `${6 - blockedCount}/6 Act. (${blockedCount} Bloq.)`
+                                : '6/6 Habilitados'}
                             </span>
                           </button>
 
@@ -4087,10 +4181,10 @@ function doPost(e) {
                               setAuditExamModalityFilter('ALL');
                               setAuditActionNotice(null);
                             }}
-                            className="px-2.5 py-1.5 rounded-lg bg-sky-700 hover:bg-sky-800 text-white font-bold inline-flex items-center gap-1 cursor-pointer shadow-xs"
+                            className="px-2 py-1 rounded-md bg-sky-700 hover:bg-sky-800 text-white font-bold inline-flex items-center gap-1 text-[10px] cursor-pointer shadow-xs"
                             title="Auditoría de Exámenes por Módulo: ver qué exámenes realizó, qué preguntas le salieron, cuál respondió, cuánto tiempo por pregunta y borrar intento de examen"
                           >
-                            <Eye className="w-3.5 h-3.5" />
+                            <Eye className="w-3 h-3 shrink-0" />
                             <span>
                               Auditoría ({attempts.filter((a) => a.studentId === st.id).length})
                             </span>
@@ -4106,12 +4200,12 @@ function doPost(e) {
                               setAuditRetoModuloFilter('ALL');
                               setAuditActionNotice(null);
                             }}
-                            className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold inline-flex items-center gap-1 cursor-pointer shadow-xs"
+                            className="px-2 py-1 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white font-bold inline-flex items-center gap-1 text-[10px] cursor-pointer shadow-xs"
                             title="Auditoría de Retos por Módulo: ver qué retos realizó, qué reto le salió, qué respondió, cuánto tiempo por reto y borrar intento del reto"
                           >
-                            <Trophy className="w-3.5 h-3.5 text-amber-300" />
+                            <Trophy className="w-3 h-3 text-amber-300 shrink-0" />
                             <span>
-                              Retos por Módulo ({
+                              Retos ({
                                 ([1, 2, 3, 4, 5] as const).reduce(
                                   (acc, m) =>
                                     acc + (st.progresoRetos?.[m]?.historialIntentos?.length || 0),
@@ -4122,43 +4216,45 @@ function doPost(e) {
                           </button>
                         </div>
                       </td>
-                      <td className="py-3 px-4">
+                      <td className="py-2 px-2 break-words">
                         {st.suspendido ? (
-                          <div className="text-red-700 font-semibold">
+                          <div className="text-red-700 font-semibold text-[10px] leading-tight">
                             <span>⚠️ Suspendido</span>
-                            <span className="mx-1.5 text-slate-400">·</span>
+                            <span className="mx-1 text-slate-400">·</span>
                             <span className="font-normal text-red-800">{st.conceptoInfraccion}</span>
                           </div>
                         ) : (
-                          <span className="text-emerald-700 font-medium">{st.conceptoInfraccion}</span>
+                          <span className="text-emerald-700 font-medium text-[10px] leading-tight">
+                            {st.conceptoInfraccion}
+                          </span>
                         )}
                       </td>
-                      <td className="py-3 px-4 text-right whitespace-nowrap">
-                        <div className="inline-flex items-center gap-1.5">
+                      <td className="py-2 px-2 text-right">
+                        <div className="flex flex-wrap items-center justify-end gap-1">
                           {st.suspendido && (
                             <button
                               type="button"
                               onClick={() => executeManualAntiCheatUnlock(st.id)}
-                              className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold inline-flex items-center gap-1 cursor-pointer"
+                              className="px-2 py-1 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white font-semibold inline-flex items-center gap-1 text-[10px] cursor-pointer"
                               title="Desbloquear manualmente del sistema anti-trampa conservando sus intentos válidos"
                             >
-                              <Unlock className="w-3.5 h-3.5" />
+                              <Unlock className="w-3 h-3 shrink-0" />
                               <span>Desbloquear</span>
                             </button>
                           )}
 
                           {/* Inline Reset Confirmation with Number of Attempts to Allow (1 or 2) */}
                           {confirmResetId === st.id ? (
-                            <div className="inline-flex items-center gap-1.5 bg-amber-50 border border-amber-300 px-2.5 py-1 rounded-lg">
-                              <span className="font-semibold text-amber-900">¿Reiniciar a 0?</span>
-                              <label className="text-[11px] text-amber-900 font-medium flex items-center gap-1">
-                                <span>Intentos a permitir:</span>
+                            <div className="inline-flex flex-wrap items-center gap-1 bg-amber-50 border border-amber-300 px-2 py-1 rounded-md">
+                              <span className="font-semibold text-amber-900 text-[10px]">¿Reiniciar a 0?</span>
+                              <label className="text-[10px] text-amber-900 font-medium flex items-center gap-1">
+                                <span>Permitir:</span>
                                 <select
                                   value={resetAllowedAttemptsInput}
                                   onChange={(e) =>
                                     setResetAllowedAttemptsInput(Number(e.target.value) as 1 | 2)
                                   }
-                                  className="px-1.5 py-0.5 bg-white border border-amber-400 rounded font-mono font-bold text-slate-900"
+                                  className="px-1 py-0.5 bg-white border border-amber-400 rounded font-mono font-bold text-slate-900"
                                 >
                                   <option value={1}>1</option>
                                   <option value={2}>2</option>
@@ -4169,14 +4265,14 @@ function doPost(e) {
                                 onClick={() =>
                                   executeResetStudent(st.id, resetAllowedAttemptsInput)
                                 }
-                                className="px-2 py-0.5 bg-emerald-600 text-white rounded font-bold hover:bg-emerald-700"
+                                className="px-1.5 py-0.5 bg-emerald-600 text-white rounded font-bold hover:bg-emerald-700 text-[10px]"
                               >
-                                Sí / Confirmar
+                                Sí
                               </button>
                               <button
                                 type="button"
                                 onClick={() => setConfirmResetId(null)}
-                                className="px-2 py-0.5 bg-slate-200 text-slate-800 rounded font-semibold hover:bg-slate-300"
+                                className="px-1.5 py-0.5 bg-slate-200 text-slate-800 rounded font-semibold hover:bg-slate-300 text-[10px]"
                               >
                                 No
                               </button>
@@ -4189,10 +4285,10 @@ function doPost(e) {
                                 setResetAllowedAttemptsInput(st.maxIntentosPermitidos ?? 2);
                                 setConfirmResetId(st.id);
                               }}
-                              className="px-2.5 py-1.5 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-100 disabled:opacity-40 font-medium inline-flex items-center gap-1"
+                              className="px-2 py-1 rounded-md border border-slate-200 text-slate-700 hover:bg-slate-100 disabled:opacity-40 font-medium inline-flex items-center gap-1 text-[10px]"
                               title="Reiniciar intentos a 0, elegir 1 o 2 intentos permitidos y levantar sanciones"
                             >
-                              <RefreshCw className="w-3.5 h-3.5" />
+                              <RefreshCw className="w-3 h-3 shrink-0" />
                               <span>Reiniciar</span>
                             </button>
                           )}
@@ -4201,14 +4297,14 @@ function doPost(e) {
                           <button
                             type="button"
                             onClick={() => setExamBlockModalStudentId(st.id)}
-                            className={`px-2.5 py-1.5 rounded-lg border font-medium inline-flex items-center gap-1 ${
+                            className={`px-2 py-1 rounded-md border font-medium inline-flex items-center gap-1 text-[10px] ${
                               blockedCount > 0
                                 ? 'border-red-300 bg-red-50 text-red-800'
                                 : 'border-slate-200 text-slate-700 hover:bg-slate-100'
                             }`}
                             title="Bloquear o desbloquear exámenes específicos para este estudiante"
                           >
-                            <Lock className="w-3.5 h-3.5" />
+                            <Lock className="w-3 h-3 shrink-0" />
                             <span>
                               {blockedCount > 0 ? `Bloq. (${blockedCount})` : 'Exámenes'}
                             </span>
@@ -4217,26 +4313,26 @@ function doPost(e) {
                           <button
                             type="button"
                             onClick={() => openEditStudentModal(st)}
-                            className="px-2.5 py-1.5 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-100 font-medium inline-flex items-center gap-1"
+                            className="px-2 py-1 rounded-md border border-slate-200 text-slate-700 hover:bg-slate-100 font-medium inline-flex items-center gap-1 text-[10px]"
                           >
-                            <Edit3 className="w-3.5 h-3.5" />
+                            <Edit3 className="w-3 h-3 shrink-0" />
                             <span>Editar</span>
                           </button>
 
                           {confirmDeleteStudentId === st.id ? (
-                            <div className="inline-flex items-center gap-1 bg-red-50 border border-red-300 px-2 py-1 rounded-lg">
-                              <span className="text-red-900 font-semibold">¿Eliminar?</span>
+                            <div className="inline-flex items-center gap-1 bg-red-50 border border-red-300 px-1.5 py-0.5 rounded-md">
+                              <span className="text-red-900 font-semibold text-[10px]">¿Eliminar?</span>
                               <button
                                 type="button"
                                 onClick={() => executeDeleteStudent(st.id)}
-                                className="px-2 py-0.5 bg-red-600 text-white rounded font-bold"
+                                className="px-1.5 py-0.5 bg-red-600 text-white rounded font-bold text-[10px]"
                               >
                                 Sí
                               </button>
                               <button
                                 type="button"
                                 onClick={() => setConfirmDeleteStudentId(null)}
-                                className="px-2 py-0.5 bg-slate-200 text-slate-800 rounded"
+                                className="px-1.5 py-0.5 bg-slate-200 text-slate-800 rounded text-[10px]"
                               >
                                 No
                               </button>
@@ -4245,10 +4341,10 @@ function doPost(e) {
                             <button
                               type="button"
                               onClick={() => setConfirmDeleteStudentId(st.id)}
-                              className="p-1.5 rounded-lg border border-slate-200 text-red-600 hover:bg-red-50"
+                              className="p-1 rounded-md border border-slate-200 text-red-600 hover:bg-red-50"
                               title="Eliminar estudiante"
                             >
-                              <Trash2 className="w-3.5 h-3.5" />
+                              <Trash2 className="w-3 h-3" />
                             </button>
                           )}
                         </div>
@@ -4261,7 +4357,7 @@ function doPost(e) {
           </div>
 
           {/* ================= SECCIÓN INTEGRADA DE AUDITORÍA EN EL PANEL DE GESTIÓN DE ESTUDIANTES ================= */}
-          <div className="mt-6 border-2 border-sky-200 rounded-2xl bg-slate-50/70 p-5 space-y-4">
+          <div id="auditoria-inline-estudiante" className="mt-6 border-2 border-sky-200 rounded-2xl bg-slate-50/70 p-5 space-y-4">
             {(() => {
               const activeAuditStudent =
                 students.find((s) => s.id === selectedAuditStudentId) || students[0] || null;
@@ -5065,26 +5161,26 @@ function doPost(e) {
               </div>
             </div>
 
-            <div className="overflow-x-auto border border-slate-200 rounded-xl">
-              <table className="w-full text-left border-collapse">
+            <div className="w-full border border-slate-200 rounded-xl overflow-hidden bg-white">
+              <table className="w-full table-auto text-left border-collapse">
                 <thead>
-                  <tr className="bg-slate-50 border-b border-slate-200 text-xs font-semibold text-slate-700">
-                    <th className="py-3 px-4">ID Estudiante</th>
-                    <th className="py-3 px-4">Estudiante</th>
-                    <th className="py-3 px-4 text-center">Insignias Retos (5/5)</th>
-                    <th className="py-3 px-4 text-right">Intento 1</th>
-                    <th className="py-3 px-4 text-right">Intento 2</th>
-                    <th className="py-3 px-4 text-right">Nota Definitiva</th>
-                    <th className="py-3 px-4">Estado / Concepto</th>
-                    <th className="py-3 px-4">Suspensión / Infracción y Concepto</th>
+                  <tr className="bg-slate-50 border-b border-slate-200 text-[11px] font-bold text-slate-700">
+                    <th className="py-2.5 px-2.5">ID Estudiante</th>
+                    <th className="py-2.5 px-2.5">Estudiante</th>
+                    <th className="py-2.5 px-2.5 text-center">Insignias Retos (5/5)</th>
+                    <th className="py-2.5 px-2.5 text-right">Intento 1</th>
+                    <th className="py-2.5 px-2.5 text-right">Intento 2</th>
+                    <th className="py-2.5 px-2.5 text-right">Nota Definitiva</th>
+                    <th className="py-2.5 px-2.5">Estado / Concepto</th>
+                    <th className="py-2.5 px-2.5">Suspensión / Infracción y Concepto</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-200 text-xs">
+                <tbody className="divide-y divide-slate-200 text-[11px]">
                   {consolidatedGrades.map((row) => (
                     <tr key={row.student.id} className="hover:bg-slate-50/70">
-                      <td className="py-3 px-4 font-mono font-semibold text-slate-900">{row.student.id}</td>
-                      <td className="py-3 px-4 font-medium text-slate-900">{row.student.nombre}</td>
-                      <td className="py-3 px-4 text-center">
+                      <td className="py-2.5 px-2.5 font-mono font-semibold text-slate-900 break-all">{row.student.id}</td>
+                      <td className="py-2.5 px-2.5 font-medium text-slate-900 break-words">{row.student.nombre}</td>
+                      <td className="py-2.5 px-2.5 text-center">
                         <div className="inline-flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-lg px-2 py-0.5">
                           {OFFICIAL_BADGES.map((b) => {
                             const unlocked = Boolean(
@@ -5313,29 +5409,29 @@ function doPost(e) {
                 Se activará automáticamente cuando los estudiantes entreguen sus evaluaciones en el aula.
               </p>
             ) : (
-              <div className="overflow-x-auto border border-slate-200 rounded-lg">
-                <table className="w-full text-left border-collapse text-xs">
+              <div className="w-full border border-slate-200 rounded-lg overflow-hidden bg-white">
+                <table className="w-full table-auto text-left border-collapse text-[11px]">
                   <thead>
                     <tr className="bg-slate-50 border-b border-slate-200 font-semibold text-slate-700">
-                      <th className="py-2 px-3">ID Pregunta</th>
-                      <th className="py-2 px-3">Módulo</th>
-                      <th className="py-2 px-3">Enunciado del Reactivo</th>
-                      <th className="py-2 px-3 text-right">Muestra</th>
-                      <th className="py-2 px-3 text-right">% Error</th>
-                      <th className="py-2 px-3">Diagnóstico Psicométrico</th>
+                      <th className="py-2 px-2.5">ID Pregunta</th>
+                      <th className="py-2 px-2">Módulo</th>
+                      <th className="py-2 px-2.5">Enunciado del Reactivo</th>
+                      <th className="py-2 px-2 text-right">Muestra</th>
+                      <th className="py-2 px-2 text-right">% Error</th>
+                      <th className="py-2 px-2.5">Diagnóstico Psicométrico</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200">
                     {diagnostics.psychometricItems.map((it) => (
                       <tr key={it.questionId} className="hover:bg-slate-50">
-                        <td className="py-2 px-3 font-mono font-bold text-slate-900">{it.questionId}</td>
-                        <td className="py-2 px-3 font-mono">M{it.modulo}</td>
-                        <td className="py-2 px-3 max-w-md truncate">{it.enunciado}</td>
-                        <td className="py-2 px-3 text-right font-mono">{it.total}</td>
-                        <td className="py-2 px-3 text-right font-mono font-bold text-red-700">
+                        <td className="py-2 px-2.5 font-mono font-bold text-slate-900">{it.questionId}</td>
+                        <td className="py-2 px-2 font-mono">M{it.modulo}</td>
+                        <td className="py-2 px-2.5 break-words">{it.enunciado}</td>
+                        <td className="py-2 px-2 text-right font-mono">{it.total}</td>
+                        <td className="py-2 px-2 text-right font-mono font-bold text-red-700">
                           {it.errorRate}%
                         </td>
-                        <td className="py-2 px-3 font-semibold">
+                        <td className="py-2 px-2.5 font-semibold break-words">
                           {it.classification === 'CRITICO_DIFICIL' && (
                             <span className="text-red-700">■ Crítico (Revisar distractor / Reforzar)</span>
                           )}
@@ -5414,16 +5510,38 @@ function doPost(e) {
                 <span>Agregar / Actualizar Lote Masivo de Preguntas</span>
               </button>
 
-              {/* 1C. Botón Restaurar Banco Unificado 2026 (740 Reactivos) */}
-              <button
-                type="button"
-                onClick={handleRestoreOfficialUnifiedBank}
-                className="px-3.5 py-2 rounded-lg border border-sky-300 bg-sky-50 hover:bg-sky-100 text-sky-950 text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
-                title="Restaurar los 740 reactivos del Banco Oficial Unificado 2026"
-              >
-                <Database className="w-4 h-4 text-sky-700" />
-                <span>Cargar Banco Unificado 2026 ({INITIAL_QUESTIONS.length} Reactivos)</span>
-              </button>
+              {/* 1C. Botón Restaurar Banco Unificado 2026 (con confirmación para aceptar el reemplazo) */}
+              {confirmRestoreOfficialBank ? (
+                <div className="inline-flex items-center gap-2 bg-sky-50 border-2 border-sky-400 px-3 py-1.5 rounded-lg text-xs">
+                  <span className="font-bold text-sky-950">
+                    ¿Reemplazar banco actual con los {INITIAL_QUESTIONS.length} reactivos oficiales 2026?
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleRestoreOfficialUnifiedBank}
+                    className="px-2.5 py-1 bg-sky-700 hover:bg-sky-800 text-white rounded font-bold cursor-pointer"
+                  >
+                    Sí, Confirmar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmRestoreOfficialBank(false)}
+                    className="px-2.5 py-1 bg-white border border-slate-300 text-slate-700 rounded font-semibold cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmRestoreOfficialBank(true)}
+                  className="px-3.5 py-2 rounded-lg border border-sky-300 bg-sky-50 hover:bg-sky-100 text-sky-950 text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                  title="Restaurar los reactivos del Banco Oficial Unificado 2026"
+                >
+                  <Database className="w-4 h-4 text-sky-700" />
+                  <span>Cargar Banco Unificado 2026 ({INITIAL_QUESTIONS.length} Reactivos)</span>
+                </button>
+              )}
 
               {/* 2. Botón Descargar Lote Masivo de Preguntas (Reactivos Activos) */}
               <button
