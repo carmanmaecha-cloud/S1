@@ -4,15 +4,96 @@ import {
   doc,
   getDoc,
   getDocFromServer,
-  setDoc
+  setDoc,
+  disableNetwork,
+  terminate,
+  setLogLevel
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 import type { Question } from '../types';
+
+// Silence internal @firebase/firestore GrpcConnection backoff logs immediately on load
+try {
+  setLogLevel('silent');
+} catch {
+  // ignore
+}
 
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 
 const COLLECTION_NAME = 'evaluaplus_cloud_state';
+const QUOTA_STORAGE_KEY = 'evaluaplus_firestore_quota_exhausted_at_v1';
+
+// Circuit breaker for Firestore free-tier daily quota exhaustion
+let firestoreQuotaExhausted = false;
+let firestoreQuotaExhaustedAtMs = 0;
+let firestoreTerminated = false;
+const QUOTA_COOLDOWN_MS = 1000 * 60 * 60 * 6; // 6 hours cooldown when daily quota is exhausted
+const WRITE_TIMEOUT_MS = 2500;
+const lastShardPayloadCache = new Map<string, string>();
+
+// Restore persisted quota circuit breaker if available in browser
+try {
+  if (typeof window !== 'undefined' && window.localStorage) {
+    const savedTs = Number(window.localStorage.getItem(QUOTA_STORAGE_KEY) || '0');
+    if (savedTs > 0 && Date.now() - savedTs < QUOTA_COOLDOWN_MS) {
+      firestoreQuotaExhausted = true;
+      firestoreQuotaExhaustedAtMs = savedTs;
+    }
+  }
+} catch {
+  // ignore
+}
+
+function isQuotaExhaustedError(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error ?? '');
+  const code = (error as any)?.code || '';
+  return (
+    code === 'resource-exhausted' ||
+    msg.includes('resource-exhausted') ||
+    msg.includes('RESOURCE_EXHAUSTED') ||
+    msg.includes('Quota limit exceeded') ||
+    msg.includes('Quota exceeded') ||
+    msg.includes('write_timeout')
+  );
+}
+
+function tripQuotaCircuitBreaker(): void {
+  firestoreQuotaExhausted = true;
+  firestoreQuotaExhaustedAtMs = Date.now();
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.setItem(QUOTA_STORAGE_KEY, String(firestoreQuotaExhaustedAtMs));
+    }
+  } catch {
+    // ignore
+  }
+  try {
+    setLogLevel('silent');
+    void disableNetwork(db).catch(() => {});
+    if (!firestoreTerminated) {
+      firestoreTerminated = true;
+      void terminate(db).catch(() => {});
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function canUseFirestore(): boolean {
+  if (firestoreTerminated) return false;
+  if (!firestoreQuotaExhausted) return true;
+  if (Date.now() - firestoreQuotaExhaustedAtMs > QUOTA_COOLDOWN_MS) {
+    firestoreQuotaExhausted = false;
+    return true;
+  }
+  return false;
+}
+
+export function isFirestoreQuotaExhausted(): boolean {
+  return firestoreQuotaExhausted;
+}
 
 export enum OperationType {
   CREATE = 'create',
@@ -45,6 +126,10 @@ export function handleFirestoreError(
   operationType: OperationType,
   path: string | null
 ) {
+  if (isQuotaExhaustedError(error)) {
+    tripQuotaCircuitBreaker();
+    return null;
+  }
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
@@ -58,24 +143,22 @@ export function handleFirestoreError(
     operationType,
     path
   };
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
   return errInfo;
 }
 
 export async function testFirestoreConnection(): Promise<boolean> {
+  if (!canUseFirestore()) return false;
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
     return true;
   } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error('Please check your Firebase configuration.');
+    if (isQuotaExhaustedError(error)) {
+      tripQuotaCircuitBreaker();
       return false;
     }
-    return true;
+    return false;
   }
 }
-
-void testFirestoreConnection();
 
 const MAX_QUESTIONS_PER_SHARD = 200;
 
@@ -96,15 +179,23 @@ async function writeShard(
   payload: unknown,
   questionsRevision?: number,
   chunkCount?: number
-): Promise<void> {
+): Promise<boolean> {
+  if (!canUseFirestore()) return false;
   const path = `${COLLECTION_NAME}/${shardId}`;
   try {
     const serialized = JSON.stringify(payload ?? null);
+    const safePayloadJson = serialized.length <= 890000 ? serialized : 'null';
+
+    // Deduplicate writes: skip writing non-meta shards if their exact payload has not changed
+    if (shardId !== 'meta' && lastShardPayloadCache.get(shardId) === safePayloadJson) {
+      return true;
+    }
+
     const data: ShardEnvelope = {
       shardType,
       revision: Math.max(0, Number(revision) || 1),
       updatedIso: String(updatedIso || new Date().toISOString()).slice(0, 64),
-      payloadJson: serialized.length <= 890000 ? serialized : 'null'
+      payloadJson: safePayloadJson
     };
     if (typeof questionsRevision === 'number') {
       data.questionsRevision = Math.max(0, questionsRevision);
@@ -112,9 +203,26 @@ async function writeShard(
     if (typeof chunkCount === 'number') {
       data.chunkCount = Math.min(50, Math.max(0, chunkCount));
     }
-    await setDoc(doc(db, COLLECTION_NAME, shardId), data);
+
+    // Enforce a strict timeout on setDoc because Firestore SDK does not reject on RESOURCE_EXHAUSTED
+    // (it enters an internal maximum-backoff retry loop unless timed out and terminated).
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      await Promise.race([
+        setDoc(doc(db, COLLECTION_NAME, shardId), data),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('write_timeout')), WRITE_TIMEOUT_MS);
+        })
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+
+    lastShardPayloadCache.set(shardId, safePayloadJson);
+    return true;
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
+    return false;
   }
 }
 
@@ -122,12 +230,14 @@ async function readShard<T>(shardId: string): Promise<{
   envelope: ShardEnvelope;
   parsed: T;
 } | null> {
+  if (!canUseFirestore()) return null;
   const path = `${COLLECTION_NAME}/${shardId}`;
   try {
     const snap = await getDoc(doc(db, COLLECTION_NAME, shardId));
     if (!snap.exists()) return null;
     const envelope = snap.data() as ShardEnvelope;
     if (!envelope || typeof envelope.payloadJson !== 'string') return null;
+    lastShardPayloadCache.set(shardId, envelope.payloadJson);
     const parsed = JSON.parse(envelope.payloadJson) as T;
     return { envelope, parsed };
   } catch (error) {
@@ -165,10 +275,12 @@ export async function saveCentralStateToFirestore(
     config: any;
     customMiniRetos: any[];
     activeExamsByStudent: Record<string, any>;
+    academicDataset?: any;
   },
   options: { includeQuestions?: boolean } = { includeQuestions: true }
 ): Promise<boolean> {
   try {
+    if (!canUseFirestore()) return false;
     const rev = Math.max(1, Number(state.revision) || 1);
     const qRev = Math.max(1, Number(state.questionsRevision) || 1);
     const iso = state.lastModifiedIso || new Date().toISOString();
@@ -193,9 +305,43 @@ export async function saveCentralStateToFirestore(
       snapshotChunkCount: 0
     };
 
-    const promises: Promise<void>[] = [
-      writeShard('meta', 'meta', rev, iso, metaPayload, qRev, qChunks.length),
-      writeShard('config', 'config', rev, iso, state.config || {}, qRev),
+    // Probe meta write first so if daily quota is exhausted we trip the circuit breaker immediately
+    // without queueing multiple concurrent write streams.
+    const metaOk = await writeShard('meta', 'meta', rev, iso, metaPayload, qRev, qChunks.length);
+    if (!metaOk || !canUseFirestore()) {
+      return false;
+    }
+
+    const configSerialized = JSON.stringify(state.config || {});
+    const MAX_CONFIG_CHUNK_CHARS = 700000;
+    const configPromises: Promise<boolean>[] = [];
+    if (configSerialized.length <= MAX_CONFIG_CHUNK_CHARS) {
+      configPromises.push(writeShard('config', 'config', rev, iso, state.config || {}, qRev));
+    } else {
+      const configChunks: string[] = [];
+      for (let i = 0; i < configSerialized.length; i += MAX_CONFIG_CHUNK_CHARS) {
+        configChunks.push(configSerialized.slice(i, i + MAX_CONFIG_CHUNK_CHARS));
+      }
+      configPromises.push(
+        writeShard(
+          'config',
+          'config',
+          rev,
+          iso,
+          { __chunkedConfig: true, chunkCount: configChunks.length },
+          qRev,
+          configChunks.length
+        )
+      );
+      configChunks.forEach((chunkStr, cIdx) => {
+        configPromises.push(
+          writeShard(`config_chunk_${cIdx}`, 'config_chunk', rev, iso, chunkStr, qRev)
+        );
+      });
+    }
+
+    const promises: Promise<boolean>[] = [
+      ...configPromises,
       writeShard('students', 'students', rev, iso, state.students || [], qRev),
       writeShard('attempts', 'attempts', rev, iso, (state.attempts || []).slice(0, 800), qRev),
       writeShard(
@@ -207,7 +353,8 @@ export async function saveCentralStateToFirestore(
           abproEvaluations: state.abproEvaluations || [],
           liveSessions: state.liveSessions || [],
           customMiniRetos: state.customMiniRetos || [],
-          activeExamsByStudent: state.activeExamsByStudent || {}
+          activeExamsByStudent: state.activeExamsByStudent || {},
+          academicDataset: state.academicDataset || null
         },
         qRev
       )
@@ -255,6 +402,7 @@ export async function loadCentralStateFromFirestore(
   config: any;
   customMiniRetos: any[];
   activeExamsByStudent: Record<string, any>;
+  academicDataset?: any;
 } | null> {
   try {
     const metaShard = await readShard<CloudMetaPayload>('meta');
@@ -270,8 +418,27 @@ export async function loadCentralStateFromFirestore(
         liveSessions?: any[];
         customMiniRetos?: any[];
         activeExamsByStudent?: Record<string, any>;
+        academicDataset?: any;
       }>('extras')
     ]);
+
+    let resolvedConfig: any = configShard?.parsed || {};
+    if (resolvedConfig && resolvedConfig.__chunkedConfig && Number(resolvedConfig.chunkCount) > 0) {
+      const cCount = Math.min(20, Math.max(0, Number(resolvedConfig.chunkCount) || 0));
+      const cPromises = [];
+      for (let i = 0; i < cCount; i++) {
+        cPromises.push(readShard<string>(`config_chunk_${i}`));
+      }
+      const cShards = await Promise.all(cPromises);
+      const joined = cShards.map((s) => (s && typeof s.parsed === 'string' ? s.parsed : '')).join('');
+      if (joined) {
+        try {
+          resolvedConfig = JSON.parse(joined);
+        } catch {
+          resolvedConfig = {};
+        }
+      }
+    }
 
     let loadedQuestions: Question[] | undefined = undefined;
     if (options.includeQuestions !== false) {
@@ -309,12 +476,13 @@ export async function loadCentralStateFromFirestore(
       attempts: Array.isArray(attemptsShard?.parsed) ? attemptsShard!.parsed : [],
       abproEvaluations: Array.isArray(extras.abproEvaluations) ? extras.abproEvaluations : [],
       liveSessions: Array.isArray(extras.liveSessions) ? extras.liveSessions : [],
-      config: configShard?.parsed || {},
+      config: resolvedConfig,
       customMiniRetos: Array.isArray(extras.customMiniRetos) ? extras.customMiniRetos : [],
       activeExamsByStudent:
         extras.activeExamsByStudent && typeof extras.activeExamsByStudent === 'object'
           ? extras.activeExamsByStudent
-          : {}
+          : {},
+      academicDataset: extras.academicDataset || null
     };
   } catch (err) {
     console.error('Error loading state from Firestore:', err);

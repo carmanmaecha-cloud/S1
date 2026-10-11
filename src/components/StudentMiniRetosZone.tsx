@@ -15,6 +15,8 @@ import { getEffectiveMaxLlamadosAtencion } from '../utils/academicServerSummary'
 import {
   OFFICIAL_BADGES,
   SPECIAL_DISTINCTION_BADGE,
+  getEffectiveBadgesForCourse,
+  getEffectiveSpecialDistinctionBadge,
   MINI_RETO_MECHANICS,
   generateLocalDynamicReto,
   evaluateRetoLocally,
@@ -270,14 +272,21 @@ export function StudentMiniRetosZone({
     return merged;
   }, [student]);
 
+  const effectiveCourseBadges = useMemo(() => getEffectiveBadgesForCourse(config), [config]);
+  const effectiveSpecialBadge = useMemo(
+    () => getEffectiveSpecialDistinctionBadge(config),
+    [config]
+  );
+
   // Count unlocked badges
   const unlockedBadgesCount = useMemo(() => {
-    return ([1, 2, 3, 4, 5] as const).filter((m) => retoProgressMap[m].insigniaDesbloqueada).length;
-  }, [retoProgressMap]);
+    return effectiveCourseBadges.filter((b) => retoProgressMap[b.modulo].insigniaDesbloqueada).length;
+  }, [retoProgressMap, effectiveCourseBadges]);
 
-  const allFiveUnlocked = unlockedBadgesCount === 5;
+  const allFiveUnlocked =
+    effectiveCourseBadges.length > 0 && unlockedBadgesCount === effectiveCourseBadges.length;
 
-  // Modules (1..5) specifically disabled by the teacher for this student
+  // Modules specifically disabled by the teacher for this student
   const blockedModulesForStudent = useMemo(() => {
     const fromStudent = Array.isArray(student.modulosRetosBloqueados)
       ? student.modulosRetosBloqueados
@@ -291,8 +300,19 @@ export function StudentMiniRetosZone({
   ]);
 
   const enabledModulesForStudent = useMemo(() => {
-    return ([1, 2, 3, 4, 5] as const).filter((m) => !blockedModulesForStudent.includes(m));
-  }, [blockedModulesForStudent]);
+    return effectiveCourseBadges
+      .map((b) => b.modulo)
+      .filter((m) => !blockedModulesForStudent.includes(m));
+  }, [effectiveCourseBadges, blockedModulesForStudent]);
+
+  useEffect(() => {
+    if (
+      effectiveCourseBadges.length > 0 &&
+      !effectiveCourseBadges.some((b) => b.modulo === selectedModulo)
+    ) {
+      setSelectedModulo(effectiveCourseBadges[0].modulo);
+    }
+  }, [effectiveCourseBadges, selectedModulo]);
 
   const isSelectedModuloDisabledByTeacher = blockedModulesForStudent.includes(selectedModulo);
 
@@ -324,7 +344,9 @@ export function StudentMiniRetosZone({
   }, [config, student.id, student.suspendido, student.conceptoInfraccion]);
 
   const currentModProgress = retoProgressMap[selectedModulo];
-  const currentBadgeDef = OFFICIAL_BADGES.find((b) => b.modulo === selectedModulo)!;
+  const currentBadgeDef =
+    effectiveCourseBadges.find((b) => b.modulo === selectedModulo) ||
+    OFFICIAL_BADGES.find((b) => b.modulo === selectedModulo)!;
   const thresholdPct = Math.max(50, Math.min(95, Number(config.umbralAprobacionMiniRetoPct) || 60));
 
   // Count words in open answer
@@ -825,12 +847,15 @@ export function StudentMiniRetosZone({
     setIsGeneratingReto(true);
 
     try {
+      const targetBadge = effectiveCourseBadges.find((b) => b.modulo === moduloTarget);
+      const sourceModuloId = Number(targetBadge?.realModuloId || moduloTarget);
+
       // 1. Check if there is an active Custom Teacher Mini Reto for this module not yet used by the student
       const safeCustomList = Array.isArray(customMiniRetos) ? customMiniRetos.filter(Boolean) : [];
       const activeCustomForMod = safeCustomList.filter(
         (c) =>
           c.activo &&
-          Number(c.modulo) === moduloTarget &&
+          (Number(c.modulo) === sourceModuloId || Number(c.modulo) === moduloTarget) &&
           !modProg.preguntasRetoUsadas.includes(c.id) &&
           (selectedMechanicFilter === 'random' || c.mecanicaId === selectedMechanicFilter)
       );
@@ -861,10 +886,12 @@ export function StudentMiniRetosZone({
         return;
       }
 
-      // 2. Otherwise, pick a random unseen question from the 740 Question Bank for this module
+      // 2. Otherwise, pick a random unseen question from the Course Question Bank for this module
       const safeBank =
         Array.isArray(questions) && questions.length > 0 ? questions : INITIAL_QUESTIONS;
-      const modQuestions = safeBank.filter((q) => q && Number(q.modulo) === moduloTarget);
+      const modQuestions = safeBank.filter(
+        (q) => q && (Number(q.modulo) === sourceModuloId || Number(q.modulo) === moduloTarget)
+      );
       const effectiveModQuestions =
         modQuestions.length > 0
           ? modQuestions
@@ -1215,20 +1242,20 @@ export function StudentMiniRetosZone({
                 Progreso de Colección
               </div>
               <div className="text-lg font-extrabold text-amber-400 font-mono">
-                {unlockedBadgesCount} / 5 Insignias
+                {unlockedBadgesCount} / {effectiveCourseBadges.length} Insignias
               </div>
               <div className="text-[11px] text-slate-300 font-mono">
-                ✓ Desbloqueadas: <strong className="text-emerald-400">{unlockedBadgesCount}</strong> · ⏳ Pendientes: <strong className="text-amber-300">{5 - unlockedBadgesCount}</strong>
+                ✓ Desbloqueadas: <strong className="text-emerald-400">{unlockedBadgesCount}</strong> · ⏳ Pendientes: <strong className="text-amber-300">{Math.max(0, effectiveCourseBadges.length - unlockedBadgesCount)}</strong>
               </div>
             </div>
           </div>
         </div>
 
-        {/* Paso 1: Selector Claro de los 5 Módulos de Retos (Adaptado a Móvil y Web) */}
+        {/* Paso 1: Selector Claro de los Módulos de Retos (Adaptado a Móvil y Web) */}
         <div className="space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-300">
             <span className="font-bold text-amber-300 uppercase tracking-wider">
-              Paso 1 · Toque un Módulo (1 al 5) para ver su estado o iniciar el reto:
+              Paso 1 · Toque un Módulo (1 al {effectiveCourseBadges.length}) para ver su estado o iniciar el reto:
             </span>
             <span className="font-mono text-[11px] text-slate-300">
               Módulo activo seleccionado: <strong className="text-white">Módulo {selectedModulo}</strong>
@@ -1236,7 +1263,7 @@ export function StudentMiniRetosZone({
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
-            {OFFICIAL_BADGES.map((badge) => {
+            {effectiveCourseBadges.map((badge) => {
               const prog = retoProgressMap[badge.modulo];
               const isUnlocked = prog.insigniaDesbloqueada;
               const isSuspended = Boolean(prog.suspendidoPorTrampa);
@@ -1378,18 +1405,18 @@ export function StudentMiniRetosZone({
             <div className="text-3xl">{allFiveUnlocked ? '🏆' : '🔒'}</div>
             <div>
               <div className="text-xs font-bold uppercase tracking-wider text-amber-300">
-                Distinción Especial al Completar las 5 Insignias
+                Distinción Especial al Completar las {effectiveCourseBadges.length} Insignias
               </div>
               <div className="text-sm font-extrabold text-white">
-                {SPECIAL_DISTINCTION_BADGE.tituloPrincipal}
+                {effectiveSpecialBadge.tituloPrincipal}
               </div>
-              <div className="text-xs text-slate-300">{SPECIAL_DISTINCTION_BADGE.subtitulo}</div>
+              <div className="text-xs text-slate-300">{effectiveSpecialBadge.subtitulo}</div>
             </div>
           </div>
           <div className="text-xs font-mono px-3 py-1.5 rounded-lg bg-slate-900/80 border border-slate-700 shrink-0">
             {allFiveUnlocked
               ? '🌟 ¡COLECCIÓN COMPLETA DESBLOQUEADA!'
-              : `Progreso actual: ${unlockedBadgesCount} de 5 módulos superados`}
+              : `Progreso actual: ${unlockedBadgesCount} de ${effectiveCourseBadges.length} módulos superados`}
           </div>
         </div>
 

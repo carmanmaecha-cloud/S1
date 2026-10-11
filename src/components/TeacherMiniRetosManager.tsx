@@ -13,8 +13,13 @@ import {
   SPECIAL_DISTINCTION_BADGE,
   MINI_RETO_MECHANICS,
   generateLocalDynamicReto,
-  getDefaultRetoProgress
+  getDefaultRetoProgress,
+  getEffectiveBadgesForCourse
 } from '../utils/miniRetosEngine';
+import {
+  getEffectiveCourseMetadata,
+  generateBaseRetosForCourseModules
+} from '../utils/universalCourseEngine';
 import { OptionServerSaveBar } from './ServerSaveContext';
 import {
   Trophy,
@@ -69,6 +74,152 @@ export function TeacherMiniRetosManager({
     'metricas_auditoria'
   );
 
+  const activeCourseMeta = useMemo(() => getEffectiveCourseMetadata(config), [config]);
+  const effectiveBadges = useMemo(() => getEffectiveBadgesForCourse(config), [config]);
+
+  const activeCourseModules = useMemo(() => {
+    const mods = Array.isArray(activeCourseMeta.modulosCurso)
+      ? activeCourseMeta.modulosCurso.filter((m) => Boolean(m) && m.activo !== false)
+      : [];
+    if (mods.length > 0) {
+      return mods.map((m) => ({
+        id: (Math.min(5, Math.max(1, Number(m.id) || 1)) as 1 | 2 | 3 | 4 | 5),
+        shortTitle: (m.shortTitle || m.fullTitle || `Módulo ${m.id}`).trim(),
+        fullTitle: (m.fullTitle || m.shortTitle || `Módulo ${m.id}`).trim(),
+        retosCount: typeof m.retosCount === 'number' ? m.retosCount : 1
+      }));
+    }
+    const uniqueMods = new Map<number, { id: 1 | 2 | 3 | 4 | 5; shortTitle: string; fullTitle: string; retosCount: number }>();
+    effectiveBadges.forEach((b) => {
+      const mId = (b.realModuloId || b.modulo) as 1 | 2 | 3 | 4 | 5;
+      if (!uniqueMods.has(mId)) {
+        uniqueMods.set(mId, {
+          id: mId,
+          shortTitle: b.tituloPrincipal,
+          fullTitle: b.subtitulo,
+          retosCount: b.retosCountInModule || 1
+        });
+      }
+    });
+    return Array.from(uniqueMods.values());
+  }, [activeCourseMeta.modulosCurso, effectiveBadges]);
+
+  const deletedStorageKey = `pru_deleted_mini_retos_v1_${activeCourseMeta.courseId || 'DEFAULT'}`;
+  const [deletedRetoIds, setDeletedRetoIds] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem(`pru_deleted_mini_retos_v1_${activeCourseMeta.courseId || 'DEFAULT'}`);
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  React.useEffect(() => {
+    try {
+      const raw = localStorage.getItem(deletedStorageKey);
+      setDeletedRetoIds(raw ? JSON.parse(raw) : []);
+    } catch {
+      setDeletedRetoIds([]);
+    }
+  }, [deletedStorageKey]);
+
+  const persistCustomRetosList = (
+    nextList: CustomMiniRetoTemplate[],
+    newlyDeletedId?: string
+  ) => {
+    let updatedDeleted = deletedRetoIds;
+    if (newlyDeletedId && !deletedRetoIds.includes(newlyDeletedId)) {
+      updatedDeleted = [...deletedRetoIds, newlyDeletedId];
+      setDeletedRetoIds(updatedDeleted);
+      try {
+        localStorage.setItem(deletedStorageKey, JSON.stringify(updatedDeleted));
+      } catch {
+        // ignore storage quota errors
+      }
+    }
+    const cleanNext = nextList.filter((r) => !updatedDeleted.includes(r.id));
+    onUpdateCustomMiniRetos(cleanNext);
+    onUpdateConfig((prev) => {
+      const catalog = Array.isArray(prev.universalCoursesCatalog)
+        ? prev.universalCoursesCatalog
+        : [];
+      if (catalog.length === 0) return prev;
+      return {
+        ...prev,
+        universalCoursesCatalog: catalog.map((ws) =>
+          ws.meta?.courseId === activeCourseMeta.courseId
+            ? { ...ws, customMiniRetos: cleanNext }
+            : ws
+        )
+      };
+    });
+  };
+
+  const effectiveCustomMiniRetos = useMemo<CustomMiniRetoTemplate[]>(() => {
+    const catalog = Array.isArray(config.universalCoursesCatalog)
+      ? config.universalCoursesCatalog
+      : [];
+    const activeWs = catalog.find((w) => w.meta?.courseId === activeCourseMeta.courseId);
+    const wsRetos = Array.isArray(activeWs?.customMiniRetos) ? activeWs!.customMiniRetos : [];
+    const wsQuestions =
+      questions.length > 0
+        ? questions
+        : Array.isArray(activeWs?.questions)
+        ? activeWs!.questions
+        : [];
+
+    const validModIds = new Set<number>(activeCourseModules.map((m) => Number(m.id)));
+
+    const isMarketingCourse =
+      activeCourseMeta.courseId === 'COURSE-MARKETING-2026' ||
+      activeCourseMeta.nombreCurso.toLowerCase().includes('marketing');
+    const looksLikeDefaultMarketingRetos = (list: CustomMiniRetoTemplate[]) =>
+      !isMarketingCourse &&
+      list.length > 0 &&
+      list.every((r) => String(r.id || '').startsWith('RETO-DOC-M'));
+
+    const looksLikeGenericPlaceholderRetos = (list: CustomMiniRetoTemplate[]) =>
+      wsQuestions.length > 0 &&
+      list.length > 0 &&
+      list.every(
+        (r) =>
+          String(r.id || '').startsWith('RETO-AUTO-') &&
+          !String(r.id || '').includes('-Q')
+      );
+
+    let candidate: CustomMiniRetoTemplate[] = [];
+    if (
+      customMiniRetos.length > 0 &&
+      !looksLikeDefaultMarketingRetos(customMiniRetos) &&
+      !looksLikeGenericPlaceholderRetos(customMiniRetos)
+    ) {
+      candidate = customMiniRetos;
+    } else if (
+      wsRetos.length > 0 &&
+      !looksLikeDefaultMarketingRetos(wsRetos) &&
+      !looksLikeGenericPlaceholderRetos(wsRetos)
+    ) {
+      candidate = wsRetos;
+    } else {
+      candidate = generateBaseRetosForCourseModules(activeCourseMeta, wsQuestions);
+    }
+
+    const filtered = candidate.filter((r) => {
+      if (!r || deletedRetoIds.includes(r.id)) return false;
+      if (validModIds.size > 0 && !validModIds.has(Number(r.modulo))) return false;
+      return true;
+    });
+
+    return filtered;
+  }, [
+    config.universalCoursesCatalog,
+    activeCourseMeta,
+    activeCourseModules,
+    customMiniRetos,
+    questions,
+    deletedRetoIds
+  ]);
+
   // Filters for Audit Table
   const [auditSearch, setAuditSearch] = useState('');
   const [auditModuloFilter, setAuditModuloFilter] = useState<number | 'ALL'>('ALL');
@@ -95,8 +246,12 @@ export function TeacherMiniRetosManager({
 
   // Custom Mini Reto Form State
   const [editingRetoId, setEditingRetoId] = useState<string | null>(null);
-  const [formModulo, setFormModulo] = useState<1 | 2 | 3 | 4 | 5>(2);
-  const [formTema, setFormTema] = useState('Tema 2.2: Factores Sociales y Grupos de Referencia');
+  const [formModulo, setFormModulo] = useState<1 | 2 | 3 | 4 | 5>(
+    () => (activeCourseModules[0]?.id || 1) as 1 | 2 | 3 | 4 | 5
+  );
+  const [formTema, setFormTema] = useState(
+    () => activeCourseModules[0]?.fullTitle || 'Módulo 1'
+  );
   const [formMecanicaId, setFormMecanicaId] = useState<MiniRetoMechanicId>('adivina_quien_soy');
   const [formTitulo, setFormTitulo] = useState('');
   const [formNarrativa, setFormNarrativa] = useState('');
@@ -566,11 +721,13 @@ export function TeacherMiniRetosManager({
     };
 
     if (editingRetoId) {
-      onUpdateCustomMiniRetos((prev) => prev.map((r) => (r.id === editingRetoId ? newItem : r)));
-      setStatusBanner('✓ Plantilla de Mini Reto actualizada en el Banco Docente.');
+      persistCustomRetosList(
+        effectiveCustomMiniRetos.map((r) => (r.id === editingRetoId ? newItem : r))
+      );
+      setStatusBanner(`✓ Plantilla de Mini Reto actualizada en el Banco del Curso (${activeCourseMeta.nombreCurso}).`);
     } else {
-      onUpdateCustomMiniRetos((prev) => [newItem, ...prev]);
-      setStatusBanner('✓ Nuevo Mini Reto agregado al Banco Docente.');
+      persistCustomRetosList([newItem, ...effectiveCustomMiniRetos]);
+      setStatusBanner(`✓ Nuevo Mini Reto agregado al Banco del Curso (${activeCourseMeta.nombreCurso}).`);
     }
 
     setEditingRetoId(null);
@@ -582,13 +739,15 @@ export function TeacherMiniRetosManager({
     setFormConceptosClave('');
   };
 
-  // Auto-fill form by sampling a random question from the 740 Question Bank
+  // Auto-fill form by sampling a random question from the Course Question Bank
   const handleAutoDraftFromQuestionBank = () => {
     const modQuestions = questions.filter((q) => Number(q.modulo) === formModulo);
-    if (modQuestions.length === 0) return;
-    const randomQ = modQuestions[Math.floor(Math.random() * modQuestions.length)];
+    const pool = modQuestions.length > 0 ? modQuestions : questions;
+    if (pool.length === 0) return;
+    const randomQ = pool[Math.floor(Math.random() * pool.length)];
     const generated = generateLocalDynamicReto(randomQ, formMecanicaId, formUmbral);
 
+    setFormModulo((Math.min(5, Math.max(1, Number(randomQ.modulo) || formModulo)) as 1 | 2 | 3 | 4 | 5));
     setFormTema(generated.tema);
     setFormTitulo(generated.tituloReto);
     setFormNarrativa(generated.narrativaEscenario);
@@ -598,7 +757,39 @@ export function TeacherMiniRetosManager({
     setFormCriterio60(generated.criterioEvaluacion60);
     setFormConceptosClave(generated.conceptosClave.join(', '));
     setStatusBanner(
-      `✓ Plantilla pre-llenada automáticamente a partir del reactivo #${randomQ.id} del Banco de 740 Preguntas.`
+      `✓ Plantilla pre-llenada automáticamente a partir del reactivo #${randomQ.id} de la Base de Preguntas del Curso (${questions.length} reactivos).`
+    );
+  };
+
+  // Rebuild / Feed Course Mini Retos directly from the Course Question Bank
+  const handleSyncRetosFromCourseQuestions = () => {
+    if (questions.length === 0) {
+      setStatusBanner('⚠️ El curso aún no tiene reactivos cargados en el Banco de Preguntas.');
+      return;
+    }
+    try {
+      localStorage.removeItem(deletedStorageKey);
+    } catch {
+      // ignore
+    }
+    setDeletedRetoIds([]);
+    const generatedList = generateBaseRetosForCourseModules(activeCourseMeta, questions);
+    onUpdateCustomMiniRetos(generatedList);
+    onUpdateConfig((prev) => {
+      const catalog = Array.isArray(prev.universalCoursesCatalog)
+        ? prev.universalCoursesCatalog
+        : [];
+      return {
+        ...prev,
+        universalCoursesCatalog: catalog.map((ws) =>
+          ws.meta?.courseId === activeCourseMeta.courseId
+            ? { ...ws, customMiniRetos: generatedList }
+            : ws
+        )
+      };
+    });
+    setStatusBanner(
+      `✓ Se alimentaron y sincronizaron ${generatedList.length} plantillas de Mini Retos directamente desde las ${questions.length} preguntas cargadas en el curso «${activeCourseMeta.nombreCurso}».`
     );
   };
 
@@ -609,10 +800,12 @@ export function TeacherMiniRetosManager({
         <div className="space-y-1">
           <div className="inline-flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-amber-800 bg-amber-50 border border-amber-200 px-3 py-1 rounded-full">
             <Trophy className="w-3.5 h-3.5 text-amber-600" />
-            <span>Gamificación Semántica con IA · 12 Mecánicas + Banco 740 Reactivos</span>
+            <span>
+              Curso: {activeCourseMeta.nombreCurso} · {effectiveCustomMiniRetos.length} Retos + {questions.length} Reactivos
+            </span>
           </div>
           <h2 className="text-xl font-bold text-slate-900">
-            Gestor Docente de Mini Retos & Auditoría de Insignias (5/5)
+            Gestor Docente de Mini Retos & Auditoría de Insignias ({effectiveBadges.length}/{effectiveBadges.length})
           </h2>
           <p className="text-xs text-slate-600">
             Supervisa las insignias entregadas por módulo, audita o ajusta el veredicto semántico de la IA, administra la disponibilidad horaria y crea plantillas personalizadas.
@@ -657,7 +850,7 @@ export function TeacherMiniRetosManager({
             }`}
           >
             <BookOpen className="w-3.5 h-3.5" />
-            <span>Banco de Mini Retos ({customMiniRetos.length})</span>
+            <span>Banco de Mini Retos ({effectiveCustomMiniRetos.length})</span>
           </button>
         </div>
       </div>
@@ -783,11 +976,16 @@ export function TeacherMiniRetosManager({
       {/* ================= SUB-TAB 1: MÉTRICAS DE INSIGNIAS Y AUDITORÍA DOCENTE ================= */}
       {subTab === 'metricas_auditoria' && (
         <div className="space-y-6">
-          {/* Tarjetas de Insignias Entregadas por Módulo (1 al 5) + Colección Completa */}
+          {/* Tarjetas de Insignias Entregadas por Módulo/Reto + Colección Completa */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
-            {OFFICIAL_BADGES.map((badge) => {
-              const count = metricsData.badgesPerModule[badge.modulo];
-              const lockedCount = metricsData.failedLockPerModule[badge.modulo];
+            {effectiveBadges.map((badge) => {
+              const count = metricsData.badgesPerModule[badge.modulo] || 0;
+              const lockedCount = metricsData.failedLockPerModule[badge.modulo] || 0;
+              const realMod = badge.realModuloId || badge.modulo;
+              const badgeHeaderLabel =
+                badge.retosCountInModule && badge.retosCountInModule > 1
+                  ? `Módulo ${realMod} · Reto #${badge.retoIndexInModule || 1}`
+                  : `Módulo ${realMod}`;
               return (
                 <div
                   key={badge.modulo}
@@ -796,7 +994,7 @@ export function TeacherMiniRetosManager({
                   <div className="flex items-center justify-between">
                     <span className="text-2xl">{badge.icono}</span>
                     <span className="text-[11px] font-mono font-bold px-2 py-0.5 rounded bg-slate-100 text-slate-700">
-                      Módulo {badge.modulo}
+                      {badgeHeaderLabel}
                     </span>
                   </div>
                   <div>
@@ -814,12 +1012,12 @@ export function TeacherMiniRetosManager({
               );
             })}
 
-            {/* Tarjeta Distinción Especial 5/5 */}
+            {/* Tarjeta Distinción Especial */}
             <div className="bg-gradient-to-br from-amber-50 to-yellow-50 border-2 border-amber-300 rounded-xl p-4 shadow-2xs flex flex-col justify-between space-y-2">
               <div className="flex items-center justify-between">
                 <span className="text-2xl">🏆</span>
                 <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-amber-200 text-amber-950">
-                  COLECCIÓN 5/5
+                  COLECCIÓN {effectiveBadges.length}/{effectiveBadges.length}
                 </span>
               </div>
               <div>
@@ -872,10 +1070,10 @@ export function TeacherMiniRetosManager({
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div>
                 <h3 className="text-base font-bold text-slate-900">
-                  Vitrina de Insignias por Estudiante y Desbloqueo de Intentos (Módulos 1 al 5)
+                  Vitrina de Insignias por Estudiante y Desbloqueo de Intentos ({activeCourseModules.length} {activeCourseModules.length === 1 ? 'Módulo' : 'Módulos'} · {effectiveBadges.length} {effectiveBadges.length === 1 ? 'Reto' : 'Retos'})
                 </h3>
                 <p className="text-xs text-slate-600">
-                  Si un estudiante agotó sus 3 intentos en un módulo (🔒 3/3), puedes reiniciar su contador haciendo clic en el botón del módulo correspondiente.
+                  Si un estudiante agotó sus 3 intentos en un reto (🔒 3/3), puedes reiniciar su contador haciendo clic en el botón correspondiente.
                 </p>
               </div>
             </div>
@@ -885,19 +1083,19 @@ export function TeacherMiniRetosManager({
                 <thead className="bg-slate-100 text-slate-700 sticky top-0 z-10">
                   <tr>
                     <th className="py-2 px-2.5 font-bold">Estudiante (ID)</th>
-                    <th className="py-2 px-2 font-bold text-center">M1: Cartógrafo 🧭</th>
-                    <th className="py-2 px-2 font-bold text-center">M2: Psicólogo 🧠</th>
-                    <th className="py-2 px-2 font-bold text-center">M3: Sherlock 🕵️‍♂️</th>
-                    <th className="py-2 px-2 font-bold text-center">M4: Arquitecto 🎯</th>
-                    <th className="py-2 px-2 font-bold text-center">M5: Omnicanal 🚀</th>
+                    {effectiveBadges.map((b) => (
+                      <th key={b.modulo} className="py-2 px-2 font-bold text-center">
+                        {b.shortCode || `M${b.realModuloId || b.modulo}`}: {b.tituloPrincipal} {b.icono}
+                      </th>
+                    ))}
                     <th className="py-2 px-2.5 font-bold text-center">Total Colección</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200">
                   {students.map((st) => {
                     const prog = st.progresoRetos || {};
-                    const countUnlocked = ([1, 2, 3, 4, 5] as const).filter(
-                      (m) => prog[m]?.insigniaDesbloqueada
+                    const countUnlocked = effectiveBadges.filter(
+                      (b) => prog[b.modulo]?.insigniaDesbloqueada
                     ).length;
 
                     return (
@@ -906,13 +1104,14 @@ export function TeacherMiniRetosManager({
                           <div>{st.nombre}</div>
                           <div className="text-[11px] font-mono text-slate-500">{st.id}</div>
                         </td>
-                        {([1, 2, 3, 4, 5] as const).map((m) => {
+                        {effectiveBadges.map((b) => {
+                          const m = b.modulo;
                           const mp = prog[m];
                           const won = Boolean(mp?.insigniaDesbloqueada);
                           const used = mp?.intentosUsados || 0;
                           const suspended = Boolean(mp?.suspendidoPorTrampa);
                           const locked = !won && (suspended || mp?.bloqueadoPorFallo || used >= 3);
-                          const badgeIcon = OFFICIAL_BADGES[m - 1].icono;
+                          const badgeIcon = b.icono;
 
                           return (
                             <td key={m} className="py-2 px-3 text-center font-mono">
@@ -952,12 +1151,14 @@ export function TeacherMiniRetosManager({
                           );
                         })}
                         <td className="py-2 px-3 text-center font-mono font-bold">
-                          {countUnlocked === 5 ? (
+                          {effectiveBadges.length > 0 && countUnlocked >= effectiveBadges.length ? (
                             <span className="px-2.5 py-1 rounded-full bg-amber-300 text-slate-950">
-                              🏆 5/5 Maestro
+                              🏆 {countUnlocked}/{effectiveBadges.length} Maestro
                             </span>
                           ) : (
-                            <span className="text-slate-700">{countUnlocked} / 5</span>
+                            <span className="text-slate-700">
+                              {countUnlocked} / {effectiveBadges.length}
+                            </span>
                           )}
                         </td>
                       </tr>
@@ -1001,12 +1202,12 @@ export function TeacherMiniRetosManager({
                   }
                   className="px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs font-semibold"
                 >
-                  <option value="ALL">Todos los Módulos (1-5)</option>
-                  <option value={1}>Módulo 1</option>
-                  <option value={2}>Módulo 2</option>
-                  <option value={3}>Módulo 3</option>
-                  <option value={4}>Módulo 4</option>
-                  <option value={5}>Módulo 5</option>
+                  <option value="ALL">Todos los Retos del Curso ({effectiveBadges.length})</option>
+                  {effectiveBadges.map((b) => (
+                    <option key={b.modulo} value={b.modulo}>
+                      {b.shortCode || `M${b.realModuloId || b.modulo}`}: {b.tituloPrincipal} {b.icono}
+                    </option>
+                  ))}
                 </select>
 
                 <select
@@ -1537,9 +1738,9 @@ export function TeacherMiniRetosManager({
               <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3">
                 <div className="flex flex-wrap items-center gap-1.5">
                   <span className="text-xs font-bold text-slate-800 mr-1">
-                    Módulos de Retos a aplicar:
+                    Retos / Módulos a aplicar:
                   </span>
-                  {OFFICIAL_BADGES.map((b) => {
+                  {effectiveBadges.map((b) => {
                     const isChecked = bulkTargetModules.includes(b.modulo);
                     return (
                       <button
@@ -1560,7 +1761,7 @@ export function TeacherMiniRetosManager({
                       >
                         <span>{isChecked ? '☑' : '☐'}</span>
                         <span>
-                          {b.icono} M{b.modulo}
+                          {b.icono} {b.shortCode || `M${b.realModuloId || b.modulo}`}
                         </span>
                       </button>
                     );
@@ -1733,7 +1934,7 @@ export function TeacherMiniRetosManager({
 
                         <td className="py-2.5 px-3">
                           <div className="flex flex-wrap items-center gap-1.5">
-                            {OFFICIAL_BADGES.map((b) => {
+                            {effectiveBadges.map((b) => {
                               const isModBlocked = blockedModules.includes(b.modulo);
                               const isModActive = isGeneralEnabled && !isModBlocked;
                               return (
@@ -1743,7 +1944,7 @@ export function TeacherMiniRetosManager({
                                   onClick={() => handleToggleStudentRetoModule(st.id, b.modulo)}
                                   title={`${b.tituloPrincipal}: Clic para ${
                                     isModBlocked ? 'Habilitar' : 'Deshabilitar'
-                                  } Módulo ${b.modulo}`}
+                                  } ${b.shortCode || `Módulo ${b.realModuloId || b.modulo}`}`}
                                   className={`px-2.5 py-1 rounded-lg border font-mono text-[11px] font-bold flex items-center gap-1 cursor-pointer transition-colors ${
                                     !isModBlocked
                                       ? isModActive
@@ -1754,7 +1955,7 @@ export function TeacherMiniRetosManager({
                                 >
                                   <span>{!isModBlocked ? '✓' : '🔒'}</span>
                                   <span>
-                                    {b.icono} M{b.modulo}
+                                    {b.icono} {b.shortCode || `M${b.realModuloId || b.modulo}`}
                                   </span>
                                 </button>
                               );
@@ -1813,35 +2014,53 @@ export function TeacherMiniRetosManager({
             onSubmit={handleSaveCustomReto}
             className="lg:col-span-5 bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-3.5"
           >
-            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-3">
               <h3 className="text-sm font-bold text-slate-900">
                 {editingRetoId ? 'Editar Plantilla de Mini Reto' : 'Crear Nuevo Mini Reto Docente'}
               </h3>
-              <button
-                type="button"
-                onClick={handleAutoDraftFromQuestionBank}
-                className="px-3 py-1.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-900 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
-              >
-                <Sparkles className="w-3.5 h-3.5 text-indigo-700" />
-                <span>Sortear desde Banco (740)</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={handleAutoDraftFromQuestionBank}
+                  className="px-3 py-1.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-900 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-indigo-700" />
+                  <span>Sortear desde Preguntas ({questions.length})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSyncRetosFromCourseQuestions}
+                  className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                  title="Alimentar y regenerar las plantillas de Mini Retos directamente desde la Base de Preguntas del Curso"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Alimentar desde Base de Preguntas</span>
+                </button>
+              </div>
             </div>
 
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Módulo (1 al 5)
+                  Módulo Configurado ({activeCourseModules.length})
                 </label>
                 <select
                   value={formModulo}
-                  onChange={(e) => setFormModulo(Number(e.target.value) as 1 | 2 | 3 | 4 | 5)}
+                  onChange={(e) => {
+                    const nextMod = Number(e.target.value) as 1 | 2 | 3 | 4 | 5;
+                    setFormModulo(nextMod);
+                    const modMeta = activeCourseModules.find((m) => m.id === nextMod);
+                    if (modMeta && !editingRetoId) {
+                      setFormTema(`Módulo ${nextMod}: ${modMeta.fullTitle || modMeta.shortTitle}`);
+                    }
+                  }}
                   className="w-full px-3 py-2 rounded-lg border border-slate-300 text-xs font-semibold"
                 >
-                  <option value={1}>Módulo 1: Cartógrafo 🧭</option>
-                  <option value={2}>Módulo 2: Psicólogo 🧠</option>
-                  <option value={3}>Módulo 3: Sherlock 🕵️‍♂️</option>
-                  <option value={4}>Módulo 4: Arquitecto 🎯</option>
-                  <option value={5}>Módulo 5: Omnicanal 🚀</option>
+                  {activeCourseModules.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      Módulo {m.id}: {m.shortTitle} ({m.retosCount} {m.retosCount === 1 ? 'reto' : 'retos'})
+                    </option>
+                  ))}
                 </select>
               </div>
 
@@ -2023,106 +2242,144 @@ export function TeacherMiniRetosManager({
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-200 pb-3">
               <div>
                 <h3 className="text-sm font-bold text-slate-900">
-                  Plantillas Destacadas en el Banco Docente ({customMiniRetos.length})
+                  Plantillas del Curso «{activeCourseMeta.nombreCurso}» ({effectiveCustomMiniRetos.length})
                 </h3>
                 <p className="text-xs text-slate-600">
-                  Además de estas plantillas fijas, el sistema genera retos ilimitados en tiempo real usando los <strong>{questions.length} reactivos</strong> del Banco Oficial.
+                  Alimentadas directamente desde la Base de Preguntas del Curso (<strong>{questions.length} reactivos</strong> en {activeCourseModules.length} {activeCourseModules.length === 1 ? 'módulo' : 'módulos'}).
                 </p>
               </div>
-              <select
-                value={crudModuloFilter}
-                onChange={(e) =>
-                  setCrudModuloFilter(e.target.value === 'ALL' ? 'ALL' : Number(e.target.value))
-                }
-                className="px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs font-semibold"
-              >
-                <option value="ALL">Todos los Módulos (1-5)</option>
-                <option value={1}>Módulo 1: Cartógrafo 🧭</option>
-                <option value={2}>Módulo 2: Psicólogo 🧠</option>
-                <option value={3}>Módulo 3: Sherlock 🕵️‍♂️</option>
-                <option value={4}>Módulo 4: Arquitecto 🎯</option>
-                <option value={5}>Módulo 5: Omnicanal 🚀</option>
-              </select>
-            </div>
-
-            <div className="space-y-3 max-h-[680px] overflow-y-auto pr-1">
-              {customMiniRetos
-                .filter(
-                  (reto) => crudModuloFilter === 'ALL' || Number(reto.modulo) === crudModuloFilter
-                )
-                .map((reto) => (
-                <div
-                  key={reto.id}
-                  className="border border-slate-200 rounded-xl p-4 bg-slate-50/70 space-y-2 text-xs"
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleSyncRetosFromCourseQuestions}
+                  className="px-3 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-900 text-xs font-bold flex items-center gap-1 cursor-pointer"
+                  title="Alimentar plantillas desde las preguntas del curso"
                 >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="px-2 py-0.5 rounded bg-slate-900 text-white font-mono font-bold">
-                        Módulo {reto.modulo}
-                      </span>
-                      <span className="px-2 py-0.5 rounded bg-sky-100 text-sky-900 font-semibold">
-                        {reto.mecanicaNombre}
-                      </span>
-                      <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-900 font-mono">
-                        Umbral: ≥{reto.umbralAprobacionPct}%
-                      </span>
-                    </div>
-
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setEditingRetoId(reto.id);
-                          setFormModulo(reto.modulo);
-                          setFormTema(reto.tema);
-                          setFormMecanicaId(reto.mecanicaId);
-                          setFormTitulo(reto.titulo);
-                          setFormNarrativa(reto.narrativa);
-                          setFormPregunta(reto.preguntaReto);
-                          setFormPista(reto.pistaOpcional);
-                          setFormRespuestaEsperada(reto.respuestaEsperada);
-                          setFormCriterio60(reto.criterioEvaluacion60);
-                          setFormConceptosClave(
-                            (Array.isArray(reto.conceptosClave) ? reto.conceptosClave : []).join(', ')
-                          );
-                          setFormUmbral(reto.umbralAprobacionPct);
-                        }}
-                        className="px-2.5 py-1 rounded border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 font-semibold cursor-pointer"
-                      >
-                        Editar
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          onUpdateCustomMiniRetos((prev) => prev.filter((x) => x.id !== reto.id))
-                        }
-                        className="px-2.5 py-1 rounded border border-red-200 bg-red-50 hover:bg-red-100 text-red-700 font-semibold cursor-pointer"
-                      >
-                        Eliminar
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="font-bold text-slate-900 text-sm">{reto.titulo}</div>
-                  <p className="text-slate-700 whitespace-pre-line">{reto.narrativa}</p>
-                  <div className="font-semibold text-indigo-950">
-                    🎯 Pregunta: {reto.preguntaReto}
-                  </div>
-                  <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-2.5 space-y-1 text-emerald-950">
-                    <div>
-                      <strong>Respuesta Esperada (Oculta):</strong> {reto.respuestaEsperada}
-                    </div>
-                    <div>
-                      <strong>Criterio 60%:</strong> {reto.criterioEvaluacion60}
-                    </div>
-                    <div className="font-mono text-[11px]">
-                      <strong>Palabras Clave / Sinónimos:</strong>{' '}
-                      {(Array.isArray(reto.conceptosClave) ? reto.conceptosClave : []).join(', ')}
-                    </div>
-                  </div>
-                </div>
-              ))}
+                  <RotateCcw className="w-3.5 h-3.5 text-emerald-700" />
+                  <span>Sincronizar desde Preguntas ({questions.length})</span>
+                </button>
+                <select
+                  value={crudModuloFilter}
+                  onChange={(e) =>
+                    setCrudModuloFilter(e.target.value === 'ALL' ? 'ALL' : Number(e.target.value))
+                  }
+                  className="px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs font-semibold"
+                >
+                  <option value="ALL">Todos los Módulos del Curso ({activeCourseModules.length})</option>
+                  {activeCourseModules.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      Módulo {m.id}: {m.shortTitle} ({m.retosCount} {m.retosCount === 1 ? 'reto' : 'retos'})
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
+
+            {effectiveCustomMiniRetos.length === 0 ? (
+              <div className="bg-slate-50 border border-dashed border-slate-300 rounded-xl p-8 text-center space-y-2.5">
+                <div className="text-xs font-bold text-slate-700">
+                  No hay plantillas en «Plantillas del Curso {activeCourseMeta.nombreCurso}».
+                </div>
+                <p className="text-xs text-slate-500">
+                  Puedes crear una plantilla manualmente a la izquierda o alimentar el banco automáticamente con las preguntas cargadas en el curso desde el Panel del Editor.
+                </p>
+                {questions.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleSyncRetosFromCourseQuestions}
+                    className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>Alimentar desde las {questions.length} Preguntas del Curso</span>
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-3 max-h-[680px] overflow-y-auto pr-1">
+                {effectiveCustomMiniRetos
+                  .filter(
+                    (reto) => crudModuloFilter === 'ALL' || Number(reto.modulo) === crudModuloFilter
+                  )
+                  .map((reto) => (
+                  <div
+                    key={reto.id}
+                    className="border border-slate-200 rounded-xl p-4 bg-slate-50/70 space-y-2 text-xs"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="px-2 py-0.5 rounded bg-slate-900 text-white font-mono font-bold">
+                          Módulo {reto.modulo}
+                        </span>
+                        <span className="px-2 py-0.5 rounded bg-sky-100 text-sky-900 font-semibold">
+                          {reto.mecanicaNombre}
+                        </span>
+                        <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-900 font-mono">
+                          Umbral: ≥{reto.umbralAprobacionPct}%
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingRetoId(reto.id);
+                            setFormModulo(reto.modulo);
+                            setFormTema(reto.tema);
+                            setFormMecanicaId(reto.mecanicaId);
+                            setFormTitulo(reto.titulo);
+                            setFormNarrativa(reto.narrativa);
+                            setFormPregunta(reto.preguntaReto);
+                            setFormPista(reto.pistaOpcional);
+                            setFormRespuestaEsperada(reto.respuestaEsperada);
+                            setFormCriterio60(reto.criterioEvaluacion60);
+                            setFormConceptosClave(
+                              (Array.isArray(reto.conceptosClave) ? reto.conceptosClave : []).join(', ')
+                            );
+                            setFormUmbral(reto.umbralAprobacionPct);
+                          }}
+                          className="px-2.5 py-1 rounded border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 font-semibold cursor-pointer"
+                        >
+                          Editar
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const nextList = effectiveCustomMiniRetos.filter(
+                              (x) => x.id !== reto.id
+                            );
+                            persistCustomRetosList(nextList, reto.id);
+                            setStatusBanner(
+                              `✓ Plantilla «${reto.titulo}» eliminada permanentemente del curso.`
+                            );
+                          }}
+                          className="px-2.5 py-1 rounded border border-red-200 bg-red-50 hover:bg-red-100 text-red-700 font-semibold cursor-pointer"
+                        >
+                          Eliminar
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="font-bold text-slate-900 text-sm">{reto.titulo}</div>
+                    <p className="text-slate-700 whitespace-pre-line">{reto.narrativa}</p>
+                    <div className="font-semibold text-indigo-950">
+                      🎯 Pregunta: {reto.preguntaReto}
+                    </div>
+                    <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-2.5 space-y-1 text-emerald-950">
+                      <div>
+                        <strong>Respuesta Esperada (Oculta):</strong> {reto.respuestaEsperada}
+                      </div>
+                      <div>
+                        <strong>Criterio 60%:</strong> {reto.criterioEvaluacion60}
+                      </div>
+                      <div className="font-mono text-[11px]">
+                        <strong>Palabras Clave / Sinónimos:</strong>{' '}
+                        {(Array.isArray(reto.conceptosClave) ? reto.conceptosClave : []).join(', ')}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
             <OptionServerSaveBar
               sectionKey="mini_retos_banco_plantillas"
               label="Banco de Plantillas de Mini Retos"

@@ -22,6 +22,16 @@
   }
 }
 
+/* Optimización ergonómica móvil (≥ 48px) para todos los botones de acción del Panel Docente durante supervisión en aula */
+@media (max-width: 1023px) {
+  .teacher-lms-workspace button,
+  .teacher-lms-workspace [role="button"],
+  .teacher-lms-workspace label.cursor-pointer {
+    min-height: 48px;
+    touch-action: manipulation;
+  }
+}
+
 @media print {
   .no-print {
     display: none !important;

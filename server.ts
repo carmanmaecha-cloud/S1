@@ -34,6 +34,11 @@ import {
   saveQuestionsSnapshotToFirestore,
   loadQuestionsSnapshotFromFirestore
 } from './src/utils/cloudPersistence.ts';
+import {
+  AcademicDataset,
+  buildInitialAcademicDataset,
+  normalizeAndSyncAcademicDataset
+} from './src/data/classAttendanceAndGrades.ts';
 
 dotenv.config();
 
@@ -169,6 +174,7 @@ const DEFAULT_SERVER_CONFIG: SystemConfig = {
 interface CentralDatabaseState {
   initialized: boolean;
   migratedFromClient: boolean;
+  emptyInitialV3Reset?: boolean;
   revision: number;
   questionsRevision: number;
   lastModifiedIso: string;
@@ -182,6 +188,7 @@ interface CentralDatabaseState {
   config: SystemConfig;
   customMiniRetos: CustomMiniRetoTemplate[];
   activeExamsByStudent: Record<string, any>;
+  academicDataset?: AcademicDataset;
 }
 
 function ensureDataDir() {
@@ -193,26 +200,19 @@ function ensureDataDir() {
 ensureDataDir();
 
 function parseRawDbObject(parsed: any): CentralDatabaseState {
-  const explicitlyCleared = Boolean(parsed.questionsBankExplicitlyCleared);
+  const explicitlyCleared = Boolean(parsed.questionsBankExplicitlyCleared ?? true);
   const studentsExplicitlyCleared = Boolean(
-    parsed.studentsExplicitlyCleared ??
-      (Array.isArray(parsed.students) && parsed.students.length === 0 && parsed.migratedFromClient)
+    parsed.studentsExplicitlyCleared ?? true
   );
   const loadedQuestions = Array.isArray(parsed.questions)
     ? parsed.questions.length > 0
       ? normalizeQuestionList(parsed.questions)
-      : explicitlyCleared
-      ? []
-      : INITIAL_QUESTIONS
-    : INITIAL_QUESTIONS;
+      : []
+    : [];
 
   const rawStudents: StudentRecord[] = Array.isArray(parsed.students)
-    ? parsed.students.length > 0
-      ? parsed.students
-      : studentsExplicitlyCleared
-      ? []
-      : INITIAL_STUDENTS
-    : INITIAL_STUDENTS;
+    ? parsed.students
+    : [];
   const rawAttempts: ExamAttemptResult[] = Array.isArray(parsed.attempts) ? parsed.attempts : [];
   const mergedConfig: SystemConfig = { ...DEFAULT_SERVER_CONFIG, ...(parsed.config || {}) };
   const enrichedStudents = enrichStudentsWithServerSummary(
@@ -224,6 +224,7 @@ function parseRawDbObject(parsed: any): CentralDatabaseState {
   return {
     initialized: true,
     migratedFromClient: Boolean(parsed.migratedFromClient ?? true),
+    emptyInitialV3Reset: Boolean(parsed.emptyInitialV3Reset),
     revision: Number(parsed.revision) || 1,
     questionsRevision: Number(parsed.questionsRevision) || 1,
     lastModifiedIso: parsed.lastModifiedIso || new Date().toISOString(),
@@ -235,25 +236,29 @@ function parseRawDbObject(parsed: any): CentralDatabaseState {
     abproEvaluations: Array.isArray(parsed.abproEvaluations) ? parsed.abproEvaluations : [],
     liveSessions: Array.isArray(parsed.liveSessions) ? parsed.liveSessions : [],
     config: mergedConfig,
-    customMiniRetos:
-      Array.isArray(parsed.customMiniRetos) && parsed.customMiniRetos.length > 0
-        ? parsed.customMiniRetos
-        : INITIAL_CUSTOM_MINI_RETOS,
+    customMiniRetos: Array.isArray(parsed.customMiniRetos)
+      ? parsed.customMiniRetos
+      : [],
     activeExamsByStudent:
       parsed.activeExamsByStudent && typeof parsed.activeExamsByStudent === 'object'
         ? parsed.activeExamsByStudent
-        : {}
+        : {},
+    academicDataset: normalizeAndSyncAcademicDataset(parsed.academicDataset, enrichedStudents)
   };
 }
 
 function loadCentralDbFromDisk(): CentralDatabaseState {
   ensureDataDir();
+  let previousRevision = 100;
   try {
     if (fs.existsSync(CENTRAL_DB_PATH)) {
       const raw = fs.readFileSync(CENTRAL_DB_PATH, 'utf-8');
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === 'object') {
-        return parseRawDbObject(parsed);
+        if (parsed.emptyInitialV3Reset === true) {
+          return parseRawDbObject(parsed);
+        }
+        previousRevision = Math.max(100, (Number(parsed.revision) || 1) + 50);
       }
     }
   } catch (err) {
@@ -262,28 +267,38 @@ function loadCentralDbFromDisk(): CentralDatabaseState {
 
   const initialDb: CentralDatabaseState = {
     initialized: true,
-    migratedFromClient: false,
-    revision: 1,
-    questionsRevision: 1,
+    migratedFromClient: true,
+    emptyInitialV3Reset: true,
+    revision: previousRevision,
+    questionsRevision: previousRevision,
     lastModifiedIso: new Date().toISOString(),
-    questionsBankExplicitlyCleared: false,
-    students: INITIAL_STUDENTS,
-    questions: INITIAL_QUESTIONS,
+    questionsBankExplicitlyCleared: true,
+    studentsExplicitlyCleared: true,
+    students: [],
+    questions: [],
     attempts: [],
     abproEvaluations: [],
     liveSessions: [],
     config: DEFAULT_SERVER_CONFIG,
-    customMiniRetos: INITIAL_CUSTOM_MINI_RETOS,
-    activeExamsByStudent: {}
+    customMiniRetos: [],
+    activeExamsByStudent: {},
+    academicDataset: buildInitialAcademicDataset([])
   };
-  saveCentralDbToDisk(initialDb);
+  saveCentralDbToDisk(initialDb, 'AutoSync', 'Inicialización local vacía por defecto v3', {
+    includeQuestions: true,
+    syncCloud: true
+  });
   return initialDb;
 }
 
 function saveCentralDbToDisk(
   db: CentralDatabaseState,
   section = 'AutoSync',
-  description = 'Sincronización con base de datos del servidor'
+  description = 'Sincronización con base de datos del servidor',
+  options: { includeQuestions?: boolean; syncCloud?: boolean } = {
+    includeQuestions: false,
+    syncCloud: true
+  }
 ): void {
   ensureDataDir();
   // Always keep every student's server academic summary (completed exams, missing exams, grades, questions, retos) up-to-date in the database
@@ -322,8 +337,12 @@ function saveCentralDbToDisk(
     }
   }
 
-  void saveToUpstashRedis(REDIS_KEY_CENTRAL_DB, db);
-  void saveCentralStateToFirestore(db, { includeQuestions: true });
+  if (options.syncCloud !== false) {
+    void saveToUpstashRedis(REDIS_KEY_CENTRAL_DB, db);
+    void saveCentralStateToFirestore(db, {
+      includeQuestions: Boolean(options.includeQuestions)
+    });
+  }
 }
 
 function loadQuestionsSnapshotFromDisk(): Question[] | null {
@@ -369,24 +388,27 @@ let lastRedisSyncMs = 0;
 
 async function syncFromUpstashIfConfigured(force = false): Promise<void> {
   const now = Date.now();
-  if (!force && !IS_VERCEL && now - lastRedisSyncMs < 1500) return;
+  if (!force && !IS_VERCEL && now - lastRedisSyncMs < 30000) return;
   lastRedisSyncMs = now;
 
   // 1. Sync from Permanent Cloud Firestore Database (Primary on Vercel & Multi-Instance)
   try {
-    const cloudState = await loadCentralStateFromFirestore({ includeQuestions: true });
+    const cloudState = await loadCentralStateFromFirestore({
+      includeQuestions: force || !centralDb.migratedFromClient
+    });
     if (cloudState && typeof cloudState === 'object') {
-      const parsedCloud = parseRawDbObject(cloudState);
+      const parsedCloud = parseRawDbObject({
+        ...cloudState,
+        questions: cloudState.questions ?? centralDb.questions
+      });
       if (
-        force ||
-        IS_VERCEL ||
-        parsedCloud.revision >= centralDb.revision ||
-        !centralDb.migratedFromClient
+        parsedCloud.revision > centralDb.revision ||
+        (parsedCloud.revision === centralDb.revision && !centralDb.emptyInitialV3Reset)
       ) {
-        centralDb = parsedCloud;
+        centralDb = { ...parsedCloud, emptyInitialV3Reset: true };
       }
     }
-    if (!questionsSnapshotCache) {
+    if (!questionsSnapshotCache && force) {
       const cloudSnap = await loadQuestionsSnapshotFromFirestore();
       if (Array.isArray(cloudSnap) && cloudSnap.length > 0) {
         questionsSnapshotCache = cloudSnap;
@@ -477,7 +499,10 @@ app.use('/api/state', async (req, res, next) => {
     if (centralDb.liveSessions.length !== beforeCount) {
       centralDb.revision += 1;
       centralDb.lastModifiedIso = new Date().toISOString();
-      saveCentralDbToDisk(centralDb);
+      saveCentralDbToDisk(centralDb, 'AutoSync', 'Depuración de sesiones en vivo inactivas', {
+        includeQuestions: false,
+        syncCloud: false
+      });
     }
 
     const snapshotCount = questionsSnapshotCache ? questionsSnapshotCache.length : 0;
@@ -504,7 +529,11 @@ app.use('/api/state', async (req, res, next) => {
       liveSessions: centralDb.liveSessions,
       config: centralDb.config,
       customMiniRetos: centralDb.customMiniRetos,
-      activeExamsByStudent: centralDb.activeExamsByStudent
+      activeExamsByStudent: centralDb.activeExamsByStudent,
+      academicDataset: normalizeAndSyncAcademicDataset(
+        centralDb.academicDataset,
+        centralDb.students
+      )
     });
   });
 
@@ -530,7 +559,10 @@ app.use('/api/state', async (req, res, next) => {
       centralDb.revision += 1;
       centralDb.lastModifiedIso = new Date().toISOString();
 
-      saveCentralDbToDisk(centralDb);
+      saveCentralDbToDisk(centralDb, 'BancoPreguntas', 'Actualización del banco de preguntas', {
+        includeQuestions: true,
+        syncCloud: true
+      });
 
       return res.json({
         ok: true,
@@ -563,7 +595,10 @@ app.use('/api/state', async (req, res, next) => {
 
       questionsSnapshotCache = null;
       saveQuestionsSnapshotToDisk(null);
-      saveCentralDbToDisk(centralDb);
+      saveCentralDbToDisk(centralDb, 'BancoPreguntas', 'Restauración de instantánea previa', {
+        includeQuestions: true,
+        syncCloud: true
+      });
 
       return res.json({
         ok: true,
@@ -587,6 +622,10 @@ app.use('/api/state', async (req, res, next) => {
       }
       centralDb.students = students;
       centralDb.studentsExplicitlyCleared = students.length === 0;
+      centralDb.academicDataset = normalizeAndSyncAcademicDataset(
+        centralDb.academicDataset,
+        centralDb.students
+      );
       centralDb.migratedFromClient = true;
       centralDb.revision += 1;
       centralDb.lastModifiedIso = new Date().toISOString();
@@ -596,7 +635,8 @@ app.use('/api/state', async (req, res, next) => {
         ok: true,
         revision: centralDb.revision,
         questionsRevision: centralDb.questionsRevision,
-        lastModifiedIso: centralDb.lastModifiedIso
+        lastModifiedIso: centralDb.lastModifiedIso,
+        academicDataset: centralDb.academicDataset
       });
     } catch (err: any) {
       return res.status(500).json({ error: err?.message || 'Error al guardar estudiantes.' });
@@ -624,6 +664,11 @@ app.use('/api/state', async (req, res, next) => {
         centralDb.students.unshift(student as StudentRecord);
       }
 
+      centralDb.studentsExplicitlyCleared = centralDb.students.length === 0;
+      centralDb.academicDataset = normalizeAndSyncAcademicDataset(
+        centralDb.academicDataset,
+        centralDb.students
+      );
       centralDb.migratedFromClient = true;
       centralDb.revision += 1;
       centralDb.lastModifiedIso = new Date().toISOString();
@@ -934,7 +979,7 @@ app.use('/api/state', async (req, res, next) => {
     }
   });
 
-  // 9. PUT /api/state/config — Update SystemConfig (Teacher settings, schedules, passwords, permissions)
+  // 9. PUT /api/state/config — Update SystemConfig (Teacher settings, schedules, passwords, permissions, course config)
   app.put('/api/state/config', (req, res) => {
     try {
       const { config } = req.body || {};
@@ -945,10 +990,45 @@ app.use('/api/state', async (req, res, next) => {
         ...centralDb.config,
         ...config
       };
+
+      // Sync academicDataset classSessions when activeCourseMeta is updated
+      const activeMeta = centralDb.config?.activeCourseMeta;
+      if (activeMeta && Array.isArray(activeMeta.modulosCurso) && centralDb.academicDataset) {
+        const updatedClassSessions = activeMeta.modulosCurso.slice(0, 6).map((m, idx) => ({
+          id: (idx + 1) as 1 | 2 | 3 | 4 | 5 | 6,
+          code: (`C${idx + 1}`) as 'C1' | 'C2' | 'C3' | 'C4' | 'C5' | 'C6',
+          shortTitle: m.shortTitle || `Módulo ${idx + 1}`,
+          fullTitle: `Clase ${idx + 1}: ${m.shortTitle || `Módulo ${idx + 1}`}`,
+          subtitle: m.description || m.fullTitle || m.shortTitle || '',
+          examenesCount: typeof m.examenesCount === 'number' ? m.examenesCount : 1,
+          retosCount: typeof m.retosCount === 'number' ? m.retosCount : 2,
+          ponderacion: m.ponderacion || {
+            comportamientoPct: 10,
+            participacionPct: 15,
+            examenPct: 35,
+            trabajoPct: 40
+          },
+          documentosEnlaces: Array.isArray(m.documentosEnlaces) ? m.documentosEnlaces : []
+        }));
+        centralDb.academicDataset = normalizeAndSyncAcademicDataset(
+          {
+            ...centralDb.academicDataset,
+            courseName: activeMeta.nombreCurso || centralDb.academicDataset.courseName,
+            classSessions: updatedClassSessions,
+            updatedAtIso: new Date().toISOString()
+          },
+          centralDb.students
+        );
+      }
+
       centralDb.migratedFromClient = true;
       centralDb.revision += 1;
       centralDb.lastModifiedIso = new Date().toISOString();
-      saveCentralDbToDisk(centralDb);
+      saveCentralDbToDisk(
+        centralDb,
+        'ConfiguracionCurso',
+        `Configuración del curso y sistema actualizada (${centralDb.config?.activeCourseMeta?.nombreCurso || 'Curso Activo'})`
+      );
 
       return res.json({
         ok: true,
@@ -1006,7 +1086,10 @@ app.use('/api/state', async (req, res, next) => {
       }
       centralDb.revision += 1;
       centralDb.lastModifiedIso = new Date().toISOString();
-      saveCentralDbToDisk(centralDb);
+      saveCentralDbToDisk(centralDb, 'AutoSync', 'Actualización de sesión en vivo', {
+        includeQuestions: false,
+        syncCloud: false
+      });
 
       return res.json({
         ok: true,
@@ -1034,7 +1117,10 @@ app.use('/api/state', async (req, res, next) => {
       }
       centralDb.revision += 1;
       centralDb.lastModifiedIso = new Date().toISOString();
-      saveCentralDbToDisk(centralDb);
+      saveCentralDbToDisk(centralDb, 'AutoSync', 'Respaldo temporal de examen activo', {
+        includeQuestions: false,
+        syncCloud: false
+      });
 
       return res.json({
         ok: true,
@@ -1056,6 +1142,7 @@ app.use('/api/state', async (req, res, next) => {
         abproEvaluations,
         config,
         customMiniRetos,
+        academicDataset,
         questionsBankExplicitlyCleared
       } = req.body || {};
 
@@ -1089,6 +1176,17 @@ app.use('/api/state', async (req, res, next) => {
       }
       if (Array.isArray(customMiniRetos) && customMiniRetos.length > 0) {
         centralDb.customMiniRetos = customMiniRetos;
+      }
+      if (academicDataset && typeof academicDataset === 'object') {
+        centralDb.academicDataset = normalizeAndSyncAcademicDataset(
+          academicDataset,
+          centralDb.students
+        );
+      } else if (Array.isArray(students)) {
+        centralDb.academicDataset = normalizeAndSyncAcademicDataset(
+          centralDb.academicDataset,
+          centralDb.students
+        );
       }
 
       centralDb.migratedFromClient = true;
@@ -1124,6 +1222,7 @@ app.use('/api/state', async (req, res, next) => {
         attempts,
         abproEvaluations,
         customMiniRetos,
+        academicDataset,
         activeExamStudentId,
         activeExamBackup,
         questionsBankExplicitlyCleared
@@ -1160,6 +1259,17 @@ app.use('/api/state', async (req, res, next) => {
       if (Array.isArray(customMiniRetos)) {
         centralDb.customMiniRetos = customMiniRetos;
       }
+      if (academicDataset && typeof academicDataset === 'object') {
+        centralDb.academicDataset = normalizeAndSyncAcademicDataset(
+          academicDataset,
+          centralDb.students
+        );
+      } else if (Array.isArray(students)) {
+        centralDb.academicDataset = normalizeAndSyncAcademicDataset(
+          centralDb.academicDataset,
+          centralDb.students
+        );
+      }
       if (activeExamStudentId) {
         if (activeExamBackup) {
           centralDb.activeExamsByStudent[String(activeExamStudentId)] = activeExamBackup;
@@ -1195,6 +1305,99 @@ app.use('/api/state', async (req, res, next) => {
       });
     }
   });
+
+  // 15. GET /api/academic-dataset — Retorna el dataset completo consolidado con las 6 clases y los estudiantes
+  app.get('/api/academic-dataset', (_req, res) => {
+    try {
+      const synced = normalizeAndSyncAcademicDataset(
+        centralDb.academicDataset,
+        centralDb.students
+      );
+      centralDb.academicDataset = synced;
+      return res.json({
+        ok: true,
+        revision: centralDb.revision,
+        lastModifiedIso: centralDb.lastModifiedIso,
+        academicDataset: synced
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        error: err?.message || 'Error al obtener el consolidado académico de clases y asistencia.'
+      });
+    }
+  });
+
+  // 16. PUT /api/state/academic-dataset & POST /api/academic-dataset/update — Permite actualizar notas o asistencias directamente en la base de datos
+  const handleAcademicDatasetMutation = (req: express.Request, res: express.Response) => {
+    try {
+      const { academicDataset, studentRecord, deleteStudentId } = req.body || {};
+      let current = normalizeAndSyncAcademicDataset(
+        centralDb.academicDataset,
+        centralDb.students
+      );
+
+      if (academicDataset && typeof academicDataset === 'object' && Array.isArray(academicDataset.records)) {
+        current = {
+          ...current,
+          ...academicDataset,
+          updatedAtIso: new Date().toISOString()
+        };
+      } else if (studentRecord && studentRecord.studentId) {
+        const existsIdx = current.records.findIndex(
+          (r) => r.studentId === studentRecord.studentId
+        );
+        if (existsIdx >= 0) {
+          current.records[existsIdx] = {
+            ...current.records[existsIdx],
+            ...studentRecord,
+            ultimaActualizacionIso: new Date().toISOString()
+          };
+        } else {
+          current.records.push({
+            ...studentRecord,
+            ultimaActualizacionIso: new Date().toISOString()
+          });
+        }
+        current.updatedAtIso = new Date().toISOString();
+      } else if (deleteStudentId) {
+        centralDb.students = centralDb.students.filter(
+          (s) => s.id !== String(deleteStudentId)
+        );
+        centralDb.studentsExplicitlyCleared = centralDb.students.length === 0;
+        current.records = current.records.filter(
+          (r) => r.studentId !== String(deleteStudentId)
+        );
+        current.updatedAtIso = new Date().toISOString();
+      } else {
+        return res.status(400).json({ error: 'Payload de actualización académica inválido.' });
+      }
+
+      centralDb.academicDataset = normalizeAndSyncAcademicDataset(current, centralDb.students);
+      centralDb.migratedFromClient = true;
+      centralDb.revision += 1;
+      centralDb.lastModifiedIso = new Date().toISOString();
+      saveCentralDbToDisk(
+        centralDb,
+        'NotasAsistenciaClases',
+        'Actualización de notas y asistencias de Clases 1 a 6'
+      );
+
+      return res.json({
+        ok: true,
+        revision: centralDb.revision,
+        questionsRevision: centralDb.questionsRevision,
+        lastModifiedIso: centralDb.lastModifiedIso,
+        academicDataset: centralDb.academicDataset
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        error: err?.message || 'Error al actualizar notas o asistencias en la base de datos.'
+      });
+    }
+  };
+
+  app.put('/api/state/academic-dataset', handleAcademicDatasetMutation);
+  app.post('/api/academic-dataset/update', handleAcademicDatasetMutation);
 
   // Endpoint 1: Generar un Mini Reto dinámico a partir de un reactivo del Banco de Preguntas
   app.post('/api/generar-reto', async (req, res) => {
@@ -1604,10 +1807,29 @@ async function startServer() {
       server: { middlewareMode: true },
       appType: 'spa'
     });
+    app.use((req, res, next) => {
+      if (req.url.startsWith('/src/') || req.url === '/' || req.url.startsWith('/?')) {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+      }
+      next();
+    });
     app.use(vite.middlewares);
   } else {
-    app.use(express.static(distPath));
+    app.use(
+      express.static(distPath, {
+        etag: true,
+        lastModified: true,
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith('.html')) {
+            res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+          }
+        }
+      })
+    );
     app.get('*', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
       res.sendFile(distIndexHtml);
     });
   }

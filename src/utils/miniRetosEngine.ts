@@ -10,6 +10,10 @@ import type {
 
 export interface OfficialBadgeDefinition {
   modulo: 1 | 2 | 3 | 4 | 5;
+  realModuloId?: number;
+  retoIndexInModule?: number;
+  retosCountInModule?: number;
+  shortCode?: string;
   icono: string;
   tituloPrincipal: string;
   subtitulo: string;
@@ -22,6 +26,10 @@ export interface OfficialBadgeDefinition {
 export const OFFICIAL_BADGES: OfficialBadgeDefinition[] = [
   {
     modulo: 1,
+    realModuloId: 1,
+    retoIndexInModule: 1,
+    retosCountInModule: 1,
+    shortCode: 'M1',
     icono: '🧭',
     tituloPrincipal: 'Cartógrafo del Mercado',
     subtitulo: 'Módulo 1 · Introducción al Mapeo de Mercado',
@@ -33,6 +41,10 @@ export const OFFICIAL_BADGES: OfficialBadgeDefinition[] = [
   },
   {
     modulo: 2,
+    realModuloId: 2,
+    retoIndexInModule: 1,
+    retosCountInModule: 1,
+    shortCode: 'M2',
     icono: '🧠',
     tituloPrincipal: 'Mente del Consumidor',
     subtitulo: 'Módulo 2 · Factores Psicológicos y Sociales',
@@ -44,6 +56,10 @@ export const OFFICIAL_BADGES: OfficialBadgeDefinition[] = [
   },
   {
     modulo: 3,
+    realModuloId: 3,
+    retoIndexInModule: 1,
+    retosCountInModule: 1,
+    shortCode: 'M3',
     icono: '🕵️‍♂️',
     tituloPrincipal: 'Sherlock de los Datos',
     subtitulo: 'Módulo 3 · Investigación de Mercados y Datos',
@@ -55,6 +71,10 @@ export const OFFICIAL_BADGES: OfficialBadgeDefinition[] = [
   },
   {
     modulo: 4,
+    realModuloId: 4,
+    retoIndexInModule: 1,
+    retosCountInModule: 1,
+    shortCode: 'M4',
     icono: '🎯',
     tituloPrincipal: 'Arquitecto de Segmentos',
     subtitulo: 'Módulo 4 · Segmentación y Posicionamiento',
@@ -66,6 +86,10 @@ export const OFFICIAL_BADGES: OfficialBadgeDefinition[] = [
   },
   {
     modulo: 5,
+    realModuloId: 5,
+    retoIndexInModule: 1,
+    retosCountInModule: 1,
+    shortCode: 'M5',
     icono: '🚀',
     tituloPrincipal: 'Visionario Omnicanal',
     subtitulo: 'Módulo 5 · Tendencias del Mercado y Contenidos',
@@ -83,6 +107,92 @@ export const SPECIAL_DISTINCTION_BADGE = {
   subtitulo:
     'Reconocimiento Especial en Mapeo de Mercado y Comportamiento del Consumidor por conquistar las 5 insignias modulares.'
 };
+
+export function getEffectiveBadgesForCourse(config?: SystemConfig): OfficialBadgeDefinition[] {
+  const catalog = Array.isArray(config?.universalCoursesCatalog)
+    ? config!.universalCoursesCatalog.filter((w) => Boolean(w?.meta?.courseId))
+    : [];
+  const byActiveId = catalog.find((w) => w.meta.courseId === config?.activeCourseId)?.meta;
+  const meta = byActiveId || config?.activeCourseMeta || catalog[0]?.meta;
+
+  const customMods = Array.isArray(meta?.modulosCurso)
+    ? meta!.modulosCurso.filter((m) => Boolean(m) && m.activo !== false)
+    : [];
+
+  if (customMods.length > 0) {
+    const builtBadges: OfficialBadgeDefinition[] = [];
+    for (const mod of customMods) {
+      const modId = Number(mod.id) || 1;
+      const retosInMod =
+        typeof mod.retosCount === 'number' && !Number.isNaN(mod.retosCount)
+          ? Math.max(0, Math.min(5, mod.retosCount))
+          : 1;
+      const modTitle = (mod.shortTitle || mod.fullTitle || '').trim() || `Módulo ${modId}`;
+      const modFull = (mod.fullTitle || mod.shortTitle || '').trim() || modTitle;
+      const customBadgeTitle = (mod.retoBadgeTitle || '').trim();
+
+      for (let rIdx = 1; rIdx <= retosInMod; rIdx++) {
+        if (builtBadges.length >= 5) break;
+        const slotIndex = builtBadges.length;
+        const slotModulo = (slotIndex + 1) as 1 | 2 | 3 | 4 | 5;
+        const styleTemplate = OFFICIAL_BADGES[slotIndex] || OFFICIAL_BADGES[0];
+        const shortCode = retosInMod > 1 ? `M${modId}·R${rIdx}` : `M${modId}`;
+        const tituloPrincipal = customBadgeTitle
+          ? retosInMod > 1
+            ? `${customBadgeTitle} · Reto #${rIdx}`
+            : customBadgeTitle
+          : retosInMod > 1
+          ? `Reto #${rIdx} · ${modTitle}`
+          : `Reto · ${modTitle}`;
+        const subtitulo =
+          retosInMod > 1
+            ? `Módulo ${modId} (Reto ${rIdx} de ${retosInMod}) · ${modFull}`
+            : `Módulo ${modId} · ${modFull}`;
+
+        builtBadges.push({
+          ...styleTemplate,
+          modulo: slotModulo,
+          realModuloId: modId,
+          retoIndexInModule: rIdx,
+          retosCountInModule: retosInMod,
+          shortCode,
+          tituloPrincipal,
+          subtitulo,
+          leyendaReconocimiento: mod.description
+            ? `Módulo ${modId} (${shortCode}) — ${modFull}: ${mod.description}`
+            : `Por superar con éxito el ${
+                retosInMod > 1 ? `Reto #${rIdx} del ` : ''
+              }Módulo ${modId} (${modFull}) en el curso «${meta?.nombreCurso || 'Curso'}».`
+        });
+      }
+      if (builtBadges.length >= 5) break;
+    }
+
+    if (builtBadges.length > 0) {
+      return builtBadges;
+    }
+  }
+
+  const retoCount = Math.min(5, Math.max(1, Number(meta?.cantidadRetos) || 5));
+  return OFFICIAL_BADGES.slice(0, retoCount);
+}
+
+export function getEffectiveSpecialDistinctionBadge(config?: SystemConfig) {
+  const badges = getEffectiveBadgesForCourse(config);
+  const retoCount = Math.max(1, badges.length);
+  const catalog = Array.isArray(config?.universalCoursesCatalog)
+    ? config!.universalCoursesCatalog.filter((w) => Boolean(w?.meta?.courseId))
+    : [];
+  const byActiveId = catalog.find((w) => w.meta.courseId === config?.activeCourseId)?.meta;
+  const meta = byActiveId || config?.activeCourseMeta || catalog[0]?.meta;
+  const courseName =
+    meta?.nombreCurso || 'Mapeo de Mercado y Comportamiento del Consumidor';
+  return {
+    icono: '🏆',
+    tituloPrincipal: `Maestro Estratega — Colección Completa (${retoCount}/${retoCount})`,
+    subtitulo: `Reconocimiento Especial en ${courseName} por conquistar los ${retoCount} retos/insignias del curso.`
+  };
+}
 
 export interface MechanicMetadata {
   id: MiniRetoMechanicId;

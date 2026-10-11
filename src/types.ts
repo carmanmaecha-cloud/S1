@@ -288,6 +288,8 @@ export interface StudentRecord {
   id: string;
   nombre: string;
   codigoAcceso: string; // Código único asignado o 1000000000 para usuario de prueba
+  correo?: string; // Correo electrónico del estudiante (opcional)
+  whatsapp?: string; // Número de WhatsApp del estudiante (opcional)
   intentosUsados: number;
   maxIntentosPermitidos?: 1 | 2; // Configurable al reiniciar (1 o 2 intentos permitidos, por defecto 2)
   maxLlamadosAtencionIndividual?: number | null; // Límite individual de llamados anti-trampa antes de suspensión (null/undefined = usa el global)
@@ -296,6 +298,7 @@ export interface StudentRecord {
   conceptoInfraccion: string; // ej. "✓ Sin infracciones" o "Cambio de pestaña / ventana detectado 2 veces"
   preguntasIntento1: string[]; // IDs de preguntas usadas en Intento 1
   preguntasIntento2: string[]; // IDs de preguntas usadas en Intento 2
+  intentosPorModalidad?: Partial<Record<ExamModality, number>>;
   preguntasUsadasPorModalidad?: Partial<Record<ExamModality, string[]>>;
   examenesBloqueados?: ExamModality[]; // Bloqueo / Desbloqueo de Examen Por Estudiante (específico, varios o todos)
   modulosRetosBloqueados?: (1 | 2 | 3 | 4 | 5)[]; // Módulos de Mini Retos (1 al 5) deshabilitados específicamente para este estudiante
@@ -440,4 +443,154 @@ export interface SystemConfig {
   miniRetosHoraInicio?: string; // ej. '07:00'
   miniRetosHoraFin?: string; // ej. '22:00'
   umbralAprobacionMiniRetoPct?: number; // por defecto 60 (%)
+  // =========================================================================
+  // CONFIGURACIÓN UNIVERSAL MULTI-CURSO Y PANEL DE EDITORES (EDITOR2026)
+  // =========================================================================
+  activeCourseId?: string;
+  activeCourseMeta?: UniversalCourseMetadata;
+  universalCoursesCatalog?: UniversalCourseWorkspace[];
+  studentRosterDatabases?: StudentRosterDatabaseEntry[];
+  questionBankDatabases?: QuestionBankDatabaseEntry[];
+  deletedStudentRosterDbIds?: string[];
+  deletedQuestionBankDbIds?: string[];
+  editorNombre?: string;
+  editorUsuario?: string;
+  editorClave?: string;
+  correoRecuperacionEditor?: string;
+  requiereCambioClaveEditorInicial?: boolean;
+  registeredTeachers?: TeacherAccountRecord[]; // Docentes registrados y sus cursos asignados por el Editor
 }
+
+export interface StudentRosterDatabaseEntry {
+  id: string;
+  name: string;
+  code: string;
+  description?: string;
+  students: StudentRecord[];
+  updatedAtIso: string;
+}
+
+export interface QuestionBankDatabaseEntry {
+  id: string;
+  name: string;
+  code: string;
+  description?: string;
+  questions: Question[];
+  updatedAtIso: string;
+}
+
+export interface TeacherAccountRecord {
+  id: string; // Usuario / ID del docente (ej. 'DOCENTE2026', 'PROF01')
+  nombre: string; // Nombre completo del docente
+  claveAcceso: string; // Clave de acceso al Panel Docente
+  correo?: string;
+  especialidad?: string;
+  activo: boolean;
+  esTitularPrincipal?: boolean; // Si tiene acceso maestro o por asignación
+  cursosAsignadosIds: string[]; // IDs de los cursos a los que tiene acceso
+  updatedAtIso?: string;
+}
+
+export interface UniversalModuleDocumentLink {
+  id: string;
+  titulo: string; // ej. 'Guía del Módulo 1 (PDF)'
+  url: string; // Enlace de descarga o visualización (Google Drive, PDF, OneDrive, etc.)
+  tipo?: string; // ej. 'PDF', 'Drive', 'Presentación', 'Plantilla'
+}
+
+export interface UniversalModuleGradingWeights {
+  comportamientoPct: number; // default: 10 (%)
+  participacionPct: number; // default: 15 (%) (Sustentación / Participación)
+  examenPct: number; // default: 35 (%)
+  trabajoPct: number; // default: 40 (%) (Reto/s / Trabajo)
+}
+
+export interface UniversalModuleDefinition {
+  id: number; // 1..N
+  code: string; // ej. 'M1', 'C1'
+  shortTitle: string; // ej. 'Fundamentos y Entorno Digital'
+  fullTitle: string; // ej. 'Módulo 1: Fundamentos y Entorno Digital'
+  horasModulo?: number | string; // Horas para el módulo
+  description?: string; // Descripción del módulo
+  observacion?: string; // Observación del módulo
+  temasModulo?: string[]; // Lista de temas del módulo
+  retoBadgeTitle?: string; // Nombre de la insignia/reto de este módulo
+  activo?: boolean;
+  // Configuración específica por cada módulo:
+  examenesCount?: number; // Cantidad de exámenes de este módulo (default: 1)
+  retosCount?: number; // Cantidad de retos por este módulo (default: 2)
+  preguntasExamenModuloCount?: number; // Cantidad de preguntas en el examen de este módulo (default: 25)
+  preguntasParaIntegralCount?: number; // Cantidad de preguntas de este módulo que se suman al Examen Integral Final (default: 8)
+  preguntasSeleccionadasIntegralIds?: string[]; // IDs específicos de preguntas seleccionadas de este módulo para el Examen Integral Final
+  ponderacion?: UniversalModuleGradingWeights; // Comportamiento, Sustentación/Participación, Examen/es, Reto/s
+  ponderacionGlobalModuloPct?: number; // Peso porcentual de este módulo en la ponderación global del curso
+  asistenciaBloqueA?: boolean; // Primer llamado al inicio de clases
+  asistenciaBloqueB?: boolean; // Segundo llamado al finalizar clases
+  documentosEnlaces?: UniversalModuleDocumentLink[]; // Enlaces de documentos descargables para el estudiante
+  enlacesTextoRaw?: string; // Espacio directo para pegar enlaces (uno por línea)
+}
+
+export interface UniversalExamDefinition {
+  id: ExamModality;
+  title: string;
+  subtitle: string;
+  badge: string;
+  moduloFilter?: number;
+  questionsCount: number;
+  durationMinutes: number;
+  maxAttempts: number;
+  activo: boolean;
+  sumarAutomaticamenteDeModulos?: boolean; // Si es true en el examen integral, calcula questionsCount sumando las preguntas seleccionadas de todos los módulos
+}
+
+export interface UniversalCourseMetadata {
+  courseId: string;
+  nombreCurso: string;
+  codigoCurso: string; // Prefijo ej. 'MM26', 'AD26'
+  programaAcademico: string;
+  nombreAsignatura?: string;
+  institucionSede: string;
+  periodoAcademico: string;
+  docenteResponsable: string;
+  docenteAsignadoId?: string; // ID del docente titular asignado desde el Panel Editor
+  docenteAsignadoClave?: string; // Clave asignada al docente del curso
+  docentesAutorizadosIds?: string[]; // IDs de todos los docentes autorizados para acceder a este curso
+  descripcionGeneral: string;
+  ponderacionGlobalCursoPct?: number;
+  cantidadModulos: number;
+  cantidadExamenes: number;
+  cantidadRetos: number;
+  habilitarExamenIntegral?: boolean; // Examen final fuera de los módulos que integra preguntas desde el primer hasta el último módulo
+  selectedStudentRosterDbId?: string;
+  selectedStudentRosterDbName?: string;
+  selectedQuestionBankDbId?: string;
+  selectedQuestionBankDbName?: string;
+  modulosCurso: UniversalModuleDefinition[];
+  examenesCurso: UniversalExamDefinition[];
+  updatedAtIso: string;
+}
+
+export interface CourseVersionSnapshot {
+  snapshotId: string;
+  createdAtIso: string;
+  label: string;
+  meta: UniversalCourseMetadata;
+  questions: Question[];
+  customMiniRetos?: CustomMiniRetoTemplate[];
+}
+
+export interface UniversalCourseWorkspace {
+  meta: UniversalCourseMetadata;
+  studentsCount: number;
+  questionsCount: number;
+  attemptsCount: number;
+  retosCount: number;
+  students?: StudentRecord[];
+  questions?: Question[];
+  attempts?: ExamAttemptResult[];
+  abproEvaluations?: ABProProjectEvaluation[];
+  customMiniRetos?: CustomMiniRetoTemplate[];
+  academicDataset?: any;
+  versionSnapshots?: CourseVersionSnapshot[]; // Últimos 3 puntos de restauración del curso
+}
+

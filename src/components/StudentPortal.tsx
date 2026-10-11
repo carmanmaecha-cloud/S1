@@ -21,12 +21,26 @@ import {
 } from '../data/questions';
 import { getEffectiveMaxLlamadosAtencion } from '../utils/academicServerSummary';
 import {
+  getEffectiveCourseMetadata,
+  DEFAULT_MODULE_GRADING_WEIGHTS,
+  parseRawDocumentLinksToStructured
+} from '../utils/universalCourseEngine';
+import {
   StudentPerformanceDashboard,
   ZeroTrialSimulatorModal
 } from './StudentPerformanceDashboard';
 import { StudentMiniRetosZone } from './StudentMiniRetosZone';
+import { getEffectiveBadgesForCourse } from '../utils/miniRetosEngine';
+import { StudentPersonalAcademicFicha } from './AcademicClassAttendanceModule';
+import {
+  AcademicDataset,
+  ClassSessionId,
+  buildInitialAcademicDataset,
+  computeStudentAcademicSummary,
+  createDefaultStudentAcademicRecord
+} from '../data/classAttendanceAndGrades';
 import { OptionServerSaveBar, useServerSave } from './ServerSaveContext';
-import { useAuthSession } from '../context/AuthContext';
+import { useAuthSession, StudentDashboardTabType } from '../context/AuthContext';
 import {
   ShieldCheck,
   Clock,
@@ -56,7 +70,8 @@ import {
   GraduationCap,
   PlayCircle,
   Maximize2,
-  Trophy
+  Trophy,
+  Download
 } from 'lucide-react';
 
 interface StudentPortalProps {
@@ -79,9 +94,13 @@ interface StudentPortalProps {
   ) => void;
   onUpdateLiveSession: (session: LiveClassroomSession | null, studentIdToRemove?: string) => void;
   onSwitchToTeacherLogin: () => void;
+  onSwitchToEditorLogin?: () => void;
+  onGoToInitialHome?: () => void;
   onSessionActiveChange?: (active: boolean) => void;
   logoutSignal?: number;
   customMiniRetos?: CustomMiniRetoTemplate[];
+  academicDataset?: AcademicDataset;
+  onUpdateAcademicDataset?: (nextDataset: AcademicDataset) => void;
   activeExamsByStudent?: Record<string, any>;
   onSaveActiveExamBackup?: (studentId: string, backup: any | null) => void;
   onForceServerSync?: () => void;
@@ -231,9 +250,12 @@ export function StudentPortal({
   onRecordAntiCheatEvent,
   onUpdateLiveSession,
   onSwitchToTeacherLogin,
+  onGoToInitialHome,
   onSessionActiveChange,
   logoutSignal,
   customMiniRetos = [],
+  academicDataset,
+  onUpdateAcademicDataset,
   onSaveActiveExamBackup,
   onForceServerSync
 }: StudentPortalProps) {
@@ -242,6 +264,7 @@ export function StudentPortal({
   const [accessCodeInput, setAccessCodeInput] = useState('');
   const [classroomPinInput, setClassroomPinInput] = useState('');
   const [loginError, setLoginError] = useState<string | null>(null);
+  const [rollCallFeedbackBanner, setRollCallFeedbackBanner] = useState<string | null>(null);
   const [thirdAttemptBlockedModal, setThirdAttemptBlockedModal] = useState<{
     student: StudentRecord;
     bestGrade: number;
@@ -266,20 +289,76 @@ export function StudentPortal({
       ? authState.verifiedStudentId
       : null
   );
-  const [studentDashboardTab, setStudentDashboardTabState] = useState<
-    'modalidades' | 'mis_notas' | 'diagnostico_pedagogico' | 'mini_retos'
-  >(() => authState.studentDashboardTab || 'modalidades');
+  const [studentDashboardTab, setStudentDashboardTabState] = useState<StudentDashboardTabType>(
+    () => authState.studentDashboardTab || 'inicio'
+  );
+  const [tabHistory, setTabHistory] = useState<StudentDashboardTabType[]>([]);
   const [selectedModality, setSelectedModalityState] = useState<ExamModality>(
     () => authState.selectedModality || 'integral'
   );
 
   const setStudentDashboardTab = useCallback(
-    (tab: 'modalidades' | 'mis_notas' | 'diagnostico_pedagogico' | 'mini_retos') => {
-      setStudentDashboardTabState(tab);
+    (tab: StudentDashboardTabType) => {
+      setStudentDashboardTabState((prev) => {
+        if (prev !== tab) {
+          setTabHistory((hist) => [...hist.slice(-10), prev]);
+        }
+        return tab;
+      });
       persistStudentTab(tab);
     },
     [persistStudentTab]
   );
+
+  // Step 3: Active Exam State (Restores active student session across page reload)
+  const [examPhase, setExamPhaseState] = useState<
+    'login' | 'modality_select' | 'active_exam' | 'results'
+  >(() => {
+    if (authState.studentSessionActive && authState.verifiedStudentId) {
+      return 'modality_select';
+    }
+    return 'login';
+  });
+
+  const setExamPhase = useCallback(
+    (phase: 'login' | 'modality_select' | 'active_exam' | 'results') => {
+      setExamPhaseState(phase);
+      persistStudentExamPhase(phase);
+    },
+    [persistStudentExamPhase]
+  );
+
+  const handleGoBackStudentTab = useCallback(() => {
+    if (examPhase === 'results') {
+      setFinishedResult(null);
+      setExamPhaseState('modality_select');
+      persistStudentExamPhase('modality_select');
+      return;
+    }
+    setTabHistory((hist) => {
+      if (hist.length === 0) {
+        setStudentDashboardTabState('inicio');
+        persistStudentTab('inicio');
+        return [];
+      }
+      const nextHist = [...hist];
+      const previousTab = nextHist.pop() || 'inicio';
+      setStudentDashboardTabState(previousTab);
+      persistStudentTab(previousTab);
+      return nextHist;
+    });
+  }, [examPhase, persistStudentExamPhase, persistStudentTab]);
+
+  const handleGoHomeStudentPanel = useCallback(() => {
+    setFinishedResult(null);
+    setThirdAttemptBlockedModal(null);
+    setInductionModalOpen(false);
+    setTabHistory([]);
+    setStudentDashboardTabState('inicio');
+    persistStudentTab('inicio');
+    setExamPhaseState('modality_select');
+    persistStudentExamPhase('modality_select');
+  }, [persistStudentTab, persistStudentExamPhase]);
 
   const setSelectedModality = useCallback(
     (mod: ExamModality) => {
@@ -301,6 +380,45 @@ export function StudentPortal({
   const [examFilterStatus, setExamFilterStatus] = useState<'all' | 'pending' | 'completed'>('all');
   const [selectedRetoModuloJump, setSelectedRetoModuloJump] = useState<1 | 2 | 3 | 4 | 5>(1);
 
+  // Ruta de Aprendizaje Visual (Stepper), Centro de Alertas Flotante / Sonoro y Bottom Sheets (Modo Táctil Web OS)
+  const [selectedStepperClassId, setSelectedStepperClassId] = useState<ClassSessionId>(1);
+  const [rollCallSoundEnabled, setRollCallSoundEnabled] = useState<boolean>(true);
+  const lastSoundPlayedKeyRef = useRef<string>('');
+  const [studentBottomSheet, setStudentBottomSheet] = useState<
+    'none' | 'entregar_trabajo' | 'justificar_falla' | 'perfil'
+  >('none');
+  const [sheetClassId, setSheetClassId] = useState<ClassSessionId>(1);
+  const [sheetWorkText, setSheetWorkText] = useState<string>('');
+  const [sheetWorkLink, setSheetWorkLink] = useState<string>('');
+  const [sheetExcuseBlock, setSheetExcuseBlock] = useState<'A' | 'B' | 'AB'>('A');
+  const [sheetExcuseReason, setSheetExcuseReason] = useState<string>('');
+  const [sheetExcuseUrl, setSheetExcuseUrl] = useState<string>('');
+  const [sheetNotice, setSheetNotice] = useState<string | null>(null);
+
+  const playRollCallChime = useCallback(() => {
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const playTone = (freq: number, startOffset: number, dur: number) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, ctx.currentTime + startOffset);
+        gain.gain.setValueAtTime(0.16, ctx.currentTime + startOffset);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + startOffset + dur);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(ctx.currentTime + startOffset);
+        osc.stop(ctx.currentTime + startOffset + dur);
+      };
+      playTone(587.33, 0, 0.18); // D5
+      playTone(880, 0.19, 0.28); // A5
+    } catch {
+      // Ignore audio autoplay block if user has not interacted yet
+    }
+  }, []);
+
   // Monotonic Clock Synchronization (performance.now() decoupled from OS wall clock tampering)
   const bootPerfNowRef = useRef<number>(performance.now());
   const bootWallTimeMsRef = useRef<number>(Date.now());
@@ -313,8 +431,52 @@ export function StudentPortal({
   const [isSplitScreenDetected, setIsSplitScreenDetected] = useState<boolean>(false);
   const [isExtendedMonitorDetected, setIsExtendedMonitorDetected] = useState<boolean>(false);
 
-  // Dynamic Modality Options derived from Teacher Custom Exam Configurator («Constructor de Pruebas a Medida»)
+  // Dynamic Course Metadata & Modality Options derived from Universal Course Engine
+  const activeCourseMeta = useMemo(() => getEffectiveCourseMetadata(config), [config]);
+
+  const studentClassSessions = useMemo(() => {
+    const mods = Array.isArray(activeCourseMeta.modulosCurso)
+      ? activeCourseMeta.modulosCurso
+      : [];
+    if (mods.length > 0) {
+      return mods.slice(0, 6).map((m, idx) => {
+        const docs =
+          Array.isArray(m.documentosEnlaces) && m.documentosEnlaces.length > 0
+            ? m.documentosEnlaces
+            : parseRawDocumentLinksToStructured(m.enlacesTextoRaw || '', idx + 1, m.shortTitle);
+        return {
+          id: (idx + 1) as 1 | 2 | 3 | 4 | 5 | 6,
+          code: (m.code || `C${idx + 1}`) as 'C1' | 'C2' | 'C3' | 'C4' | 'C5' | 'C6',
+          shortTitle: m.shortTitle,
+          fullTitle: `Clase ${idx + 1} / Módulo ${idx + 1}: ${m.shortTitle}`,
+          subtitle: m.description || m.fullTitle || m.shortTitle,
+          examenesCount: m.examenesCount ?? 1,
+          retosCount: m.retosCount ?? 2,
+          ponderacion: m.ponderacion || DEFAULT_MODULE_GRADING_WEIGHTS,
+          documentosEnlaces: docs
+        };
+      });
+    }
+    return academicDataset?.classSessions;
+  }, [activeCourseMeta.modulosCurso, academicDataset?.classSessions]);
+
   const activeModalityOptions = useMemo(() => {
+    const configuredExams = Array.isArray(activeCourseMeta.examenesCurso)
+      ? activeCourseMeta.examenesCurso.filter((e) => e.activo !== false)
+      : [];
+    if (configuredExams.length > 0) {
+      return configuredExams.map((e) => ({
+        id: e.id,
+        title: e.title,
+        subtitle: e.subtitle,
+        badge: e.badge,
+        moduloFilter: e.moduloFilter as 1 | 2 | 3 | 4 | 5 | undefined,
+        questionsCount: Math.max(1, Number(e.questionsCount) || 25),
+        durationMinutes: Math.max(5, Number(e.durationMinutes) || 50),
+        maxAttempts: Math.max(1, Math.min(3, Number(e.maxAttempts) || 2))
+      }));
+    }
+
     const intQ = Math.max(5, Number(config.preguntasExamenIntegral) || 40);
     const intMin = Math.max(5, Number(config.tiempoExamenIntegralMin) || 80);
     const modQ = Math.max(5, Number(config.preguntasExamenModulo) || 25);
@@ -328,7 +490,8 @@ export function StudentPortal({
           subtitle: `${intQ} preguntas aleatorias balanceadas (~${perModInIntegral} por módulo) • ${intMin} minutos`,
           badge: `Evaluación Integral · ${intQ} Reactivos · ${intMin} Min`,
           questionsCount: intQ,
-          durationMinutes: intMin
+          durationMinutes: intMin,
+          maxAttempts: 2
         };
       }
       return {
@@ -336,33 +499,18 @@ export function StudentPortal({
         subtitle: `${modQ} preguntas exclusivas del Módulo ${m.moduloFilter} • ${modMin} minutos`,
         badge: `Módulo ${m.moduloFilter} · ${modQ} Reactivos · ${modMin} Min`,
         questionsCount: modQ,
-        durationMinutes: modMin
+        durationMinutes: modMin,
+        maxAttempts: 2
       };
     });
   }, [
+    activeCourseMeta,
     config.preguntasExamenIntegral,
     config.tiempoExamenIntegralMin,
     config.preguntasExamenModulo,
     config.tiempoExamenModuloMin
   ]);
 
-  // Step 3: Active Exam State (Restores active student session across page reload)
-  const [examPhase, setExamPhaseState] = useState<
-    'login' | 'modality_select' | 'active_exam' | 'results'
-  >(() => {
-    if (authState.studentSessionActive && authState.verifiedStudentId) {
-      return 'modality_select';
-    }
-    return 'login';
-  });
-
-  const setExamPhase = useCallback(
-    (phase: 'login' | 'modality_select' | 'active_exam' | 'results') => {
-      setExamPhaseState(phase);
-      persistStudentExamPhase(phase);
-    },
-    [persistStudentExamPhase]
-  );
   const [activeQuestions, setActiveQuestions] = useState<SanitizedQuestion[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [answers, setAnswers] = useState<Record<string, 'A' | 'B' | 'C' | 'D'>>({});
@@ -449,6 +597,16 @@ export function StudentPortal({
     setFinishedResult(null);
     setExamPhase('login');
   }, [logoutSignal, verifiedStudentId, onUpdateLiveSession, logoutStudent, setExamPhase]);
+
+  const [rollCallNowMs, setRollCallNowMs] = useState<number>(() => Date.now());
+  const [rollCallCodeInputByClass, setRollCallCodeInputByClass] = useState<Record<number, string>>({});
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      setRollCallNowMs(Date.now());
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, []);
 
   // Normalize active question bank from server (falls back to INITIAL_QUESTIONS only if empty and not explicitly cleared)
   const safeQuestions = useMemo(() => {
@@ -633,10 +791,6 @@ export function StudentPortal({
       (s) => s.id.trim().replace(/[\s.-]/g, '').toUpperCase() === cleanId
     );
 
-    const isOfficialTestCredentials =
-      cleanId === '1000000000' &&
-      (cleanCode === '1000000000' || cleanCode === 'MM260000DEMO' || cleanCode === 'DEMO2026');
-
     const storedStudentCode = (matchedStudent?.codigoAcceso || '').trim().toUpperCase();
     const deterministicFallback = matchedStudent
       ? generateDeterministicAccessCode(matchedStudent.id).toUpperCase()
@@ -644,8 +798,7 @@ export function StudentPortal({
     const isStudentCodeValid =
       Boolean(matchedStudent) &&
       (storedStudentCode === cleanCode ||
-        (!storedStudentCode && deterministicFallback === cleanCode) ||
-        isOfficialTestCredentials);
+        (!storedStudentCode && deterministicFallback === cleanCode));
 
     if (!matchedStudent || !isStudentCodeValid) {
       setLoginError('Código de acceso de sesión inválido para este ID de estudiante. Solicite su código al docente.');
@@ -667,6 +820,9 @@ export function StudentPortal({
     loginStudent(matchedStudent.id);
     setProfileNameInput(matchedStudent.nombre);
     setProfileCodeInput(matchedStudent.codigoAcceso);
+    setTabHistory([]);
+    setStudentDashboardTabState('inicio');
+    persistStudentTab('inicio');
     setExamPhase('modality_select');
   };
 
@@ -853,20 +1009,53 @@ export function StudentPortal({
     const targetCount = Math.max(5, modConfig.questionsCount || (selectedModality === 'integral' ? 40 : 25));
 
     if (selectedModality === 'integral') {
-      // Balanced across Modules 1 to 5 according to configured question count
-      const perMod = Math.max(1, Math.floor(targetCount / 5));
-      const remainder = Math.max(0, targetCount - perMod * 5);
-      for (let mod = 1 as 1 | 2 | 3 | 4 | 5; mod <= 5; mod++) {
-        const takeCount = perMod + (mod <= remainder ? 1 : 0);
-        const modQuestions = safeQuestions.filter((q) => Number(q.modulo) === mod);
+      // Automatically sum and integrate selected questions from all course modules (Módulo 1 to Módulo N)
+      const courseModules =
+        Array.isArray(activeCourseMeta?.modulosCurso) && activeCourseMeta.modulosCurso.length > 0
+          ? activeCourseMeta.modulosCurso
+          : [];
+      const totalMods = Math.max(1, courseModules.length || activeCourseMeta?.cantidadModulos || 5);
+      const defaultPerMod = Math.max(1, Math.floor(targetCount / totalMods));
+      const remainder = Math.max(0, targetCount - defaultPerMod * totalMods);
+
+      for (let idx = 0; idx < totalMods; idx++) {
+        const modNum = courseModules[idx]?.id || idx + 1;
+        const modDef = courseModules[idx];
+        const explicitSelectedIds = Array.isArray(modDef?.preguntasSeleccionadasIntegralIds)
+          ? modDef.preguntasSeleccionadasIntegralIds
+          : [];
+        const configuredModCount =
+          explicitSelectedIds.length > 0
+            ? explicitSelectedIds.length
+            : typeof modDef?.preguntasParaIntegralCount === 'number' &&
+              modDef.preguntasParaIntegralCount > 0
+            ? modDef.preguntasParaIntegralCount
+            : defaultPerMod + (idx + 1 <= remainder ? 1 : 0);
+
+        const modQuestions = safeQuestions.filter((q) => Number(q.modulo) === Number(modNum));
         const effectiveModQuestions =
           modQuestions.length > 0
             ? modQuestions
-            : INITIAL_QUESTIONS.filter((q) => Number(q.modulo) === mod);
-        const pool = effectiveModQuestions.filter((q) => !usedIdsInModality.has(q.id));
-        const fallbackPool = pool.length >= takeCount ? pool : effectiveModQuestions;
-        const picked = shuffleArray(fallbackPool).slice(0, takeCount);
-        chosenRaw.push(...picked);
+            : INITIAL_QUESTIONS.filter((q) => Number(q.modulo) === Number(((modNum - 1) % 5) + 1));
+
+        if (explicitSelectedIds.length > 0) {
+          const explicitPool = effectiveModQuestions.filter((q) =>
+            explicitSelectedIds.includes(q.id)
+          );
+          const unusedExplicit = explicitPool.filter((q) => !usedIdsInModality.has(q.id));
+          const pickedPool =
+            unusedExplicit.length >= explicitPool.length && explicitPool.length > 0
+              ? unusedExplicit
+              : explicitPool.length > 0
+              ? explicitPool
+              : effectiveModQuestions;
+          chosenRaw.push(...shuffleArray(pickedPool).slice(0, configuredModCount));
+        } else {
+          const pool = effectiveModQuestions.filter((q) => !usedIdsInModality.has(q.id));
+          const fallbackPool = pool.length >= configuredModCount ? pool : effectiveModQuestions;
+          const picked = shuffleArray(fallbackPool).slice(0, configuredModCount);
+          chosenRaw.push(...picked);
+        }
       }
       chosenRaw = shuffleArray(chosenRaw);
     } else {
@@ -1727,55 +1916,32 @@ export function StudentPortal({
     return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   };
 
-  // ================= VIEW 1: PANTALLA INICIAL CON DOS OPCIONES (ESTUDIANTE / DOCENTE) Y VALIDACIÓN DUAL ESTRICTA =================
+  // ================= VIEW 1: VENTANA DE INICIO DE SESIÓN DEL ESTUDIANTE =================
   if (examPhase === 'login') {
     return (
-      <div className="min-h-[calc(100vh-8rem)] flex items-center justify-center px-4 py-8 sm:py-10">
-        <div className="w-full max-w-md bg-white border border-slate-200 rounded-2xl shadow-xs p-5 sm:p-8 space-y-6">
-          {/* Selector Dual de Rol en la Pantalla Inicial: Iniciar como Estudiante o Iniciar como Docente (Adaptado a Móvil) */}
-          <div className="grid grid-cols-2 gap-2 p-1.5 bg-slate-100 rounded-xl border border-slate-200">
-            <button
-              type="button"
-              className="min-h-[48px] py-2.5 px-3 rounded-lg bg-slate-900 text-white text-xs sm:text-sm font-bold flex items-center justify-center gap-2 shadow-xs"
-            >
-              <GraduationCap className="w-4 h-4 shrink-0" />
-              <span>Soy Estudiante</span>
-            </button>
-            <button
-              type="button"
-              onClick={onSwitchToTeacherLogin}
-              className="min-h-[48px] py-2.5 px-3 rounded-lg text-slate-700 hover:text-slate-900 hover:bg-white/80 text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer"
-            >
-              <Lock className="w-4 h-4 shrink-0" />
-              <span>Soy Docente</span>
-            </button>
-          </div>
-
-          <div className="space-y-1.5">
-            <span className="text-xs font-semibold uppercase tracking-wider text-sky-700">
-              Marketing Digital PRU · La Dorada, Caldas
-            </span>
-            <h1 className="text-2xl font-bold text-slate-900 tracking-tight">
-              Portal Oficial del Estudiante
-            </h1>
-            <p className="text-xs sm:text-sm text-slate-600">
-              Ingrese su documento y código de sesión para acceder a sus Exámenes, Mini Retos e Historial de Notas.
-            </p>
-          </div>
-
-          {/* Sala de Espera si el docente cerró el examen */}
-          {!config.examenAbierto && (
-            <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 space-y-2 text-xs text-amber-950">
-              <div className="flex items-center gap-2 font-bold text-amber-900">
-                <Clock className="w-4 h-4 shrink-0 text-amber-700 animate-spin" />
-                <span>Aviso · Exámenes en Sala de Espera (Mini Retos y Notas Disponibles)</span>
-              </div>
-              <p className="leading-relaxed">
-                {config.mensajeSalaEspera ||
-                  'Puede iniciar sesión normalmente para consultar sus notas, diagnóstico o presentar Mini Retos mientras el docente habilita los exámenes.'}
-              </p>
+      <div className="min-h-screen flex items-center justify-center px-4 py-8 sm:py-10">
+        <div className="w-full max-w-md bg-white border border-slate-200 rounded-2xl shadow-xs p-6 sm:p-8 space-y-6">
+          {onGoToInitialHome && (
+            <div>
+              <button
+                type="button"
+                onClick={onGoToInitialHome}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-semibold text-slate-700 transition-colors cursor-pointer"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                <span>Volver</span>
+              </button>
             </div>
           )}
+
+          <div className="space-y-2 text-center">
+            <div className="w-11 h-11 rounded-xl bg-sky-600 text-white flex items-center justify-center mx-auto">
+              <GraduationCap className="w-5 h-5" />
+            </div>
+            <h1 className="text-2xl font-bold text-slate-900 tracking-tight">
+              Estudiante
+            </h1>
+          </div>
 
           {/* Bloqueo por Tercer Intento */}
           {thirdAttemptBlockedModal && (
@@ -1821,7 +1987,7 @@ export function StudentPortal({
           <form onSubmit={handleLoginSubmit} className="space-y-4">
             <div className="space-y-1.5">
               <label htmlFor="docId" className="block text-xs sm:text-sm font-bold text-slate-800">
-                1. Número de Documento (ID de Estudiante)
+                ID de Estudiante
               </label>
               <input
                 id="docId"
@@ -1829,7 +1995,6 @@ export function StudentPortal({
                 inputMode="numeric"
                 required
                 autoComplete="off"
-                placeholder="Ej. 1054998123"
                 value={docIdInput}
                 onChange={(e) => setDocIdInput(e.target.value)}
                 className="w-full min-h-[48px] px-4 py-3 rounded-xl border border-slate-300 text-base sm:text-sm font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-600 focus:border-transparent"
@@ -1838,15 +2003,14 @@ export function StudentPortal({
 
             <div className="space-y-1.5">
               <label htmlFor="accessCode" className="block text-xs sm:text-sm font-bold text-slate-800">
-                2. Código de Acceso de Sesión
+                Código de Acceso de Sesión
               </label>
               <input
                 id="accessCode"
-                type="text"
+                type="password"
                 required
                 autoComplete="off"
                 maxLength={24}
-                placeholder="Ingrese su código personal"
                 value={accessCodeInput}
                 onChange={(e) => setAccessCodeInput(e.target.value.toUpperCase())}
                 className="w-full min-h-[48px] px-4 py-3 rounded-xl border border-slate-300 text-base sm:text-sm font-mono uppercase text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-600 focus:border-transparent"
@@ -1856,7 +2020,7 @@ export function StudentPortal({
             {config.exigirPinAula && (
               <div className="space-y-1.5 pt-1">
                 <label htmlFor="classroomPin" className="block text-xs sm:text-sm font-bold text-sky-900">
-                  3. PIN de Aula Temporal del Día (Proyectado por el Docente)
+                  PIN de Aula Temporal del Día
                 </label>
                 <input
                   id="classroomPin"
@@ -1874,27 +2038,258 @@ export function StudentPortal({
               type="submit"
               className="w-full min-h-[52px] py-3.5 px-5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-bold text-base sm:text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-xs"
             >
-              <span>Ingresar a Mi Panel Estudiantil</span>
+              <span>Iniciar Sesión</span>
               <ArrowRight className="w-5 h-5" />
             </button>
           </form>
-
-          {/* Directriz Institucional de Control Exclusivo del Docente */}
-          <div className="pt-3 border-t border-slate-100 text-xs text-slate-500 leading-relaxed">
-            <div className="flex items-start gap-2">
-              <Lock className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
-              <span>
-                El Código de Acceso de Sesión es personal e intransferible y debe ser solicitado directamente al docente en el aula.
-              </span>
-            </div>
-          </div>
         </div>
       </div>
     );
   }
 
+  const currentStudentAcademicRecord = currentStudent
+    ? (academicDataset || buildInitialAcademicDataset(students)).records.find(
+        (r) => r.studentId === currentStudent.id
+      ) ||
+      createDefaultStudentAcademicRecord(
+        currentStudent.id,
+        currentStudent.nombre,
+        currentStudent.id
+      )
+    : null;
+
+  const activeRollCallClasses = currentStudentAcademicRecord
+    ? (studentClassSessions || [])
+        .map((s) => s.id as ClassSessionId)
+        .filter((cId) => {
+          const c = currentStudentAcademicRecord.clases[cId];
+          const isCalling = Boolean(
+            c?.llamadoVirtualActivo ||
+              (c as any)?.llamadoAsistenciaActivo ||
+              c?.asistenciaB1Estado === 'llamando' ||
+              c?.asistenciaB2Estado === 'llamando'
+          );
+          if (!isCalling) return false;
+          if (c?.llamadoVirtualExpiraAtIso) {
+            const expMs = new Date(c.llamadoVirtualExpiraAtIso).getTime();
+            if (!Number.isNaN(expMs) && expMs <= rollCallNowMs) {
+              return false;
+            }
+          }
+          return true;
+        })
+    : [];
+
+  const handleStudentRespondRollCall = (
+    claseId: ClassSessionId,
+    enteredCodeOptional?: string
+  ) => {
+    if (!onUpdateAcademicDataset || !currentStudent) return;
+    const baseDataset = academicDataset || buildInitialAcademicDataset(students);
+    const studentRec = baseDataset.records.find((r) => r.studentId === currentStudent.id);
+    const prevCForCheck = studentRec?.clases?.[claseId];
+
+    // If a strict code/keyword was typed, validate if needed; allow direct button click when method is alerta_boton_panel or when code matches
+    const method = prevCForCheck?.llamadoVirtualMetodo || 'alerta_boton_panel';
+    const expectedStudentPin = (prevCForCheck?.llamadoVirtualCodigoUnico || '').trim().toUpperCase();
+    const expectedClassKeyword = (
+      baseDataset.aperturaClaseActiva?.palabraClaveSecreta || ''
+    )
+      .trim()
+      .toUpperCase();
+
+    if (
+      typeof enteredCodeOptional === 'string' &&
+      enteredCodeOptional.trim().length > 0
+    ) {
+      const cleanTyped = enteredCodeOptional.trim().toUpperCase();
+      const matchesPin = expectedStudentPin && cleanTyped === expectedStudentPin;
+      const matchesKeyword = expectedClassKeyword && cleanTyped === expectedClassKeyword;
+      if (!matchesPin && !matchesKeyword && (expectedStudentPin || expectedClassKeyword)) {
+        setRollCallFeedbackBanner(
+          `⚠️ El código ingresado (${cleanTyped}) no coincide con el código asignado. Verifique el código enviado a su WhatsApp/Correo o pulse el botón "¡Presente!" directo.`
+        );
+        setTimeout(() => setRollCallFeedbackBanner(null), 5000);
+        return;
+      }
+    }
+
+    const nowIso = new Date().toISOString();
+    const existsInRecords = baseDataset.records.some((r) => r.studentId === currentStudent.id);
+    const baseRecords = existsInRecords
+      ? baseDataset.records
+      : [
+          ...baseDataset.records,
+          createDefaultStudentAcademicRecord(
+            currentStudent.id,
+            currentStudent.nombre,
+            currentStudent.id
+          )
+        ];
+    const nextRecords = baseRecords.map((rec) => {
+      if (rec.studentId !== currentStudent.id) return rec;
+      const prevC = rec.clases[claseId];
+      const bloqueTarget = prevC?.llamadoVirtualBloque;
+      const isB1Target =
+        bloqueTarget === 'ambos' ||
+        bloqueTarget === 1 ||
+        prevC?.asistenciaB1Estado === 'llamando' ||
+        (!bloqueTarget && prevC?.asistenciaB2Estado !== 'llamando');
+      const isB2Target =
+        bloqueTarget === 'ambos' ||
+        bloqueTarget === 2 ||
+        prevC?.asistenciaB2Estado === 'llamando';
+
+      const nextB1 = isB1Target ? 'presente_virtual' : prevC?.asistenciaB1Estado || 'sin_registrar';
+      const nextB2 = isB2Target ? 'presente_virtual' : prevC?.asistenciaB2Estado || 'sin_registrar';
+      const nextB1Bool = isB1Target ? true : prevC?.bloque1Asistio ?? true;
+      const nextB2Bool = isB2Target ? true : prevC?.bloque2Asistio ?? true;
+
+      return {
+        ...rec,
+        ultimaActualizacionIso: nowIso,
+        clases: {
+          ...rec.clases,
+          [claseId]: {
+            ...prevC,
+            bloque1Asistio: nextB1Bool,
+            bloque2Asistio: nextB2Bool,
+            asistenciaB1Estado: nextB1,
+            asistenciaB2Estado: nextB2,
+            asistenciaB1ConfirmadaAtIso: isB1Target
+              ? nowIso
+              : prevC?.asistenciaB1ConfirmadaAtIso,
+            asistenciaB2ConfirmadaAtIso: isB2Target
+              ? nowIso
+              : prevC?.asistenciaB2ConfirmadaAtIso,
+            llamadoVirtualActivo: false,
+            llamadoVirtualRespondidoAtIso: nowIso
+          }
+        }
+      };
+    });
+    onUpdateAcademicDataset({
+      ...baseDataset,
+      updatedAtIso: nowIso,
+      records: nextRecords
+    });
+    const csInfo = (studentClassSessions || []).find((s) => s.id === claseId);
+    const bloqueStr =
+      prevCForCheck?.llamadoVirtualBloque === 'ambos'
+        ? 'Bloques A y B (B1 + B2)'
+        : prevCForCheck?.llamadoVirtualBloque === 2
+        ? 'Bloque B (B2)'
+        : 'Bloque A (B1)';
+    setRollCallFeedbackBanner(
+      `✅ ¡PRESENTE REGISTRADO! Su asistencia para ${csInfo?.code || `Clase C${claseId}`} (${bloqueStr}) quedó grabada automáticamente en el Panel del Docente (${new Date().toLocaleTimeString('es-CO')}).`
+    );
+    setTimeout(() => setRollCallFeedbackBanner(null), 7000);
+  };
+
+  const handleStudentSubmitWork = (
+    claseId: ClassSessionId,
+    entregaTexto: string,
+    entregaEnlace?: string
+  ) => {
+    if (!onUpdateAcademicDataset || !currentStudent) return;
+    const baseDataset = academicDataset || buildInitialAcademicDataset(students);
+    const nowIso = new Date().toISOString();
+    const existsInRecords = baseDataset.records.some((r) => r.studentId === currentStudent.id);
+    const baseRecords = existsInRecords
+      ? baseDataset.records
+      : [
+          ...baseDataset.records,
+          createDefaultStudentAcademicRecord(
+            currentStudent.id,
+            currentStudent.nombre,
+            currentStudent.id
+          )
+        ];
+    const nextRecords = baseRecords.map((rec) => {
+      if (rec.studentId !== currentStudent.id) return rec;
+      const prevC = rec.clases[claseId];
+      return {
+        ...rec,
+        ultimaActualizacionIso: nowIso,
+        clases: {
+          ...rec.clases,
+          [claseId]: {
+            ...prevC,
+            trabajoEstado: 'pendiente_revision' as const,
+            trabajoEntregaTexto: entregaTexto,
+            trabajoEntregaEnlace: entregaEnlace || prevC?.trabajoEntregaEnlace || '',
+            trabajoEntregadoAtIso: nowIso
+          }
+        }
+      };
+    });
+    onUpdateAcademicDataset({
+      ...baseDataset,
+      updatedAtIso: nowIso,
+      records: nextRecords
+    });
+  };
+
+  const handleStudentSubmitExcusa = (
+    claseId: ClassSessionId,
+    bloque: 'A' | 'B' | 'AB',
+    motivo: string,
+    soporteUrl: string
+  ) => {
+    if (!onUpdateAcademicDataset || !currentStudent) return;
+    const baseDataset = academicDataset || buildInitialAcademicDataset(students);
+    const nowIso = new Date().toISOString();
+    const existsInRecords = baseDataset.records.some((r) => r.studentId === currentStudent.id);
+    const baseRecords = existsInRecords
+      ? baseDataset.records
+      : [
+          ...baseDataset.records,
+          createDefaultStudentAcademicRecord(
+            currentStudent.id,
+            currentStudent.nombre,
+            currentStudent.id
+          )
+        ];
+    const nextRecords = baseRecords.map((rec) => {
+      if (rec.studentId !== currentStudent.id) return rec;
+      const prevC = rec.clases[claseId];
+      return {
+        ...rec,
+        ultimaActualizacionIso: nowIso,
+        clases: {
+          ...rec.clases,
+          [claseId]: {
+            ...prevC,
+            excusaEstado: 'pendiente_revision' as const,
+            excusaBloque: bloque,
+            excusaMotivo: motivo,
+            excusaSoporteUrl: soporteUrl,
+            excusaSolicitadaAtIso: nowIso
+          }
+        }
+      };
+    });
+    onUpdateAcademicDataset({
+      ...baseDataset,
+      updatedAtIso: nowIso,
+      records: nextRecords
+    });
+  };
+
+  // Emitir sonido automático cuando se detecte un nuevo llamado de asistencia activo
+  useEffect(() => {
+    if (!rollCallSoundEnabled || activeRollCallClasses.length === 0) return;
+    const key = activeRollCallClasses
+      .map((cId) => `${cId}:${currentStudentAcademicRecord?.clases?.[cId]?.llamadoVirtualEmitidoAtIso || ''}`)
+      .join('|');
+    if (key && key !== lastSoundPlayedKeyRef.current) {
+      lastSoundPlayedKeyRef.current = key;
+      playRollCallChime();
+    }
+  }, [activeRollCallClasses, currentStudentAcademicRecord, playRollCallChime, rollCallSoundEnabled]);
+
   // ================= VIEW 2: PANEL DEL ESTUDIANTE CON SESIÓN INICIADA (ACTIVA) — REORGANIZADO PARA WEB Y MÓVIL =================
-  if (examPhase === 'modality_select' && currentStudent) {
+  if (examPhase === 'modality_select' && currentStudent && currentStudentAcademicRecord) {
     const selectedModStats = getModalityAttemptStats(selectedModality);
     const selectedModConfig =
       activeModalityOptions.find((m) => m.id === selectedModality) || activeModalityOptions[0];
@@ -1910,10 +2305,12 @@ export function StudentPortal({
     });
     const completedExamsCount = modalitiesOverview.filter((m) => m.hasCompletedAttempt).length;
     const pendingExamsCount = Math.max(0, modalitiesOverview.length - completedExamsCount);
-    const unlockedBadgesCount = ([1, 2, 3, 4, 5] as const).filter(
-      (m) => currentStudent.progresoRetos?.[m]?.insigniaDesbloqueada
-    ).length;
-    const pendingRetosCount = Math.max(0, 5 - unlockedBadgesCount);
+    const effectiveCourseBadgesOverview = getEffectiveBadgesForCourse(config);
+    const totalCourseModulesCount = Math.max(1, effectiveCourseBadgesOverview.length);
+    const unlockedBadgesCount = effectiveCourseBadgesOverview.filter((b) => {
+      return Boolean(currentStudent.progresoRetos?.[b.modulo]?.insigniaDesbloqueada);
+    }).length;
+    const pendingRetosCount = Math.max(0, totalCourseModulesCount - unlockedBadgesCount);
     const studentBestOverallGrade =
       studentAttempts.length > 0
         ? Math.max(...studentAttempts.map((a) => a.notaColombiana))
@@ -1927,135 +2324,7 @@ export function StudentPortal({
     });
 
     return (
-      <div className="max-w-5xl mx-auto px-3 sm:px-4 pt-5 pb-24 sm:py-8 space-y-5 sm:space-y-6">
-        {/* 1. CABECERA DE IDENTIDAD, HERRAMIENTAS RÁPIDAS Y RESUMEN DE ESTADO DEL ESTUDIANTE */}
-        <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 shadow-xs space-y-4">
-          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-            <div className="space-y-1.5">
-              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
-                <span className="inline-flex items-center gap-1.5 font-bold text-emerald-800">
-                  <UserCheck className="w-4 h-4 text-emerald-600" />
-                  <span>Sesión Estudiantil Activa</span>
-                </span>
-                <span aria-hidden="true">·</span>
-                <span className="font-mono">
-                  ID: <strong className="text-slate-900">{currentStudent.id}</strong>
-                </span>
-                <span aria-hidden="true">·</span>
-                <span className="font-mono">
-                  Código: <strong className="text-slate-900">{currentStudent.codigoAcceso}</strong>
-                </span>
-              </div>
-              <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
-                Hola, {currentStudent.nombre}
-              </h1>
-            </div>
-
-            {/* Botones de Herramientas Rápidas — Grandes y Adaptados a Móvil (grid en móvil, fila en web) */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 lg:flex items-stretch sm:items-center gap-2.5">
-              <button
-                type="button"
-                onClick={() => setZeroTrialModalOpen(true)}
-                className="min-h-[48px] px-4 py-2.5 rounded-xl border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-xs sm:text-sm font-bold text-emerald-950 flex items-center justify-center gap-2 cursor-pointer transition-colors"
-              >
-                <PlayCircle className="w-4 h-4 text-emerald-700 shrink-0" />
-                <span>Prueba Cero (Ensayo Gratis)</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setProfileNameInput(currentStudent.nombre);
-                  setProfileCodeInput(currentStudent.codigoAcceso);
-                  setProfileSaveMsg(null);
-                  setEditProfileModalOpen(true);
-                }}
-                className="min-h-[48px] px-4 py-2.5 rounded-xl border border-sky-200 bg-sky-50 hover:bg-sky-100 text-xs sm:text-sm font-bold text-sky-950 flex items-center justify-center gap-2 cursor-pointer transition-colors"
-              >
-                <Edit3 className="w-4 h-4 text-sky-700 shrink-0" />
-                <span>Modificar Mis Datos</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  if (currentStudent) {
-                    onUpdateLiveSession(null, currentStudent.id);
-                  }
-                  logoutStudent();
-                  setVerifiedStudentId(null);
-                  setDocIdInput('');
-                  setAccessCodeInput('');
-                  setClassroomPinInput('');
-                  setThirdAttemptBlockedModal(null);
-                  setExamPhase('login');
-                }}
-                className="min-h-[48px] px-4 py-2.5 rounded-xl border border-red-200 bg-red-50/80 hover:bg-red-100 text-xs sm:text-sm font-bold text-red-900 flex items-center justify-center gap-2 cursor-pointer transition-colors"
-              >
-                <RotateCcw className="w-4 h-4 text-red-700 shrink-0" />
-                <span>Salir / Cambiar Usuario</span>
-              </button>
-            </div>
-          </div>
-
-          {/* Cinta de Estado General en Tiempo Real (4 Indicadores Claros para Móvil 2x2 y Web 4 cols) */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-3 pt-3 border-t border-slate-100">
-            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80 space-y-0.5">
-              <div className="text-[11px] font-semibold text-slate-500">Estado de Exámenes</div>
-              <div className="text-sm sm:text-base font-bold font-mono tabular-nums text-slate-900">
-                {completedExamsCount} / {modalitiesOverview.length} realizados
-              </div>
-              <div className="text-[11px] text-slate-600">
-                {pendingExamsCount === 0
-                  ? '✓ Todos presentados'
-                  : `⏳ ${pendingExamsCount} pendiente(s)`}
-              </div>
-            </div>
-
-            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80 space-y-0.5">
-              <div className="text-[11px] font-semibold text-slate-500">Estado de Mini Retos</div>
-              <div className="text-sm sm:text-base font-bold font-mono tabular-nums text-slate-900">
-                {unlockedBadgesCount} / 5 insignias
-              </div>
-              <div className="text-[11px] text-slate-600">
-                {pendingRetosCount === 0
-                  ? '🏆 5/5 completados'
-                  : `⏳ ${pendingRetosCount} reto(s) por superar`}
-              </div>
-            </div>
-
-            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80 space-y-0.5">
-              <div className="text-[11px] font-semibold text-slate-500">Mejor Nota Examen</div>
-              <div
-                className={`text-sm sm:text-base font-bold font-mono tabular-nums ${
-                  studentAttempts.length === 0
-                    ? 'text-slate-700'
-                    : studentBestOverallGrade >= minPass
-                    ? 'text-emerald-700'
-                    : 'text-amber-700'
-                }`}
-              >
-                {studentAttempts.length > 0
-                  ? `${studentBestOverallGrade.toFixed(1)} / 5.0`
-                  : 'Sin entregas'}
-              </div>
-              <div className="text-[11px] text-slate-600">
-                {studentAttempts.length} intento(s) en total
-              </div>
-            </div>
-
-            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80 space-y-0.5">
-              <div className="text-[11px] font-semibold text-slate-500">Seguridad de Sesión</div>
-              <div className="text-sm sm:text-base font-bold text-emerald-800">
-                {currentStudent.suspendido ? '⚠️ Suspendida' : '🛡️ Habilitada'}
-              </div>
-              <div className="text-[11px] text-slate-600 font-mono">
-                Límite: {maxLlamadosPermitidos} llamado(s)
-              </div>
-            </div>
-          </div>
-        </div>
-
+      <div className="max-w-7xl mx-auto px-3 sm:px-6 pt-3 pb-24 lg:pb-10 space-y-4">
         <OptionServerSaveBar
           sectionKey="estudiante_perfil_datos"
           label={`Sesión y Datos del Estudiante (${currentStudent.nombre})`}
@@ -2068,213 +2337,828 @@ export function StudentPortal({
           }}
         />
 
-        {/* 2. MENÚ PRINCIPAL DE VENTANAS DEL ESTUDIANTE (4 BOTONES GRANDES E IDENTIFICABLES EN WEB Y MÓVIL) */}
-        <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 shadow-xs space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h2 className="text-xs sm:text-sm font-bold uppercase tracking-wider text-slate-700">
-              Menú Principal del Estudiante · Seleccione una Ventana:
-            </h2>
-            <span className="text-xs text-slate-500">
-              Toque cualquiera de los 4 botones grandes para cambiar de sección
-            </span>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-            {/* Botón Grande 1: Exámenes Oficiales */}
+        {/* BARRA SUPERIOR DE ESTADO (TOP BAR CONTRACT: 3 ZONAS LIMPIAS) */}
+        <header className="bg-white border border-slate-200 rounded-2xl px-4 sm:px-6 py-3.5 flex items-center justify-between gap-4">
+          {/* Zona 1: Marca / Curso Activo */}
+          <div className="flex items-center gap-3 min-w-0">
+            {studentDashboardTab !== 'inicio' && (
+              <button
+                type="button"
+                onClick={handleGoHomeStudentPanel}
+                className="min-h-[44px] min-w-[44px] px-3 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-800 text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 transition-transform shrink-0"
+                title="Volver al Escritorio Principal"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                <span className="hidden sm:inline whitespace-nowrap">Escritorio</span>
+              </button>
+            )}
             <button
               type="button"
-              onClick={() => setStudentDashboardTab('modalidades')}
-              className={`min-h-[88px] p-4 rounded-xl border text-left transition-all flex flex-col justify-between cursor-pointer ${
-                studentDashboardTab === 'modalidades'
-                  ? 'bg-slate-900 text-white border-slate-900 shadow-sm ring-2 ring-sky-500/40'
-                  : 'bg-slate-50/80 hover:bg-slate-100 text-slate-900 border-slate-200'
+              onClick={handleGoHomeStudentPanel}
+              className="text-left truncate cursor-pointer"
+            >
+              <span className="text-sm sm:text-base font-bold tracking-tight text-slate-900 whitespace-nowrap">
+                {activeCourseMeta.nombreCurso || 'Portal del Estudiante'}
+              </span>
+            </button>
+          </div>
+
+          {/* Zona 2: Enlaces de navegación limpia en Desktop */}
+          <nav className="hidden lg:flex items-center gap-6 text-xs font-semibold text-slate-600">
+            <button
+              type="button"
+              onClick={handleGoHomeStudentPanel}
+              className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                studentDashboardTab === 'inicio'
+                  ? 'text-slate-900 underline underline-offset-8 decoration-2'
+                  : 'hover:text-slate-900'
               }`}
             >
-              <div className="flex items-start justify-between gap-2">
-                <div className="flex items-center gap-2.5">
-                  <div
-                    className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
-                      studentDashboardTab === 'modalidades'
-                        ? 'bg-sky-500 text-white'
-                        : 'bg-sky-100 text-sky-800'
-                    }`}
-                  >
-                    <BookOpen className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <div
-                      className={`text-[11px] font-mono font-bold uppercase ${
-                        studentDashboardTab === 'modalidades' ? 'text-sky-300' : 'text-sky-700'
-                      }`}
-                    >
-                      Ventana 1
-                    </div>
-                    <div className="text-sm sm:text-base font-bold leading-tight">
-                      Exámenes Oficiales
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div
-                className={`mt-3 pt-2 border-t text-xs flex items-center justify-between ${
-                  studentDashboardTab === 'modalidades'
-                    ? 'border-slate-700 text-slate-200'
-                    : 'border-slate-200/80 text-slate-600'
-                }`}
-              >
-                <span>Integral y Módulos 1–5</span>
-                <span className="font-mono font-bold">
-                  {completedExamsCount}/{modalitiesOverview.length} listos
-                </span>
-              </div>
+              Panel Bento
             </button>
-
-            {/* Botón Grande 2: Mini Retos e Insignias */}
+            <button
+              type="button"
+              onClick={() => setStudentDashboardTab('material_modulos')}
+              className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                studentDashboardTab === 'material_modulos'
+                  ? 'text-slate-900 underline underline-offset-8 decoration-2'
+                  : 'hover:text-slate-900'
+              }`}
+            >
+              Lecciones ({activeCourseMeta.cantidadModulos})
+            </button>
             <button
               type="button"
               onClick={() => setStudentDashboardTab('mini_retos')}
-              className={`min-h-[88px] p-4 rounded-xl border text-left transition-all flex flex-col justify-between cursor-pointer ${
+              className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 studentDashboardTab === 'mini_retos'
-                  ? 'bg-amber-500 text-slate-950 border-amber-600 shadow-sm ring-2 ring-amber-400'
-                  : 'bg-amber-50/70 hover:bg-amber-100/80 text-slate-900 border-amber-300'
+                  ? 'text-slate-900 underline underline-offset-8 decoration-2'
+                  : 'hover:text-slate-900'
               }`}
             >
-              <div className="flex items-start justify-between gap-2">
-                <div className="flex items-center gap-2.5">
-                  <div
-                    className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
-                      studentDashboardTab === 'mini_retos'
-                        ? 'bg-slate-950 text-amber-400'
-                        : 'bg-amber-200 text-amber-950'
-                    }`}
-                  >
-                    <Trophy className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <div
-                      className={`text-[11px] font-mono font-bold uppercase ${
-                        studentDashboardTab === 'mini_retos' ? 'text-slate-900' : 'text-amber-900'
-                      }`}
-                    >
-                      Ventana 2
-                    </div>
-                    <div className="text-sm sm:text-base font-bold leading-tight">
-                      Mini Retos & Insignias
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div
-                className={`mt-3 pt-2 border-t text-xs flex items-center justify-between ${
-                  studentDashboardTab === 'mini_retos'
-                    ? 'border-amber-600/50 text-slate-950 font-semibold'
-                    : 'border-amber-200 text-amber-950'
-                }`}
-              >
-                <span>Retos IA Módulos 1–5</span>
-                <span className="font-mono font-bold">🏅 {unlockedBadgesCount}/5 ganadas</span>
-              </div>
+              Mini Retos ({unlockedBadgesCount}/{totalCourseModulesCount})
             </button>
-
-            {/* Botón Grande 3: Mis Notas y Estado General */}
             <button
               type="button"
-              onClick={() => setStudentDashboardTab('mis_notas')}
-              className={`min-h-[88px] p-4 rounded-xl border text-left transition-all flex flex-col justify-between cursor-pointer ${
-                studentDashboardTab === 'mis_notas'
-                  ? 'bg-slate-900 text-white border-slate-900 shadow-sm ring-2 ring-emerald-500/40'
-                  : 'bg-slate-50/80 hover:bg-slate-100 text-slate-900 border-slate-200'
-              }`}
-            >
-              <div className="flex items-start justify-between gap-2">
-                <div className="flex items-center gap-2.5">
-                  <div
-                    className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
-                      studentDashboardTab === 'mis_notas'
-                        ? 'bg-emerald-500 text-white'
-                        : 'bg-emerald-100 text-emerald-800'
-                    }`}
-                  >
-                    <Award className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <div
-                      className={`text-[11px] font-mono font-bold uppercase ${
-                        studentDashboardTab === 'mis_notas'
-                          ? 'text-emerald-300'
-                          : 'text-emerald-700'
-                      }`}
-                    >
-                      Ventana 3
-                    </div>
-                    <div className="text-sm sm:text-base font-bold leading-tight">
-                      Mis Notas y Estado
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div
-                className={`mt-3 pt-2 border-t text-xs flex items-center justify-between ${
-                  studentDashboardTab === 'mis_notas'
-                    ? 'border-slate-700 text-slate-200'
-                    : 'border-slate-200/80 text-slate-600'
-                }`}
-              >
-                <span>Certificados y Pendientes</span>
-                <span className="font-mono font-bold">{studentAttempts.length} entregas</span>
-              </div>
-            </button>
-
-            {/* Botón Grande 4: Diagnóstico por Módulos */}
-            <button
-              type="button"
-              onClick={() => setStudentDashboardTab('diagnostico_pedagogico')}
-              className={`min-h-[88px] p-4 rounded-xl border text-left transition-all flex flex-col justify-between cursor-pointer ${
+              onClick={() => setStudentDashboardTab('modalidades')}
+              className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                studentDashboardTab === 'modalidades' ||
+                studentDashboardTab === 'mis_notas' ||
                 studentDashboardTab === 'diagnostico_pedagogico'
-                  ? 'bg-slate-900 text-white border-slate-900 shadow-sm ring-2 ring-indigo-500/40'
-                  : 'bg-slate-50/80 hover:bg-slate-100 text-slate-900 border-slate-200'
+                  ? 'text-slate-900 underline underline-offset-8 decoration-2'
+                  : 'hover:text-slate-900'
               }`}
             >
-              <div className="flex items-start justify-between gap-2">
-                <div className="flex items-center gap-2.5">
-                  <div
-                    className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
-                      studentDashboardTab === 'diagnostico_pedagogico'
-                        ? 'bg-indigo-500 text-white'
-                        : 'bg-indigo-100 text-indigo-800'
-                    }`}
-                  >
-                    <BarChart3 className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <div
-                      className={`text-[11px] font-mono font-bold uppercase ${
-                        studentDashboardTab === 'diagnostico_pedagogico'
-                          ? 'text-indigo-300'
-                          : 'text-indigo-700'
-                      }`}
-                    >
-                      Ventana 4
-                    </div>
-                    <div className="text-sm sm:text-base font-bold leading-tight">
-                      Diagnóstico y Temas
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div
-                className={`mt-3 pt-2 border-t text-xs flex items-center justify-between ${
-                  studentDashboardTab === 'diagnostico_pedagogico'
-                    ? 'border-slate-700 text-slate-200'
-                    : 'border-slate-200/80 text-slate-600'
-                }`}
-              >
-                <span>Módulos 1–5 y Nivel Bloom</span>
-                <span className="font-mono font-bold">Ver Avance →</span>
-              </div>
+              Exámenes ({completedExamsCount}/{modalitiesOverview.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setStudentDashboardTab('notas_asistencia_clases')}
+              className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                studentDashboardTab === 'notas_asistencia_clases'
+                  ? 'text-slate-900 underline underline-offset-8 decoration-2'
+                  : 'hover:text-slate-900'
+              }`}
+            >
+              Expediente y Notas
+            </button>
+          </nav>
+
+          {/* Zona 3: Acción Primaria Unificada (Perfil / Cuenta en Hoja Deslizable) */}
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                setProfileNameInput(currentStudent.nombre);
+                setProfileCodeInput(currentStudent.codigoAcceso);
+                setProfileSaveMsg(null);
+                setStudentBottomSheet('perfil');
+              }}
+              className="min-h-[44px] px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center gap-2 cursor-pointer active:scale-95 transition-transform whitespace-nowrap shrink-0"
+            >
+              <UserCheck className="w-4 h-4 text-sky-400 shrink-0" />
+              <span className="max-w-[140px] truncate">{currentStudent.nombre}</span>
             </button>
           </div>
-        </div>
+        </header>
+
+        {rollCallFeedbackBanner && (
+          <div className="bg-emerald-600 text-white rounded-2xl p-4 flex items-center justify-between gap-3 text-xs sm:text-sm font-bold">
+            <span>{rollCallFeedbackBanner}</span>
+            <button
+              type="button"
+              onClick={() => setRollCallFeedbackBanner(null)}
+              className="min-h-[44px] min-w-[44px] flex items-center justify-center text-emerald-100 hover:text-white cursor-pointer"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
+        {/* CENTRO DE ALERTAS FLOTANTE Y SONORO: LLAMADO VIRTUAL DE ASISTENCIA DEL DOCENTE */}
+        {activeRollCallClasses.length > 0 && (
+          <div className="bg-amber-50 border border-amber-400 rounded-2xl p-4 sm:p-5 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-200/80 pb-2">
+              <div className="text-xs font-extrabold text-amber-950">
+                Llamado de Asistencia en Curso ({activeRollCallClasses.length} sesión activa)
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => playRollCallChime()}
+                  className="min-h-[40px] px-3 py-1.5 rounded-lg bg-white border border-amber-300 text-amber-900 text-xs font-bold cursor-pointer hover:bg-amber-100 active:scale-95 transition-transform whitespace-nowrap"
+                >
+                  Probar Timbre
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRollCallSoundEnabled((prev) => !prev)}
+                  className={`min-h-[40px] px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer flex items-center gap-1.5 active:scale-95 transition-transform whitespace-nowrap ${
+                    rollCallSoundEnabled
+                      ? 'bg-amber-600 text-white'
+                      : 'bg-slate-200 text-slate-700'
+                  }`}
+                >
+                  <Volume2 className="w-3.5 h-3.5" />
+                  <span>{rollCallSoundEnabled ? 'Sonido Activo' : 'Silenciado'}</span>
+                </button>
+              </div>
+            </div>
+            {activeRollCallClasses.map((cId) => {
+              const csInfo = (studentClassSessions || []).find((s) => s.id === cId);
+              const cRec = currentStudentAcademicRecord.clases[cId];
+              const bloqueLabel =
+                cRec?.llamadoVirtualBloque === 'ambos' ||
+                (cRec?.asistenciaB1Estado === 'llamando' && cRec?.asistenciaB2Estado === 'llamando')
+                  ? 'Bloques A y B'
+                  : cRec?.llamadoVirtualBloque === 2 || cRec?.asistenciaB2Estado === 'llamando'
+                  ? 'Bloque B'
+                  : 'Bloque A';
+              const expMs = cRec?.llamadoVirtualExpiraAtIso
+                ? new Date(cRec.llamadoVirtualExpiraAtIso).getTime()
+                : 0;
+              const remSec =
+                expMs > rollCallNowMs ? Math.max(0, Math.floor((expMs - rollCallNowMs) / 1000)) : null;
+              const remFormatted =
+                remSec !== null
+                  ? `${String(Math.floor(remSec / 60)).padStart(2, '0')}:${String(remSec % 60).padStart(2, '0')}`
+                  : 'Activo';
+              const metodo = cRec?.llamadoVirtualMetodo || 'alerta_boton_panel';
+
+              return (
+                <div
+                  key={cId}
+                  className="bg-white border border-amber-300 rounded-xl p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-4"
+                >
+                  <div className="space-y-1">
+                    <div className="text-xs font-mono text-amber-900">
+                      <span>{csInfo?.code || `Clase C${cId}`}</span>
+                      <span aria-hidden="true"> · </span>
+                      <span>{bloqueLabel}</span>
+                      <span aria-hidden="true"> · </span>
+                      <span className="font-bold text-red-700 tabular-nums">
+                        Tiempo restante: {remFormatted}
+                      </span>
+                    </div>
+                    <h2 className="text-base font-bold text-slate-900">
+                      Confirmación de Asistencia Requerida — {csInfo?.shortTitle || `Clase ${cId}`}
+                    </h2>
+                    <p className="text-xs text-slate-600">
+                      Pulse el botón para registrar su asistencia inmediatamente en la consola del docente.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 shrink-0">
+                    {(metodo === 'codigo_unico_correo_whatsapp' ||
+                      metodo === 'palabra_clave_secreta') && (
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          value={rollCallCodeInputByClass[cId] || ''}
+                          onChange={(e) =>
+                            setRollCallCodeInputByClass((prev) => ({
+                              ...prev,
+                              [cId]: e.target.value.toUpperCase()
+                            }))
+                          }
+                          placeholder="Código PIN"
+                          className="w-32 min-h-[48px] px-3 py-2.5 rounded-xl border border-indigo-300 font-mono text-xs font-bold uppercase text-slate-900 bg-white"
+                        />
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleStudentRespondRollCall(cId, rollCallCodeInputByClass[cId] || '')
+                          }
+                          className="min-h-[48px] px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs cursor-pointer active:scale-95 transition-transform whitespace-nowrap"
+                        >
+                          Validar PIN
+                        </button>
+                      </div>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => handleStudentRespondRollCall(cId)}
+                      className="min-h-[48px] px-5 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm cursor-pointer active:scale-95 transition-transform flex items-center justify-center gap-2 whitespace-nowrap"
+                    >
+                      <span>Confirmar Presente ({csInfo?.code || `C${cId}`})</span>
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* ================= ESTRUCTURA HÍBRIDA DE 3 COLUMNAS EN DESKTOP + BENTO GRID / LECTURA LINEAL ================= */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          {/* COLUMNA 1 (IZQUIERDA FIJA EN DESKTOP): ÁRBOL DE CONTENIDOS Y LABORATORIOS/ENTREGAS */}
+          <aside className="hidden lg:block lg:col-span-3 bg-white border border-slate-200 rounded-2xl p-4 space-y-5 sticky top-4">
+            <div className="space-y-1 border-b border-slate-100 pb-3">
+              <div className="text-xs font-mono text-slate-500">
+                Código: {activeCourseMeta.codigoCurso || 'CURSO'} · {studentClassSessions.length} Módulos
+              </div>
+              <div className="text-sm font-bold text-slate-900">
+                Árbol de Contenidos
+              </div>
+            </div>
+
+            {/* Navegación Estructural del Curso */}
+            <div className="space-y-1">
+              <button
+                type="button"
+                onClick={handleGoHomeStudentPanel}
+                className={`w-full min-h-[44px] px-3 py-2 rounded-xl text-left text-xs font-semibold flex items-center justify-between cursor-pointer transition-colors ${
+                  studentDashboardTab === 'inicio'
+                    ? 'bg-slate-900 text-white'
+                    : 'text-slate-700 hover:bg-slate-100'
+                }`}
+              >
+                <span>Escritorio Principal (Bento)</span>
+                <LayoutGrid className="w-4 h-4 shrink-0" />
+              </button>
+
+              <div className="pt-2 pb-1 px-2 text-[11px] font-semibold text-slate-400">
+                Módulos y Lecciones
+              </div>
+              {studentClassSessions.map((cs) => {
+                const cId = cs.id as ClassSessionId;
+                const isSelected = selectedStepperClassId === cId;
+                const cRec = currentStudentAcademicRecord.clases[cId];
+                const isPresent =
+                  cRec?.asistenciaB1Estado === 'presente_virtual' ||
+                  cRec?.asistenciaB1Estado === 'presente_manual' ||
+                  cRec?.asistenciaB2Estado === 'presente_virtual' ||
+                  cRec?.asistenciaB2Estado === 'presente_manual';
+                return (
+                  <button
+                    key={cId}
+                    type="button"
+                    onClick={() => {
+                      setSelectedStepperClassId(cId);
+                      setSheetClassId(cId);
+                    }}
+                    className={`w-full min-h-[44px] px-3 py-2 rounded-xl text-left text-xs flex items-center justify-between gap-2 cursor-pointer transition-colors ${
+                      isSelected
+                        ? 'bg-sky-50 text-sky-950 font-bold border border-sky-200'
+                        : 'text-slate-700 hover:bg-slate-50'
+                    }`}
+                  >
+                    <span className="truncate">
+                      {cs.code} · {cs.shortTitle}
+                    </span>
+                    <span className="font-mono text-[11px] text-slate-500 shrink-0">
+                      {isPresent ? 'P' : '—'}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Accesos Directos a Laboratorios, Entregas y Evaluaciones */}
+            <div className="space-y-1.5 pt-3 border-t border-slate-100">
+              <div className="px-2 text-[11px] font-semibold text-slate-400">
+                Entregas y Evaluaciones
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setSheetClassId(selectedStepperClassId);
+                  const existingW =
+                    currentStudentAcademicRecord.clases[selectedStepperClassId];
+                  setSheetWorkText(existingW?.trabajoEntregaTexto || '');
+                  setSheetWorkLink(existingW?.trabajoEntregaEnlace || '');
+                  setSheetNotice(null);
+                  setStudentBottomSheet('entregar_trabajo');
+                }}
+                className="w-full min-h-[44px] px-3 py-2 rounded-xl text-left text-xs font-semibold text-slate-700 hover:bg-slate-100 flex items-center justify-between cursor-pointer"
+              >
+                <span>Entregar Trabajo Práctico</span>
+                <ArrowRight className="w-3.5 h-3.5 text-slate-400" />
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setSheetClassId(selectedStepperClassId);
+                  setSheetExcuseReason('');
+                  setSheetExcuseUrl('');
+                  setSheetNotice(null);
+                  setStudentBottomSheet('justificar_falla');
+                }}
+                className="w-full min-h-[44px] px-3 py-2 rounded-xl text-left text-xs font-semibold text-slate-700 hover:bg-slate-100 flex items-center justify-between cursor-pointer"
+              >
+                <span>Justificar Inasistencia</span>
+                <ArrowRight className="w-3.5 h-3.5 text-slate-400" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setStudentDashboardTab('material_modulos')}
+                className={`w-full min-h-[44px] px-3 py-2 rounded-xl text-left text-xs font-semibold flex items-center justify-between cursor-pointer ${
+                  studentDashboardTab === 'material_modulos'
+                    ? 'bg-emerald-50 text-emerald-900 font-bold'
+                    : 'text-slate-700 hover:bg-slate-100'
+                }`}
+              >
+                <span>Modo Lectura de Lecciones</span>
+                <BookOpen className="w-3.5 h-3.5 text-slate-400" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setStudentDashboardTab('notas_asistencia_clases')}
+                className={`w-full min-h-[44px] px-3 py-2 rounded-xl text-left text-xs font-semibold flex items-center justify-between cursor-pointer ${
+                  studentDashboardTab === 'notas_asistencia_clases'
+                    ? 'bg-indigo-50 text-indigo-900 font-bold'
+                    : 'text-slate-700 hover:bg-slate-100'
+                }`}
+              >
+                <span>Simulador y Boletín PDF</span>
+                <BarChart3 className="w-3.5 h-3.5 text-slate-400" />
+              </button>
+            </div>
+          </aside>
+
+          {/* COLUMNA 2 (ESPACIO CENTRAL): BENTO GRID EN INICIO / INTERFAZ LINEAL LIMPIA EN CONTENIDO */}
+          <div
+            className={
+              studentDashboardTab === 'inicio'
+                ? 'lg:col-span-6 space-y-5'
+                : 'lg:col-span-9 space-y-5'
+            }
+          >
+            {studentDashboardTab === 'inicio' ? (
+              <div className="space-y-5">
+                {/* BENTO GRID INTERACTIVO (ESTILO WEB OS / ANDROID LAUNCHER EN EL DASHBOARD) */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
+                  {/* WIDGET BENTO 2x2: MÓDULO ACTIVO Y ACCESO INMEDIATO A LECCIÓN LINEAL */}
+                  {(() => {
+                    const activeStepSession =
+                      studentClassSessions.find((s) => s.id === selectedStepperClassId) ||
+                      studentClassSessions[0];
+                    const stepId = (activeStepSession?.id || 1) as ClassSessionId;
+                    const stepRec = currentStudentAcademicRecord.clases[stepId];
+                    const stepExamMod: ExamModality =
+                      stepId <= 5 ? (`mod${stepId}` as ExamModality) : 'integral';
+                    const stepDocs = activeStepSession?.documentosEnlaces || [];
+
+                    return (
+                      <div className="col-span-2 sm:col-span-4 bg-white border border-slate-200 rounded-2xl p-5 space-y-4">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="text-xs text-slate-500 font-mono">
+                            <span>Módulo Activo</span>
+                            <span aria-hidden="true"> · </span>
+                            <span>{activeStepSession?.code || 'C1'}</span>
+                            <span aria-hidden="true"> · </span>
+                            <span>{stepDocs.length} recurso(s) de lectura</span>
+                          </div>
+                          {/* Selector táctil compacto de módulo (48x48px min) */}
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {studentClassSessions.map((cs) => {
+                              const cId = cs.id as ClassSessionId;
+                              const active = selectedStepperClassId === cId;
+                              return (
+                                <button
+                                  key={cId}
+                                  type="button"
+                                  onClick={() => setSelectedStepperClassId(cId)}
+                                  className={`min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-xl font-mono text-xs font-bold cursor-pointer active:scale-95 transition-transform ${
+                                    active
+                                      ? 'bg-slate-900 text-white'
+                                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                                  }`}
+                                >
+                                  {cs.code}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+
+                        <div className="space-y-1">
+                          <h1 className="text-lg sm:text-xl font-bold text-slate-900">
+                            {activeStepSession?.fullTitle || 'Módulo en Curso'}
+                          </h1>
+                          <p className="text-xs text-slate-600">
+                            Asistencia Hoy:{' '}
+                            <strong>
+                              {stepRec?.asistenciaB1Estado === 'presente_virtual' ||
+                              stepRec?.asistenciaB1Estado === 'presente_manual'
+                                ? 'Presente (Bloque A)'
+                                : stepRec?.asistenciaB1Estado === 'falla'
+                                ? 'Falla registrada'
+                                : 'Pendiente'}
+                            </strong>{' '}
+                            · Trabajo Práctico:{' '}
+                            <strong>
+                              {stepRec?.trabajoCalificado
+                                ? `${stepRec.trabajoPractico.toFixed(1)} / 5.0`
+                                : stepRec?.trabajoEstado === 'pendiente_revision'
+                                ? 'En revisión'
+                                : 'Sin entregar'}
+                            </strong>
+                          </p>
+                        </div>
+
+                        {/* Acciones Táctiles >= 48px del Módulo Actual */}
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-1">
+                          <button
+                            type="button"
+                            onClick={() => setStudentDashboardTab('material_modulos')}
+                            className="min-h-[48px] px-3 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 transition-transform whitespace-nowrap"
+                          >
+                            <BookOpen className="w-4 h-4 shrink-0" />
+                            <span>Leer Lección</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSheetClassId(stepId);
+                              setSheetWorkText(stepRec?.trabajoEntregaTexto || '');
+                              setSheetWorkLink(stepRec?.trabajoEntregaEnlace || '');
+                              setSheetNotice(null);
+                              setStudentBottomSheet('entregar_trabajo');
+                            }}
+                            className="min-h-[48px] px-3 py-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-900 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 transition-transform whitespace-nowrap"
+                          >
+                            <FileCheck2 className="w-4 h-4 text-sky-600 shrink-0" />
+                            <span>Entregar Trabajo</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (stepId <= 5) {
+                                setSelectedRetoModuloJump(stepId as 1 | 2 | 3 | 4 | 5);
+                              }
+                              setStudentDashboardTab('mini_retos');
+                            }}
+                            className="min-h-[48px] px-3 py-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-900 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 transition-transform whitespace-nowrap"
+                          >
+                            <Trophy className="w-4 h-4 text-amber-600 shrink-0" />
+                            <span>Mini Reto</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedModality(stepExamMod);
+                              setStudentDashboardTab('modalidades');
+                            }}
+                            className="min-h-[48px] px-3 py-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-900 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 transition-transform whitespace-nowrap"
+                          >
+                            <GraduationCap className="w-4 h-4 text-indigo-600 shrink-0" />
+                            <span>Examen {activeStepSession?.code}</span>
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* APP BENTO 1: LECCIONES Y MATERIAL DE ESTUDIO */}
+                  <button
+                    type="button"
+                    onClick={() => setStudentDashboardTab('material_modulos')}
+                    className="col-span-1 sm:col-span-2 min-h-[128px] p-4 rounded-2xl border border-slate-200 bg-white hover:border-slate-400 text-left flex flex-col justify-between cursor-pointer active:scale-[0.98] transition-all"
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="w-11 h-11 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center">
+                        <BookOpen className="w-5 h-5" />
+                      </div>
+                      <span className="text-xs font-mono text-slate-500 tabular-nums">
+                        {activeCourseMeta.cantidadModulos} módulos
+                      </span>
+                    </div>
+                    <div className="pt-3">
+                      <div className="text-sm font-bold text-slate-900">
+                        Lecciones y Material
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        Modo lectura lineal y descargas
+                      </div>
+                    </div>
+                  </button>
+
+                  {/* APP BENTO 2: EVALUACIONES OFICIALES */}
+                  <button
+                    type="button"
+                    onClick={() => setStudentDashboardTab('modalidades')}
+                    className="col-span-1 sm:col-span-2 min-h-[128px] p-4 rounded-2xl border border-slate-200 bg-white hover:border-slate-400 text-left flex flex-col justify-between cursor-pointer active:scale-[0.98] transition-all"
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="w-11 h-11 rounded-xl bg-sky-50 text-sky-700 flex items-center justify-center">
+                        <GraduationCap className="w-5 h-5" />
+                      </div>
+                      <span className="text-xs font-mono text-slate-500 tabular-nums">
+                        {completedExamsCount}/{modalitiesOverview.length} listos
+                      </span>
+                    </div>
+                    <div className="pt-3">
+                      <div className="text-sm font-bold text-slate-900">
+                        Exámenes Oficiales
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        Presentar examen o ensayo cero
+                      </div>
+                    </div>
+                  </button>
+
+                  {/* APP BENTO 3: MINI RETOS E INSIGNIAS */}
+                  <button
+                    type="button"
+                    onClick={() => setStudentDashboardTab('mini_retos')}
+                    className="col-span-1 sm:col-span-2 min-h-[128px] p-4 rounded-2xl border border-slate-200 bg-white hover:border-slate-400 text-left flex flex-col justify-between cursor-pointer active:scale-[0.98] transition-all"
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="w-11 h-11 rounded-xl bg-amber-50 text-amber-700 flex items-center justify-center">
+                        <Trophy className="w-5 h-5" />
+                      </div>
+                      <span className="text-xs font-mono text-slate-500 tabular-nums">
+                        {unlockedBadgesCount}/{totalCourseModulesCount} insignias
+                      </span>
+                    </div>
+                    <div className="pt-3">
+                      <div className="text-sm font-bold text-slate-900">
+                        Mini Retos e Insignias
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        Práctica gamificada por módulo
+                      </div>
+                    </div>
+                  </button>
+
+                  {/* APP BENTO 4: EXPEDIENTE, SIMULADOR DE NOTA Y BOLETÍN PDF */}
+                  <button
+                    type="button"
+                    onClick={() => setStudentDashboardTab('notas_asistencia_clases')}
+                    className="col-span-1 sm:col-span-2 min-h-[128px] p-4 rounded-2xl border border-slate-200 bg-white hover:border-slate-400 text-left flex flex-col justify-between cursor-pointer active:scale-[0.98] transition-all"
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="w-11 h-11 rounded-xl bg-indigo-50 text-indigo-700 flex items-center justify-center">
+                        <BarChart3 className="w-5 h-5" />
+                      </div>
+                      <span className="text-xs font-mono text-slate-500 tabular-nums">
+                        Máx: {studentBestOverallGrade.toFixed(1)} / 5.0
+                      </span>
+                    </div>
+                    <div className="pt-3">
+                      <div className="text-sm font-bold text-slate-900">
+                        Expediente y Simulador
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        Notas C1–C6, asistencia y PDF
+                      </div>
+                    </div>
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+        {/* ================= SUB-VISTA: MODIFICAR MIS DATOS ================= */}
+        {studentDashboardTab === 'modificar_datos' && (
+          <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-7 shadow-xs max-w-xl mx-auto space-y-5">
+            <div className="border-b border-slate-100 pb-4 space-y-1">
+              <span className="text-xs font-mono font-bold uppercase tracking-wider text-sky-700">
+                Perfil Personal del Estudiante
+              </span>
+              <h2 className="text-lg sm:text-xl font-bold text-slate-900">
+                Modificar Mis Datos
+              </h2>
+              <p className="text-xs text-slate-600">
+                Actualice su Nombre Completo y su Código de Acceso de Sesión. El número de documento (ID) es de solo lectura por seguridad institucional.
+              </p>
+            </div>
+
+            <form onSubmit={handleSaveStudentProfile} className="space-y-4 text-xs sm:text-sm">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1.5">
+                  ID de Estudiante (Documento — Solo Lectura)
+                </label>
+                <input
+                  type="text"
+                  disabled
+                  readOnly
+                  value={currentStudent.id}
+                  className="w-full min-h-[46px] px-4 py-2.5 rounded-xl border border-slate-200 bg-slate-100 text-slate-500 font-mono cursor-not-allowed"
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-800 mb-1.5">
+                  Nombre Completo del Estudiante
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={profileNameInput}
+                  onChange={(e) => setProfileNameInput(e.target.value)}
+                  className="w-full min-h-[46px] px-4 py-2.5 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-600"
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-800 mb-1.5">
+                  Código de Acceso de Sesión
+                </label>
+                <input
+                  type="text"
+                  required
+                  maxLength={12}
+                  value={profileCodeInput}
+                  onChange={(e) => setProfileCodeInput(e.target.value.toUpperCase())}
+                  className="w-full min-h-[46px] px-4 py-2.5 rounded-xl border border-slate-300 text-slate-900 font-mono uppercase focus:outline-none focus:ring-2 focus:ring-sky-600"
+                />
+              </div>
+
+              {profileSaveMsg && (
+                <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 font-semibold text-xs">
+                  {profileSaveMsg}
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center justify-end gap-2.5 pt-2">
+                <button
+                  type="button"
+                  onClick={handleGoHomeStudentPanel}
+                  className="min-h-[44px] px-4 py-2.5 rounded-xl border border-slate-300 font-bold text-slate-700 hover:bg-slate-50 cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="min-h-[44px] px-5 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-bold cursor-pointer shadow-2xs"
+                >
+                  Guardar Mis Datos
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+
+        {/* ================= SUB-VISTA: MATERIAL DE CADA MÓDULO / CLASE ================= */}
+        {studentDashboardTab === 'material_modulos' && (
+          <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 shadow-xs space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-4">
+              <div className="space-y-1">
+                <span className="text-xs font-mono font-bold uppercase tracking-wider text-emerald-700">
+                  Material de Estudio Oficial · {activeCourseMeta.nombreCurso}
+                </span>
+                <h2 className="text-lg sm:text-xl font-bold text-slate-900">
+                  Material de cada módulo/clase ({activeCourseMeta.cantidadModulos} Módulos)
+                </h2>
+                <p className="text-xs text-slate-600">
+                  Acceda y descargue los documentos de estudio de cada módulo y consulte la distribución porcentual de calificación.
+                </p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 text-xs">
+              {activeCourseMeta.modulosCurso.map((mod) => {
+                const w = mod.ponderacion || DEFAULT_MODULE_GRADING_WEIGHTS;
+                const docs =
+                  Array.isArray(mod.documentosEnlaces) && mod.documentosEnlaces.length > 0
+                    ? mod.documentosEnlaces
+                    : parseRawDocumentLinksToStructured(
+                        mod.enlacesTextoRaw || '',
+                        mod.id,
+                        mod.shortTitle
+                      );
+                return (
+                  <div
+                    key={mod.id}
+                    className="p-4 rounded-xl border border-slate-200 bg-slate-50/70 flex flex-col justify-between space-y-3"
+                  >
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-mono font-bold text-sky-800">
+                          Módulo {mod.id} ({mod.code})
+                        </span>
+                        <span className="font-mono text-[10px] font-bold text-slate-600">
+                          {mod.examenesCount ?? 1} Ex. · {mod.retosCount ?? 2} Retos
+                        </span>
+                      </div>
+                      <h4 className="font-bold text-slate-900 text-sm leading-snug">
+                        {mod.shortTitle}
+                      </h4>
+                      <div className="text-[11px] font-mono text-slate-600 bg-white px-2.5 py-1.5 rounded-lg border border-slate-200">
+                        Ponderación: Comp. <strong>{w.comportamientoPct}%</strong> · Sustent.{' '}
+                        <strong>{w.participacionPct}%</strong> · Examen{' '}
+                        <strong>{w.examenPct}%</strong> · Trabajo{' '}
+                        <strong>{w.trabajoPct}%</strong>
+                      </div>
+                    </div>
+
+                    <div className="pt-2.5 border-t border-slate-200/80">
+                      {docs.length > 0 ? (
+                        <div className="space-y-1.5">
+                          <div className="text-[10px] font-bold uppercase text-sky-900">
+                            📎 Documentos para Descargar ({docs.length}):
+                          </div>
+                          <div className="flex flex-col gap-1.5">
+                            {docs.map((doc) => (
+                              <a
+                                key={doc.id}
+                                href={doc.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                download
+                                className="min-h-[40px] px-3 py-2 rounded-lg bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs flex items-center justify-between gap-2 transition-colors"
+                              >
+                                <span className="truncate">{doc.titulo}</span>
+                                <span className="inline-flex items-center gap-1 text-[11px] font-mono shrink-0">
+                                  <Download className="w-3.5 h-3.5" />
+                                  <span>Descargar</span>
+                                </span>
+                              </a>
+                            ))}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="text-[11px] text-slate-500 italic">
+                          Sin documentos adjuntos en este módulo por el momento.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* ================= SUB-VISTA: MI VITRINA DE EXÁMENES (EXÁMENES, CERTIFICADOS Y DIAGNÓSTICO) ================= */}
+        {(studentDashboardTab === 'modalidades' ||
+          studentDashboardTab === 'mis_notas' ||
+          studentDashboardTab === 'diagnostico_pedagogico') && (
+          <div className="bg-white border border-slate-200 rounded-2xl p-3 sm:p-4 shadow-xs flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setStudentDashboardTab('modalidades')}
+                className={`min-h-[40px] px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors ${
+                  studentDashboardTab === 'modalidades'
+                    ? 'bg-slate-900 text-white'
+                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                }`}
+              >
+                <BookOpen className="w-3.5 h-3.5" />
+                <span>Exámenes ({completedExamsCount}/{modalitiesOverview.length})</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setStudentDashboardTab('mis_notas')}
+                className={`min-h-[40px] px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors ${
+                  studentDashboardTab === 'mis_notas'
+                    ? 'bg-emerald-700 text-white'
+                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                }`}
+              >
+                <Award className="w-3.5 h-3.5" />
+                <span>Mis Certificados y Entregas ({studentAttempts.length})</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setStudentDashboardTab('diagnostico_pedagogico')}
+                className={`min-h-[40px] px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors ${
+                  studentDashboardTab === 'diagnostico_pedagogico'
+                    ? 'bg-indigo-700 text-white'
+                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                }`}
+              >
+                <BarChart3 className="w-3.5 h-3.5" />
+                <span>Diagnóstico por Módulos</span>
+              </button>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setZeroTrialModalOpen(true)}
+              className="min-h-[40px] px-3.5 py-2 rounded-xl border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-950 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+            >
+              <PlayCircle className="w-3.5 h-3.5 text-emerald-700" />
+              <span>Prueba Cero (Ensayo Gratis)</span>
+            </button>
+          </div>
+        )}
 
         {/* ================= VENTANA 1: EXÁMENES DISPONIBLES Y ESTADO DE CADA EVALUACIÓN ================= */}
         {studentDashboardTab === 'modalidades' && (
@@ -2714,15 +3598,16 @@ export function StudentPortal({
                   <div className="flex items-center justify-between">
                     <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
                       <Trophy className="w-4 h-4 text-amber-600" />
-                      <span>Estado de Mis 5 Mini Retos IA</span>
+                      <span>Estado de Mis Mini Retos IA ({effectiveCourseBadgesOverview.length})</span>
                     </h3>
                     <span className="text-xs font-mono font-bold text-amber-900">
-                      🏅 {unlockedBadgesCount}/5 superados
+                      🏅 {unlockedBadgesCount}/{effectiveCourseBadgesOverview.length} superados
                     </span>
                   </div>
 
                   <div className="space-y-2">
-                    {([1, 2, 3, 4, 5] as const).map((modNum) => {
+                    {effectiveCourseBadgesOverview.map((badgeItem) => {
+                      const modNum = badgeItem.modulo;
                       const prog = currentStudent.progresoRetos?.[modNum];
                       const won = Boolean(prog?.insigniaDesbloqueada);
                       const used = Number(prog?.intentosUsados) || 0;
@@ -2736,7 +3621,7 @@ export function StudentPortal({
                         >
                           <div className="space-y-0.5">
                             <div className="font-bold text-slate-900">
-                              Mini Reto Semántico — Módulo {modNum}
+                              {badgeItem.icono} {badgeItem.shortCode || `M${badgeItem.realModuloId || modNum}`} — {badgeItem.tituloPrincipal}
                             </div>
                             <div className="text-slate-600 font-mono">
                               {won ? (
@@ -3080,6 +3965,44 @@ export function StudentPortal({
           </div>
         )}
 
+        {/* ================= VENTANA 5: FICHA PERSONAL DE NOTAS DE CLASE & ASISTENCIA (CLASES 1 A 6) ================= */}
+        {studentDashboardTab === 'notas_asistencia_clases' && (
+          <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 shadow-xs space-y-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
+              <div>
+                <span className="text-xs font-mono font-bold uppercase tracking-wider text-sky-700">
+                  Ficha Personal Oficial · Sincronizada con el Panel Docente
+                </span>
+                <h2 className="text-lg sm:text-xl font-bold text-slate-900">
+                  Mis Notas de Clase & Registro de Asistencia (Clases 1 a 6)
+                </h2>
+                <p className="text-xs text-slate-600">
+                  Consulte su promedio acumulado presencial, porcentaje de asistencia por bloques (B1/B2) y el desglose de sus 6 sesiones con observaciones del docente.
+                </p>
+              </div>
+              <div className="px-3.5 py-2 rounded-xl bg-sky-50 border border-sky-200 text-xs font-mono text-sky-950 shrink-0">
+                Alumno: <strong>{currentStudent.nombre}</strong> ({currentStudent.id})
+              </div>
+            </div>
+
+            <StudentPersonalAcademicFicha
+              summary={computeStudentAcademicSummary(
+                currentStudentAcademicRecord,
+                currentStudent,
+                studentAttempts,
+                studentClassSessions
+              )}
+              classSessions={studentClassSessions}
+              courseName={activeCourseMeta.nombreCurso}
+              editableByTeacher={false}
+              isStudentPortalView={true}
+              onStudentRespondRollCall={handleStudentRespondRollCall}
+              onStudentSubmitTrabajo={handleStudentSubmitWork}
+              onStudentSubmitExcusa={handleStudentSubmitExcusa}
+            />
+          </div>
+        )}
+
         {/* ================= VENTANA 2: ZONA DE MINI RETOS & INSIGNIAS (GAMIFICACIÓN CON IA) ================= */}
         {studentDashboardTab === 'mini_retos' && (
           <StudentMiniRetosZone
@@ -3099,61 +4022,407 @@ export function StudentPortal({
             }}
           />
         )}
+          </div>
 
-        {/* BARRA INFERIOR FIJA DE NAVEGACIÓN RÁPIDA EN MÓVIL (Botones Grandes Adaptados a Pantalla Móvil) */}
-        <div className="sm:hidden fixed bottom-0 left-0 right-0 z-30 bg-white border-t border-slate-200 px-2 py-1.5 grid grid-cols-4 gap-1.5 shadow-lg no-print">
-          <button
-            type="button"
-            onClick={() => setStudentDashboardTab('modalidades')}
-            className={`min-h-[50px] rounded-xl flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-colors cursor-pointer ${
-              studentDashboardTab === 'modalidades'
-                ? 'bg-slate-900 text-white'
-                : 'text-slate-700 hover:bg-slate-100'
-            }`}
-          >
-            <BookOpen className="w-4 h-4" />
-            <span>Exámenes</span>
-          </button>
+          {/* COLUMNA 3 (INSPECTOR CONTEXTUAL DERECHO EN DESKTOP): ESTADO EN VIVO Y ACCIONES RÁPIDAS */}
+          {studentDashboardTab === 'inicio' && (
+            <aside className="hidden lg:block lg:col-span-3 bg-white border border-slate-200 rounded-2xl p-5 space-y-5 sticky top-4">
+              <div className="space-y-1 border-b border-slate-100 pb-3">
+                <div className="text-xs font-mono text-slate-500">
+                  ID: {currentStudent.id}
+                </div>
+                <div className="text-sm font-bold text-slate-900 truncate">
+                  {currentStudent.nombre}
+                </div>
+              </div>
 
-          <button
-            type="button"
-            onClick={() => setStudentDashboardTab('mini_retos')}
-            className={`min-h-[50px] rounded-xl flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-colors cursor-pointer ${
-              studentDashboardTab === 'mini_retos'
-                ? 'bg-amber-500 text-slate-950'
-                : 'text-amber-900 bg-amber-50/70'
-            }`}
-          >
-            <Trophy className="w-4 h-4" />
-            <span>Retos ({unlockedBadgesCount}/5)</span>
-          </button>
+              <div className="space-y-3 text-xs">
+                <div className="flex items-center justify-between py-1.5 border-b border-slate-100">
+                  <span className="text-slate-500">Nota Más Alta</span>
+                  <span className="font-mono font-bold text-slate-900 tabular-nums">
+                    {studentBestOverallGrade.toFixed(1)} / 5.0
+                  </span>
+                </div>
+                <div className="flex items-center justify-between py-1.5 border-b border-slate-100">
+                  <span className="text-slate-500">Exámenes Realizados</span>
+                  <span className="font-mono font-bold text-slate-900 tabular-nums">
+                    {completedExamsCount} / {modalitiesOverview.length}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between py-1.5 border-b border-slate-100">
+                  <span className="text-slate-500">Insignias Ganadas</span>
+                  <span className="font-mono font-bold text-slate-900 tabular-nums">
+                    {unlockedBadgesCount} / {totalCourseModulesCount}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between py-1.5">
+                  <span className="text-slate-500">Mínimo Aprobatorio</span>
+                  <span className="font-mono font-bold text-slate-900 tabular-nums">
+                    {minPass.toFixed(1)} / 5.0
+                  </span>
+                </div>
+              </div>
 
-          <button
-            type="button"
-            onClick={() => setStudentDashboardTab('mis_notas')}
-            className={`min-h-[50px] rounded-xl flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-colors cursor-pointer ${
-              studentDashboardTab === 'mis_notas'
-                ? 'bg-slate-900 text-white'
-                : 'text-slate-700 hover:bg-slate-100'
-            }`}
-          >
-            <Award className="w-4 h-4" />
-            <span>Mis Notas</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setStudentDashboardTab('diagnostico_pedagogico')}
-            className={`min-h-[50px] rounded-xl flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-colors cursor-pointer ${
-              studentDashboardTab === 'diagnostico_pedagogico'
-                ? 'bg-slate-900 text-white'
-                : 'text-slate-700 hover:bg-slate-100'
-            }`}
-          >
-            <BarChart3 className="w-4 h-4" />
-            <span>Avance</span>
-          </button>
+              <div className="space-y-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSheetClassId(selectedStepperClassId);
+                    const existingW =
+                      currentStudentAcademicRecord.clases[selectedStepperClassId];
+                    setSheetWorkText(existingW?.trabajoEntregaTexto || '');
+                    setSheetWorkLink(existingW?.trabajoEntregaEnlace || '');
+                    setSheetNotice(null);
+                    setStudentBottomSheet('entregar_trabajo');
+                  }}
+                  className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold cursor-pointer active:scale-95 transition-transform"
+                >
+                  Entregar Trabajo Práctico
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSheetClassId(selectedStepperClassId);
+                    setSheetExcuseReason('');
+                    setSheetExcuseUrl('');
+                    setSheetNotice(null);
+                    setStudentBottomSheet('justificar_falla');
+                  }}
+                  className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 text-xs font-bold cursor-pointer active:scale-95 transition-transform"
+                >
+                  Solicitar Excusa de Falla
+                </button>
+              </div>
+            </aside>
+          )}
         </div>
+
+        {/* BOTTOM SHEETS DESLIZABLES (HOJAS INFERIORES TÁCTILES PARA ENTREGA DE TRABAJO, EXCUSA Y PERFIL) */}
+        {studentBottomSheet !== 'none' && (
+          <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
+            <div className="bg-white border border-slate-200 rounded-t-3xl sm:rounded-2xl max-w-lg w-full p-5 sm:p-6 space-y-4 max-h-[90vh] overflow-y-auto shadow-2xl">
+              {/* Grab Handle Táctil */}
+              <div className="w-10 h-1.5 bg-slate-300 rounded-full mx-auto sm:hidden" />
+
+              {studentBottomSheet === 'entregar_trabajo' && (
+                <div className="space-y-4 text-xs">
+                  <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                    <div>
+                      <h3 className="text-base font-bold text-slate-900">
+                        Entrega Rápida de Trabajo Práctico
+                      </h3>
+                      <p className="text-slate-500">
+                        Envíe su resumen o enlace de repositorio/documento directamente al docente.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setStudentBottomSheet('none')}
+                      className="min-h-[44px] min-w-[44px] flex items-center justify-center text-slate-400 hover:text-slate-800 font-bold cursor-pointer"
+                    >
+                      ✕
+                    </button>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="block font-bold text-slate-800">
+                      Seleccione Módulo / Clase:
+                    </label>
+                    <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5">
+                      {studentClassSessions.map((cs) => {
+                        const cId = cs.id as ClassSessionId;
+                        const active = sheetClassId === cId;
+                        return (
+                          <button
+                            key={cId}
+                            type="button"
+                            onClick={() => {
+                              setSheetClassId(cId);
+                              const existing = currentStudentAcademicRecord.clases[cId];
+                              setSheetWorkText(existing?.trabajoEntregaTexto || '');
+                              setSheetWorkLink(existing?.trabajoEntregaEnlace || '');
+                            }}
+                            className={`min-h-[48px] rounded-xl font-mono text-xs font-bold cursor-pointer active:scale-95 transition-transform ${
+                              active
+                                ? 'bg-slate-900 text-white'
+                                : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                            }`}
+                          >
+                            {cs.code}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="block font-bold text-slate-800">
+                      Descripción o Resumen del Trabajo Entregado:
+                    </label>
+                    <textarea
+                      rows={3}
+                      value={sheetWorkText}
+                      onChange={(e) => setSheetWorkText(e.target.value)}
+                      placeholder="Describa su entrega, hallazgos o respuesta práctica..."
+                      className="w-full p-3 rounded-xl border border-slate-300 text-slate-900 text-xs"
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="block font-bold text-slate-800">
+                      Enlace Adjunto (Google Drive, GitHub, Canva, PDF — Opcional):
+                    </label>
+                    <input
+                      type="url"
+                      value={sheetWorkLink}
+                      onChange={(e) => setSheetWorkLink(e.target.value)}
+                      placeholder="https://..."
+                      className="w-full min-h-[48px] px-3.5 py-2.5 rounded-xl border border-slate-300 font-mono text-slate-900 text-xs"
+                    />
+                  </div>
+
+                  {sheetNotice && (
+                    <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 font-bold">
+                      {sheetNotice}
+                    </div>
+                  )}
+
+                  <div className="flex items-center justify-end gap-2 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => setStudentBottomSheet('none')}
+                      className="min-h-[48px] px-4 py-2.5 rounded-xl border border-slate-300 text-slate-700 font-bold cursor-pointer"
+                    >
+                      Cerrar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!sheetWorkText.trim() && !sheetWorkLink.trim()) return;
+                        handleStudentSubmitWork(
+                          sheetClassId,
+                          sheetWorkText.trim() || 'Entrega adjunta por enlace',
+                          sheetWorkLink.trim()
+                        );
+                        setSheetNotice(
+                          `✓ Trabajo de la Clase C${sheetClassId} enviado a revisión docente.`
+                        );
+                        setTimeout(() => setStudentBottomSheet('none'), 1200);
+                      }}
+                      className="min-h-[48px] px-5 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-bold cursor-pointer active:scale-95 transition-transform"
+                    >
+                      Enviar Entrega Ahora
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {studentBottomSheet === 'justificar_falla' && (
+                <div className="space-y-4 text-xs">
+                  <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                    <div>
+                      <h3 className="text-base font-bold text-slate-900">
+                        Solicitud de Excusa / Justificación de Inasistencia
+                      </h3>
+                      <p className="text-slate-500">
+                        Se enviará como pendiente de revisión a la consola del docente.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setStudentBottomSheet('none')}
+                      className="min-h-[44px] min-w-[44px] flex items-center justify-center text-slate-400 hover:text-slate-800 font-bold cursor-pointer"
+                    >
+                      ✕
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block font-bold text-slate-800 mb-1">
+                        Clase / Módulo:
+                      </label>
+                      <select
+                        value={sheetClassId}
+                        onChange={(e) =>
+                          setSheetClassId(Number(e.target.value) as ClassSessionId)
+                        }
+                        className="w-full min-h-[48px] px-3 py-2 rounded-xl border border-slate-300 bg-white font-bold text-slate-900"
+                      >
+                        {studentClassSessions.map((cs) => (
+                          <option key={cs.id} value={cs.id}>
+                            {cs.code} — {cs.shortTitle}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block font-bold text-slate-800 mb-1">
+                        Bloque de Falla:
+                      </label>
+                      <select
+                        value={sheetExcuseBlock}
+                        onChange={(e) =>
+                          setSheetExcuseBlock(e.target.value as 'A' | 'B' | 'AB')
+                        }
+                        className="w-full min-h-[48px] px-3 py-2 rounded-xl border border-slate-300 bg-white font-bold text-slate-900"
+                      >
+                        <option value="A">Bloque A (B1)</option>
+                        <option value="B">Bloque B (B2)</option>
+                        <option value="AB">Ambos Bloques (A y B)</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block font-bold text-slate-800 mb-1">
+                      Motivo Médico / Laboral / Institucional:
+                    </label>
+                    <textarea
+                      rows={3}
+                      value={sheetExcuseReason}
+                      onChange={(e) => setSheetExcuseReason(e.target.value)}
+                      placeholder="Explique brevemente la razón de la inasistencia..."
+                      className="w-full p-3 rounded-xl border border-slate-300 text-slate-900"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block font-bold text-slate-800 mb-1">
+                      Enlace al Soporte o Certificado (Opcional):
+                    </label>
+                    <input
+                      type="url"
+                      value={sheetExcuseUrl}
+                      onChange={(e) => setSheetExcuseUrl(e.target.value)}
+                      placeholder="https://drive.google.com/..."
+                      className="w-full min-h-[48px] px-3.5 py-2 rounded-xl border border-slate-300 font-mono text-slate-900"
+                    />
+                  </div>
+
+                  {sheetNotice && (
+                    <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 font-bold">
+                      {sheetNotice}
+                    </div>
+                  )}
+
+                  <div className="flex justify-end gap-2 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => setStudentBottomSheet('none')}
+                      className="min-h-[48px] px-4 py-2.5 rounded-xl border border-slate-300 text-slate-700 font-bold cursor-pointer"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!sheetExcuseReason.trim()) return;
+                        handleStudentSubmitExcusa(
+                          sheetClassId,
+                          sheetExcuseBlock,
+                          sheetExcuseReason.trim(),
+                          sheetExcuseUrl.trim()
+                        );
+                        setSheetNotice('✓ Solicitud de justificación enviada al docente.');
+                        setTimeout(() => setStudentBottomSheet('none'), 1200);
+                      }}
+                      className="min-h-[48px] px-5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold cursor-pointer active:scale-95 transition-transform"
+                    >
+                      Radicar Excusa
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {studentBottomSheet === 'perfil' && (
+                <div className="space-y-4 text-xs">
+                  <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                    <div>
+                      <h3 className="text-base font-bold text-slate-900">
+                        Cuenta y Credenciales del Estudiante
+                      </h3>
+                      <p className="text-slate-500 font-mono">
+                        Documento / ID: {currentStudent.id}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setStudentBottomSheet('none')}
+                      className="min-h-[44px] min-w-[44px] flex items-center justify-center text-slate-400 hover:text-slate-800 font-bold cursor-pointer"
+                    >
+                      ✕
+                    </button>
+                  </div>
+
+                  <form onSubmit={handleSaveStudentProfile} className="space-y-3">
+                    <div>
+                      <label className="block font-bold text-slate-800 mb-1">
+                        Nombre Completo:
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={profileNameInput}
+                        onChange={(e) => setProfileNameInput(e.target.value)}
+                        className="w-full min-h-[48px] px-3.5 py-2 rounded-xl border border-slate-300 text-slate-900 font-semibold"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-bold text-slate-800 mb-1">
+                        Código de Acceso Personal:
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        maxLength={12}
+                        value={profileCodeInput}
+                        onChange={(e) => setProfileCodeInput(e.target.value.toUpperCase())}
+                        className="w-full min-h-[48px] px-3.5 py-2 rounded-xl border border-slate-300 font-mono uppercase text-slate-900 font-bold"
+                      />
+                    </div>
+                    {profileSaveMsg && (
+                      <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 font-semibold">
+                        {profileSaveMsg}
+                      </div>
+                    )}
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (currentStudent) {
+                            onUpdateLiveSession(null, currentStudent.id);
+                          }
+                          logoutStudent();
+                          setVerifiedStudentId(null);
+                          setDocIdInput('');
+                          setAccessCodeInput('');
+                          setClassroomPinInput('');
+                          setThirdAttemptBlockedModal(null);
+                          setTabHistory([]);
+                          setStudentBottomSheet('none');
+                          setExamPhase('login');
+                          onGoToInitialHome?.();
+                        }}
+                        className="min-h-[48px] px-4 py-2.5 rounded-xl border border-red-200 bg-red-50 hover:bg-red-100 text-red-700 font-bold flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <RotateCcw className="w-4 h-4" />
+                        <span>Cerrar Sesión</span>
+                      </button>
+
+                      <button
+                        type="submit"
+                        className="min-h-[48px] px-5 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-bold cursor-pointer active:scale-95 transition-transform"
+                      >
+                        Guardar Cambios
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* MODAL: MODIFICAR DATOS DEL ESTUDIANTE (ID SOLO LECTURA, NOMBRE Y CÓDIGO EDITABLES) */}
         {editProfileModalOpen && (
@@ -3292,6 +4561,95 @@ export function StudentPortal({
         {zeroTrialModalOpen && (
           <ZeroTrialSimulatorModal onClose={() => setZeroTrialModalOpen(false)} />
         )}
+
+        {/* DOCK INFERIOR PERSISTENTE ESTILO OS TÁCTIL (AL ALCANCE DEL PULGAR, HITBOX >= 48x48px) */}
+        <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200 px-2 py-1.5 grid grid-cols-5 gap-1 shadow-lg no-print">
+          <button
+            type="button"
+            onClick={handleGoHomeStudentPanel}
+            className={`min-h-[48px] rounded-xl text-[10px] font-bold flex flex-col items-center justify-center gap-0.5 cursor-pointer active:scale-95 transition-transform ${
+              studentDashboardTab === 'inicio'
+                ? 'bg-slate-900 text-white'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <LayoutGrid className="w-4 h-4" />
+            <span className="whitespace-nowrap">Inicio OS</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setStudentDashboardTab('material_modulos')}
+            className={`min-h-[48px] rounded-xl text-[10px] font-bold flex flex-col items-center justify-center gap-0.5 cursor-pointer active:scale-95 transition-transform ${
+              studentDashboardTab === 'material_modulos'
+                ? 'bg-emerald-600 text-white'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <BookOpen className="w-4 h-4" />
+            <span className="whitespace-nowrap">Lecciones</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              if (activeRollCallClasses.length > 0) {
+                handleStudentRespondRollCall(activeRollCallClasses[0]);
+              } else {
+                setSheetClassId(selectedStepperClassId);
+                const existingW =
+                  currentStudentAcademicRecord.clases[selectedStepperClassId];
+                setSheetWorkText(existingW?.trabajoEntregaTexto || '');
+                setSheetWorkLink(existingW?.trabajoEntregaEnlace || '');
+                setSheetNotice(null);
+                setStudentBottomSheet('entregar_trabajo');
+              }
+            }}
+            className={`min-h-[48px] rounded-xl text-[10px] font-bold flex flex-col items-center justify-center gap-0.5 cursor-pointer active:scale-95 transition-transform ${
+              activeRollCallClasses.length > 0
+                ? 'bg-emerald-600 text-white'
+                : studentBottomSheet === 'entregar_trabajo'
+                ? 'bg-sky-600 text-white'
+                : 'bg-slate-100 text-slate-900'
+            }`}
+          >
+            <FileCheck2 className="w-4 h-4" />
+            <span className="whitespace-nowrap">
+              {activeRollCallClasses.length > 0 ? 'Presente' : 'Entregar'}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() =>
+              setStudentDashboardTab(
+                studentDashboardTab === 'modalidades' ? 'mini_retos' : 'modalidades'
+              )
+            }
+            className={`min-h-[48px] rounded-xl text-[10px] font-bold flex flex-col items-center justify-center gap-0.5 cursor-pointer active:scale-95 transition-transform ${
+              studentDashboardTab === 'mini_retos' || studentDashboardTab === 'modalidades'
+                ? 'bg-amber-500 text-slate-950'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <Trophy className="w-4 h-4" />
+            <span className="whitespace-nowrap">Evaluar</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setStudentDashboardTab('notas_asistencia_clases')}
+            className={`min-h-[48px] rounded-xl text-[10px] font-bold flex flex-col items-center justify-center gap-0.5 cursor-pointer active:scale-95 transition-transform ${
+              studentDashboardTab === 'notas_asistencia_clases' ||
+              studentDashboardTab === 'mis_notas'
+                ? 'bg-indigo-600 text-white'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <BarChart3 className="w-4 h-4" />
+            <span className="whitespace-nowrap">Notas</span>
+          </button>
+        </nav>
       </div>
     );
   }
@@ -3359,6 +4717,35 @@ export function StudentPortal({
           duaWarmPaper ? 'bg-amber-50/40 rounded-2xl' : ''
         }`}
       >
+        {/* ALERTA EN TIEMPO REAL DURANTE EXAMEN: LLAMADO DE ASISTENCIA DEL DOCENTE */}
+        {activeRollCallClasses.length > 0 && (
+          <div className="bg-amber-50 border-2 border-amber-400 rounded-2xl p-4 shadow-md flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="space-y-0.5">
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-500 text-slate-950 font-mono text-[10px] font-extrabold uppercase animate-pulse">
+                📡 Llamado de Asistencia en Vivo
+              </span>
+              <div className="text-xs sm:text-sm font-extrabold text-amber-950">
+                El docente está llamando a lista ahora. Confirme su asistencia sin salir de su evaluación:
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              {activeRollCallClasses.map((cId) => {
+                const csInfo = (studentClassSessions || []).find((s) => s.id === cId);
+                return (
+                  <button
+                    key={cId}
+                    type="button"
+                    onClick={() => handleStudentRespondRollCall(cId)}
+                    className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs cursor-pointer shadow-xs"
+                  >
+                    🙋‍♂️ Responder Presente ({csInfo?.code || `C${cId}`})
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {/* Top Sticky Status & Chromatic Timer Bar */}
         <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
           <div className="space-y-0.5">
@@ -4012,6 +5399,34 @@ export function StudentPortal({
 
     return (
       <div className="max-w-4xl mx-auto px-4 py-8 space-y-6">
+        {/* Barra Superior de Navegación (Regresar e Ir al Inicio del Panel del Estudiante) */}
+        <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 no-print">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <button
+              type="button"
+              onClick={handleGoBackStudentTab}
+              className="min-h-[44px] px-4 py-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs sm:text-sm font-bold flex items-center gap-2 cursor-pointer transition-colors shadow-2xs"
+            >
+              <ArrowLeft className="w-4 h-4 shrink-0" />
+              <span>Regresar</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleGoHomeStudentPanel}
+              className="min-h-[44px] px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs sm:text-sm font-bold flex items-center gap-2 cursor-pointer transition-colors shadow-2xs"
+            >
+              <LayoutGrid className="w-4 h-4 shrink-0" />
+              <span>Ir al inicio del panel del estudiante</span>
+            </button>
+          </div>
+
+          <div className="text-left sm:text-right text-xs">
+            <div className="font-bold text-slate-900 text-sm">{currentStudent.nombre}</div>
+            <div className="font-mono text-slate-500">ID: {currentStudent.id}</div>
+          </div>
+        </div>
+
         {/* Printable Official Certificate Card */}
         <div className="bg-white border border-slate-200 rounded-2xl p-6 sm:p-8 shadow-xs space-y-6">
           {isSuspended && (

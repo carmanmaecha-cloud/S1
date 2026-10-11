@@ -1,21 +1,30 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { ExamModality } from '../types';
 
-export type ActiveAppRoleView = 'estudiante' | 'docente';
+export type ActiveAppRoleView = 'inicio' | 'estudiante' | 'docente' | 'editor';
 export type StudentDashboardTabType =
+  | 'inicio'
+  | 'modificar_datos'
+  | 'material_modulos'
   | 'modalidades'
   | 'mis_notas'
+  | 'notas_asistencia_clases'
   | 'diagnostico_pedagogico'
   | 'mini_retos';
 
 export type TeacherTabType =
+  | 'panel_central'
+  | 'resumen_academico'
   | 'monitor_vivo'
   | 'estudiantes'
   | 'calificaciones'
+  | 'gestion_academica_clases'
+  | 'gestor_examenes'
   | 'estadisticas_grupo'
   | 'mini_retos'
   | 'consolidado_abpro'
   | 'diagnostico'
+  | 'diagnostico_sistema'
   | 'banco_preguntas'
   | 'integraciones'
   | 'seguridad_correo';
@@ -30,21 +39,25 @@ export interface PersistedAuthSessionState {
   teacherSessionActive: boolean;
   teacherAuthenticatedId: string | null;
   teacherActiveTab: TeacherTabType;
+  editorSessionActive?: boolean;
+  editorAuthenticatedId?: string | null;
   lastActivityIso: string;
 }
 
 const AUTH_SESSION_STORAGE_KEY = 'evaluaplus_global_auth_session_v1';
 
 const DEFAULT_AUTH_STATE: PersistedAuthSessionState = {
-  activeView: 'estudiante',
+  activeView: 'inicio',
   studentSessionActive: false,
   verifiedStudentId: null,
-  studentDashboardTab: 'modalidades',
+  studentDashboardTab: 'inicio',
   selectedModality: 'integral',
   studentExamPhase: 'login',
   teacherSessionActive: false,
   teacherAuthenticatedId: null,
-  teacherActiveTab: 'estudiantes',
+  teacherActiveTab: 'panel_central',
+  editorSessionActive: false,
+  editorAuthenticatedId: null,
   lastActivityIso: new Date().toISOString()
 };
 
@@ -124,6 +137,8 @@ interface AuthContextValue {
   loginTeacher: (teacherId: string) => void;
   logoutTeacher: () => void;
   setTeacherActiveTab: (tab: TeacherTabType) => void;
+  loginEditor: (editorId: string) => void;
+  logoutEditor: () => void;
   logoutAll: () => void;
 }
 
@@ -133,6 +148,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [authState, setAuthState] = useState<PersistedAuthSessionState>(() => {
     const loaded = sessionStorageWrapper.read();
     // Ensure consistent view with active session on page reload
+    if (loaded.editorSessionActive) {
+      return { ...loaded, activeView: 'editor' };
+    }
     if (loaded.teacherSessionActive) {
       return { ...loaded, activeView: 'docente' };
     }
@@ -166,9 +184,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         activeView: 'estudiante',
         studentSessionActive: true,
         verifiedStudentId: studentId,
+        studentDashboardTab: 'inicio',
         studentExamPhase: 'modality_select',
         teacherSessionActive: false,
         teacherAuthenticatedId: null,
+        editorSessionActive: false,
+        editorAuthenticatedId: null,
         lastActivityIso: new Date().toISOString()
       };
       sessionStorageWrapper.write(next);
@@ -228,9 +249,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         activeView: 'docente',
         teacherSessionActive: true,
         teacherAuthenticatedId: teacherId,
+        teacherActiveTab: 'panel_central',
         studentSessionActive: false,
         verifiedStudentId: null,
         studentExamPhase: 'login',
+        editorSessionActive: false,
+        editorAuthenticatedId: null,
         lastActivityIso: new Date().toISOString()
       };
       sessionStorageWrapper.write(next);
@@ -259,12 +283,44 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
+  const loginEditor = useCallback((editorId: string) => {
+    setAuthState((prev) => {
+      const next: PersistedAuthSessionState = {
+        ...prev,
+        activeView: 'editor',
+        editorSessionActive: true,
+        editorAuthenticatedId: editorId,
+        teacherSessionActive: false,
+        teacherAuthenticatedId: null,
+        studentSessionActive: false,
+        verifiedStudentId: null,
+        studentExamPhase: 'login',
+        lastActivityIso: new Date().toISOString()
+      };
+      sessionStorageWrapper.write(next);
+      return next;
+    });
+  }, []);
+
+  const logoutEditor = useCallback(() => {
+    setAuthState((prev) => {
+      const next: PersistedAuthSessionState = {
+        ...prev,
+        editorSessionActive: false,
+        editorAuthenticatedId: null,
+        lastActivityIso: new Date().toISOString()
+      };
+      sessionStorageWrapper.write(next);
+      return next;
+    });
+  }, []);
+
   const logoutAll = useCallback(() => {
     sessionStorageWrapper.clear();
-    setAuthState((prev) => ({
+    setAuthState({
       ...DEFAULT_AUTH_STATE,
-      activeView: prev.activeView
-    }));
+      activeView: 'inicio'
+    });
   }, []);
 
   return (
@@ -280,6 +336,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         loginTeacher,
         logoutTeacher,
         setTeacherActiveTab,
+        loginEditor,
+        logoutEditor,
         logoutAll
       }}
     >

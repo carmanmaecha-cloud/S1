@@ -6,6 +6,7 @@ import {
   BloomLevel,
   ABProProjectEvaluation
 } from '../types';
+import { AcademicDataset, ClassSessionId } from '../data/classAttendanceAndGrades';
 import { OptionServerSaveBar } from './ServerSaveContext';
 import {
   ResponsiveContainer,
@@ -43,6 +44,7 @@ interface TeacherGroupStatisticsViewProps {
   attempts: ExamAttemptResult[];
   abproEvaluations: ABProProjectEvaluation[];
   config: SystemConfig;
+  academicDataset?: AcademicDataset;
 }
 
 const COMPETENCY_COLORS = {
@@ -57,7 +59,8 @@ export function TeacherGroupStatisticsView({
   students,
   attempts,
   abproEvaluations,
-  config
+  config,
+  academicDataset
 }: TeacherGroupStatisticsViewProps) {
   const minPassing = Number(config.notaMinimaAprobacion) || 3.0;
 
@@ -449,6 +452,207 @@ export function TeacherGroupStatisticsView({
           </div>
         </div>
       </div>
+
+      {/* COMPARATIVA HISTÓRICA ENTRE CORTES / CLASES CON INDICADORES DE TENDENCIA (▲ SUBIÓ / ▼ BAJÓ) */}
+      {(() => {
+        const activeClasses =
+          Array.isArray(academicDataset?.classSessions) &&
+          academicDataset!.classSessions.length > 0
+            ? academicDataset!.classSessions
+            : [
+                { id: 1 as ClassSessionId, code: 'C1', shortTitle: 'Módulo / Clase 1' },
+                { id: 2 as ClassSessionId, code: 'C2', shortTitle: 'Módulo / Clase 2' },
+                { id: 3 as ClassSessionId, code: 'C3', shortTitle: 'Módulo / Clase 3' },
+                { id: 4 as ClassSessionId, code: 'C4', shortTitle: 'Módulo / Clase 4' },
+                { id: 5 as ClassSessionId, code: 'C5', shortTitle: 'Módulo / Clase 5' }
+              ];
+
+        const recs = Array.isArray(academicDataset?.records) ? academicDataset!.records : [];
+        const totalRecs = Math.max(1, recs.length || students.length);
+
+        const classTrends = activeClasses.map((cs, idx) => {
+          // Asistencia % en esta clase
+          let attendedCount = 0;
+          let sumWorkGrade = 0;
+          let gradedCount = 0;
+
+          if (recs.length > 0) {
+            recs.forEach((r) => {
+              const c = r.clases?.[cs.id];
+              const b1Fall = c?.asistenciaB1Estado === 'falla';
+              const b2Fall = c?.asistenciaB2Estado === 'falla';
+              if (!b1Fall && !b2Fall) attendedCount += 1;
+              if (c && Number(c.trabajoNota) > 0) {
+                sumWorkGrade += Number(c.trabajoNota);
+                gradedCount += 1;
+              }
+            });
+          } else {
+            // Fallback from moduleProgressData
+            const modProg = moduleProgressData[idx];
+            attendedCount = Math.round(((modProg?.['Dominio Examen (%)'] || 75) / 100) * totalRecs);
+          }
+
+          const attendancePct =
+            recs.length > 0
+              ? Math.round((attendedCount / totalRecs) * 100)
+              : moduleProgressData[idx]?.['Dominio Examen (%)'] || 0;
+
+          const avgClassGrade =
+            gradedCount > 0
+              ? Number((sumWorkGrade / gradedCount).toFixed(1))
+              : Number((((moduleProgressData[idx]?.['Dominio Examen (%)'] || 70) / 100) * 5).toFixed(1));
+
+          const participationPct = Math.round(
+            attendancePct * 0.65 + (gradedCount > 0 ? (gradedCount / totalRecs) * 100 : attendancePct) * 0.35
+          );
+
+          return {
+            id: cs.id,
+            code: cs.code || `C${cs.id}`,
+            title: cs.shortTitle || `Clase ${cs.id}`,
+            attendancePct,
+            avgClassGrade,
+            participationPct
+          };
+        });
+
+        const enrichedTrends = classTrends.map((curr, idx) => {
+          const prev = idx > 0 ? classTrends[idx - 1] : null;
+          const diffAttendance = prev ? curr.attendancePct - prev.attendancePct : 0;
+          const diffParticipation = prev ? curr.participationPct - prev.participationPct : 0;
+          const diffGrade = prev ? Number((curr.avgClassGrade - prev.avgClassGrade).toFixed(1)) : 0;
+          return {
+            ...curr,
+            hasPrev: Boolean(prev),
+            prevCode: prev?.code || '',
+            diffAttendance,
+            diffParticipation,
+            diffGrade
+          };
+        });
+
+        const latestWithPrev =
+          enrichedTrends.length > 1
+            ? enrichedTrends[enrichedTrends.length - 1]
+            : enrichedTrends[0];
+
+        return (
+          <div className="bg-white border-2 border-indigo-200 rounded-2xl p-5 shadow-xs space-y-4">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-slate-100 pb-3">
+              <div className="space-y-1">
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-indigo-100 text-indigo-900 font-mono text-[10px] font-extrabold uppercase">
+                  <span>📈 Comparativa Histórica entre Cortes / Clases</span>
+                </div>
+                <h3 className="text-base font-extrabold text-slate-900">
+                  Evolución y Tendencia de Participación, Asistencia y Nota Promedio entre Clases (C1 a C{activeClasses.length})
+                </h3>
+                <p className="text-xs text-slate-600">
+                  Indicadores automáticos de variación porcentual (<strong>▲ Subió</strong> / <strong>▼ Bajó</strong> respecto a la jornada anterior) para identificar si la participación del grupo está mejorando o decayendo.
+                </p>
+              </div>
+              {latestWithPrev && latestWithPrev.hasPrev && (
+                <div
+                  className={`px-3.5 py-2 rounded-xl border font-mono text-xs font-extrabold shrink-0 ${
+                    latestWithPrev.diffParticipation >= 0
+                      ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
+                      : 'bg-rose-50 border-rose-300 text-rose-900'
+                  }`}
+                >
+                  {latestWithPrev.diffParticipation > 0
+                    ? `▲ Subió +${latestWithPrev.diffParticipation}% en ${latestWithPrev.code} vs ${latestWithPrev.prevCode}`
+                    : latestWithPrev.diffParticipation < 0
+                    ? `▼ Bajó ${latestWithPrev.diffParticipation}% en ${latestWithPrev.code} vs ${latestWithPrev.prevCode}`
+                    : `● Estable (0%) en ${latestWithPrev.code} vs ${latestWithPrev.prevCode}`}
+                </div>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
+              {enrichedTrends.map((item) => {
+                const isUp = item.diffParticipation > 0;
+                const isDown = item.diffParticipation < 0;
+                return (
+                  <div
+                    key={item.id}
+                    className={`rounded-xl border p-3.5 space-y-2 ${
+                      isUp
+                        ? 'bg-emerald-50/40 border-emerald-200'
+                        : isDown
+                        ? 'bg-rose-50/40 border-rose-200'
+                        : 'bg-slate-50 border-slate-200'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="px-2 py-0.5 rounded bg-slate-900 text-white font-mono text-[10px] font-extrabold">
+                        {item.code}
+                      </span>
+                      {item.hasPrev ? (
+                        <span
+                          className={`px-2 py-0.5 rounded-full font-mono text-[10px] font-extrabold ${
+                            isUp
+                              ? 'bg-emerald-100 text-emerald-900 border border-emerald-300'
+                              : isDown
+                              ? 'bg-rose-100 text-rose-900 border border-rose-300'
+                              : 'bg-slate-200 text-slate-700'
+                          }`}
+                        >
+                          {isUp
+                            ? `▲ Subió +${item.diffParticipation}%`
+                            : isDown
+                            ? `▼ Bajó ${item.diffParticipation}%`
+                            : '● Estable 0%'}
+                        </span>
+                      ) : (
+                        <span className="text-[10px] font-mono text-slate-400">Corte Inicial</span>
+                      )}
+                    </div>
+
+                    <div className="text-xs font-bold text-slate-900 truncate" title={item.title}>
+                      {item.title}
+                    </div>
+
+                    <div className="space-y-1 pt-1 border-t border-slate-200/80 text-[11px] font-mono">
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-500">Participación:</span>
+                        <span className="font-extrabold text-slate-900">{item.participationPct}%</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-500">Asistencia:</span>
+                        <span className="font-bold text-indigo-700">
+                          {item.attendancePct}%{' '}
+                          {item.hasPrev && item.diffAttendance !== 0 && (
+                            <span
+                              className={
+                                item.diffAttendance > 0 ? 'text-emerald-700' : 'text-rose-700'
+                              }
+                            >
+                              ({item.diffAttendance > 0 ? `+${item.diffAttendance}%` : `${item.diffAttendance}%`})
+                            </span>
+                          )}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-500">Nota Promedio:</span>
+                        <span className="font-bold text-emerald-800">
+                          {item.avgClassGrade.toFixed(1)}{' '}
+                          {item.hasPrev && item.diffGrade !== 0 && (
+                            <span
+                              className={item.diffGrade > 0 ? 'text-emerald-700' : 'text-rose-700'}
+                            >
+                              ({item.diffGrade > 0 ? `+${item.diffGrade}` : `${item.diffGrade}`})
+                            </span>
+                          )}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* FILA 1 DE GRÁFICOS RECHARTS: PROGRESO POR MÓDULO + NOTAS HISTÓRICAS */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

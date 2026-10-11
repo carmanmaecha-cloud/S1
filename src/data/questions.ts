@@ -1018,15 +1018,62 @@ export function equalizeQuestionBank(questions: Question[]): Question[] {
   return questions.map((q, idx) => equalizeQuestionPsychometrics(q, idx));
 }
 
+export function parseFlexibleJsonQuestionsText(rawText: string): any {
+  const clean = rawText.replace(/^\uFEFF/, '').trim();
+  if (!clean) return null;
+  try {
+    return JSON.parse(clean);
+  } catch {
+    // Remove trailing commas before ] or }
+    const withoutTrailingCommas = clean.replace(/,\s*([\]}])/g, '$1');
+    try {
+      return JSON.parse(withoutTrailingCommas);
+    } catch {
+      // Check if user pasted/saved a list of objects without outer [ ] brackets: { ... }, { ... }
+      if (withoutTrailingCommas.startsWith('{') && !withoutTrailingCommas.startsWith('[')) {
+        const wrapped = `[${withoutTrailingCommas.replace(/,\s*$/, '')}]`;
+        try {
+          return JSON.parse(wrapped);
+        } catch {
+          return null;
+        }
+      }
+      return null;
+    }
+  }
+}
+
 export function extractRawQuestionsArray(input: any): any[] {
+  if (typeof input === 'string') {
+    const parsed = parseFlexibleJsonQuestionsText(input);
+    if (parsed) return extractRawQuestionsArray(parsed);
+    return [];
+  }
   if (Array.isArray(input)) return input;
   if (input && typeof input === 'object') {
     if (Array.isArray(input.preguntas)) return input.preguntas;
     if (Array.isArray(input.questions)) return input.questions;
     if (Array.isArray(input.banco)) return input.banco;
+    if (Array.isArray(input.bancoPreguntas)) return input.bancoPreguntas;
     if (Array.isArray(input.reactivos)) return input.reactivos;
     if (Array.isArray(input.data)) return input.data;
     if (Array.isArray(input.items)) return input.items;
+    // If it's a single question object directly
+    if (input.pregunta || input.enunciado || input.opciones) {
+      return [input];
+    }
+    // Search any array property inside the object that contains question-like objects
+    for (const val of Object.values(input)) {
+      if (
+        Array.isArray(val) &&
+        val.length > 0 &&
+        val[0] &&
+        typeof val[0] === 'object' &&
+        ('pregunta' in val[0] || 'enunciado' in val[0] || 'opciones' in val[0])
+      ) {
+        return val;
+      }
+    }
   }
   return [];
 }
@@ -1034,7 +1081,9 @@ export function extractRawQuestionsArray(input: any): any[] {
 export function normalizeQuestionList(listOrObj: any): Question[] {
   const arr = extractRawQuestionsArray(listOrObj);
   if (arr.length === 0) return [];
-  return arr.map((item, idx) => normalizeQuestion(item, idx));
+  return arr
+    .filter((item) => item && typeof item === 'object')
+    .map((item, idx) => normalizeQuestion(item, idx));
 }
 
 function buildFullQuestionBank(): Question[] {

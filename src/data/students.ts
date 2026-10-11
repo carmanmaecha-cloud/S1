@@ -96,16 +96,4 @@ const PRELOADED_RAW_STUDENTS: { id: string; nombre: string }[] = [
   { id: '1000000000', nombre: 'Usuario Oficial de Prueba Docente (Modo Ensayo)' }
 ];
 
-export const INITIAL_STUDENTS: StudentRecord[] = PRELOADED_RAW_STUDENTS.map((s) => ({
-  id: s.id,
-  nombre: s.nombre,
-  codigoAcceso: generateDeterministicAccessCode(s.id),
-  intentosUsados: 0,
-  maxIntentosPermitidos: 2,
-  suspendido: false,
-  conceptoInfraccion: '✓ Sin infracciones',
-  preguntasIntento1: [],
-  preguntasIntento2: [],
-  preguntasUsadasPorModalidad: {},
-  examenesBloqueados: []
-}));
+export const INITIAL_STUDENTS: StudentRecord[] = [];

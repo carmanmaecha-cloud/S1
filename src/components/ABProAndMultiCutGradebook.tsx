@@ -132,11 +132,11 @@ export function ABProAndMultiCutGradebook({
   const currentABPro = abproMap.get(currentSelectedStudent?.id || '') || {
     studentId: currentSelectedStudent?.id || '',
     nombreMiPyme: '',
-    insumo1Mapeo: 3.5,
-    insumo2Journey: 3.5,
-    insumo3Investigacion: 3.5,
-    insumo4Segmentacion: 3.5,
-    insumo5Omnicanal: 3.5,
+    insumo1Mapeo: 0.0,
+    insumo2Journey: 0.0,
+    insumo3Investigacion: 0.0,
+    insumo4Segmentacion: 0.0,
+    insumo5Omnicanal: 0.0,
     observacionesDocente: '',
     ultimaActualizacion: ''
   };
@@ -162,11 +162,11 @@ export function ABProAndMultiCutGradebook({
       setFormObs(existing.observacionesDocente);
     } else {
       setFormMiPyme('');
-      setFormI1(4.0);
-      setFormI2(4.0);
-      setFormI3(4.0);
-      setFormI4(4.0);
-      setFormI5(4.0);
+      setFormI1(0.0);
+      setFormI2(0.0);
+      setFormI3(0.0);
+      setFormI4(0.0);
+      setFormI5(0.0);
       setFormObs('');
     }
     setSaveNotice(null);

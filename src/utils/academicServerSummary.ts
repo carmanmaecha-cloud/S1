@@ -8,13 +8,14 @@ import type {
   StudentRetoModalitySummary,
   MiniRetoAttemptRecord
 } from '../types.ts';
+import { getEffectiveCourseMetadata } from './universalCourseEngine';
 
 export const OFFICIAL_EXAM_MODALITIES: {
   id: ExamModality;
   label: string;
   shortLabel: string;
 }[] = [
-  { id: 'integral', label: 'Examen Integral (M1-M5)', shortLabel: 'Integral' },
+  { id: 'integral', label: 'Examen Integral Final', shortLabel: 'Integral' },
   { id: 'mod1', label: 'Examen Módulo 1', shortLabel: 'Módulo 1' },
   { id: 'mod2', label: 'Examen Módulo 2', shortLabel: 'Módulo 2' },
   { id: 'mod3', label: 'Examen Módulo 3', shortLabel: 'Módulo 3' },
@@ -33,6 +34,66 @@ export const OFFICIAL_RETO_MODULES: {
   { modulo: 4, label: 'Mini Reto Módulo 4', shortLabel: 'Reto M4' },
   { modulo: 5, label: 'Mini Reto Módulo 5', shortLabel: 'Reto M5' }
 ];
+
+export function getActiveExamModalitiesForConfig(config?: SystemConfig | null): {
+  id: ExamModality;
+  label: string;
+  shortLabel: string;
+  subtitle: string;
+}[] {
+  if (!config) {
+    return OFFICIAL_EXAM_MODALITIES.map((m) => ({
+      ...m,
+      subtitle: m.shortLabel
+    }));
+  }
+  const courseMeta = getEffectiveCourseMetadata(config);
+  const courseModules = Array.isArray(courseMeta.modulosCurso)
+    ? courseMeta.modulosCurso.filter((m) => m && m.activo !== false)
+    : [];
+
+  if (courseModules.length === 0) {
+    return [];
+  }
+
+  const modalities: {
+    id: ExamModality;
+    label: string;
+    shortLabel: string;
+    subtitle: string;
+  }[] = [];
+
+  if (courseMeta.habilitarExamenIntegral !== false) {
+    modalities.push({
+      id: 'integral',
+      label:
+        courseModules.length === 1
+          ? 'Examen Integral (Módulo 1)'
+          : `Examen Integral (Módulos 1 al ${courseModules.length})`,
+      shortLabel: 'Integral',
+      subtitle:
+        courseModules.length === 1
+          ? 'Módulo 1'
+          : `Módulos 1 al ${courseModules.length}`
+    });
+  }
+
+  courseModules.forEach((mod, idx) => {
+    const modNum = Number(mod.id) || idx + 1;
+    if (modNum >= 1 && modNum <= 5 && (mod.examenesCount ?? 1) > 0) {
+      const modId = `mod${modNum}` as ExamModality;
+      const cleanShort = (mod.shortTitle || '').trim() || `Módulo ${modNum}`;
+      modalities.push({
+        id: modId,
+        label: `Examen Módulo ${modNum}: ${cleanShort}`,
+        shortLabel: `Módulo ${modNum}`,
+        subtitle: cleanShort
+      });
+    }
+  });
+
+  return modalities;
+}
 
 /**
  * Returns the effective number of preventive anti-cheat warnings ("llamados de atención")
@@ -78,12 +139,30 @@ export function computeStudentServerSummary(
   allAttempts: ExamAttemptResult[],
   configOrNotaMinima?: SystemConfig | number | null
 ): StudentServerAcademicSummary {
+  const configObj =
+    typeof configOrNotaMinima === 'object' && configOrNotaMinima !== null
+      ? configOrNotaMinima
+      : null;
+
   const notaMinimaAprobacion =
     typeof configOrNotaMinima === 'number'
       ? configOrNotaMinima
-      : typeof configOrNotaMinima?.notaMinimaAprobacion === 'number'
-      ? configOrNotaMinima.notaMinimaAprobacion
+      : typeof configObj?.notaMinimaAprobacion === 'number'
+      ? configObj.notaMinimaAprobacion
       : 3.0;
+
+  const activeExamModsList = configObj
+    ? getActiveExamModalitiesForConfig(configObj)
+    : OFFICIAL_EXAM_MODALITIES;
+
+  const courseMeta = configObj ? getEffectiveCourseMetadata(configObj) : null;
+  const activeRetoModsList = courseMeta
+    ? OFFICIAL_RETO_MODULES.filter((rm) =>
+        courseMeta.modulosCurso.some(
+          (cm) => Number(cm.id) === rm.modulo && cm.activo !== false && (cm.retosCount ?? 1) > 0
+        )
+      )
+    : OFFICIAL_RETO_MODULES;
 
   const studentAttempts = (Array.isArray(allAttempts) ? allAttempts : [])
     .filter((a) => a && String(a.studentId).toUpperCase() === String(student.id).toUpperCase())
@@ -91,7 +170,7 @@ export function computeStudentServerSummary(
 
   const maxAllowedExamAttempts = student.maxIntentosPermitidos ?? 2;
 
-  const detalleModalidadesExamen: StudentExamModalitySummary[] = OFFICIAL_EXAM_MODALITIES.map(
+  const detalleModalidadesExamen: StudentExamModalitySummary[] = activeExamModsList.map(
     (modInfo) => {
       const modAttempts = studentAttempts.filter(
         (a) => (a.modalidad || 'integral') === modInfo.id
@@ -208,7 +287,7 @@ export function computeStudentServerSummary(
     (a, b) => (b.timestampMs || 0) - (a.timestampMs || 0)
   );
 
-  const detalleModulosRetos: StudentRetoModalitySummary[] = OFFICIAL_RETO_MODULES.map((mInfo) => {
+  const detalleModulosRetos: StudentRetoModalitySummary[] = activeRetoModsList.map((mInfo) => {
     const m = mInfo.modulo;
     const modProg = student.progresoRetos?.[m];
     const modAttempts = allRetoAttempts.filter((r) => Number(r.modulo) === m);
@@ -320,10 +399,39 @@ export function computeStudentServerSummary(
 export function enrichStudentsWithServerSummary(
   students: StudentRecord[],
   allAttempts: ExamAttemptResult[],
-  notaMinimaAprobacion = 3.0
+  arg3?: number | SystemConfig | unknown,
+  arg4?: SystemConfig | unknown,
+  arg5?: number | SystemConfig | unknown,
+  arg6?: SystemConfig | null
 ): StudentRecord[] {
+  const candidates = [arg3, arg4, arg5, arg6];
+  const configObj = (candidates.find(
+    (c) =>
+      c &&
+      typeof c === 'object' &&
+      !Array.isArray(c) &&
+      ('universalCoursesCatalog' in (c as Record<string, unknown>) ||
+        'activeCourseId' in (c as Record<string, unknown>) ||
+        'preguntasExamenIntegral' in (c as Record<string, unknown>) ||
+        'notaMinimaAprobacion' in (c as Record<string, unknown>))
+  ) || null) as SystemConfig | null;
+
+  const explicitMinPass = candidates.find(
+    (c) => typeof c === 'number' && Number.isFinite(c)
+  ) as number | undefined;
+
+  const effectiveMinPass =
+    explicitMinPass ??
+    (configObj && typeof configObj.notaMinimaAprobacion === 'number'
+      ? configObj.notaMinimaAprobacion
+      : 3.0);
+
   return (Array.isArray(students) ? students : []).map((st) => {
-    const summary = computeStudentServerSummary(st, allAttempts, notaMinimaAprobacion);
+    const summary = computeStudentServerSummary(
+      st,
+      allAttempts,
+      configObj || effectiveMinPass
+    );
     const actualAttemptsCount = Math.max(
       st.intentosUsados || 0,
       summary.totalExamenesRealizadosIntentos
