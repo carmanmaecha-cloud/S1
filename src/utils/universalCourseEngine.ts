@@ -493,18 +493,20 @@ export function canTeacherAccessCourse(
   teachers: TeacherAccountRecord[]
 ): boolean {
   if (!teacherId) return true;
-  const cleanId = teacherId.trim().toUpperCase();
-  const teacherRec = teachers.find((t) => t.id.trim().toUpperCase() === cleanId);
+  const cleanId = String(teacherId || '').trim().toUpperCase();
+  const teacherRec = (Array.isArray(teachers) ? teachers : []).find(
+    (t) => String(t?.id || '').trim().toUpperCase() === cleanId
+  );
 
   if (
-    courseMeta.docenteAsignadoId &&
-    courseMeta.docenteAsignadoId.trim().toUpperCase() === cleanId
+    courseMeta?.docenteAsignadoId &&
+    String(courseMeta.docenteAsignadoId || '').trim().toUpperCase() === cleanId
   ) {
     return true;
   }
   if (
-    Array.isArray(courseMeta.docentesAutorizadosIds) &&
-    courseMeta.docentesAutorizadosIds.some((id) => id.trim().toUpperCase() === cleanId)
+    Array.isArray(courseMeta?.docentesAutorizadosIds) &&
+    courseMeta.docentesAutorizadosIds.some((id) => String(id || '').trim().toUpperCase() === cleanId)
   ) {
     return true;
   }
@@ -628,22 +630,22 @@ export function getEffectiveCourseMetadata(
       ? config!.registeredTeachers
       : [];
     const teacherRecord = teachersList.find(
-      (t) => t.id.trim().replace(/[\s.-]/g, '').toUpperCase() === activeTeacherId
+      (t) => String(t?.id || '').trim().replace(/[\s.-]/g, '').toUpperCase() === activeTeacherId
     );
 
     // 1. Prefer the currently activeCourseId if it is assigned to this teacher
     const activeInCatalog = catalog.find((w) => w.meta.courseId === config?.activeCourseId);
     const matchesTeacher = (meta: UniversalCourseMetadata) => {
       if (
-        meta.docenteAsignadoId &&
-        meta.docenteAsignadoId.trim().replace(/[\s.-]/g, '').toUpperCase() === activeTeacherId
+        meta?.docenteAsignadoId &&
+        String(meta.docenteAsignadoId || '').trim().replace(/[\s.-]/g, '').toUpperCase() === activeTeacherId
       ) {
         return true;
       }
       if (
-        Array.isArray(meta.docentesAutorizadosIds) &&
+        Array.isArray(meta?.docentesAutorizadosIds) &&
         meta.docentesAutorizadosIds.some(
-          (id) => id.trim().replace(/[\s.-]/g, '').toUpperCase() === activeTeacherId
+          (id) => String(id || '').trim().replace(/[\s.-]/g, '').toUpperCase() === activeTeacherId
         )
       ) {
         return true;

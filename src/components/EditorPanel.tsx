@@ -555,6 +555,9 @@ export function EditorPanel({
       if (db && db.id && !String(db.id).startsWith('nomina-curso-')) {
         map.set(db.id, {
           ...db,
+          name: String(db.name ?? 'Nómina de Estudiantes'),
+          code: String(db.code ?? 'NOM-DB'),
+          description: String(db.description ?? 'Base de datos de nómina de estudiantes'),
           students: Array.isArray(db.students) ? db.students : []
         });
       }
@@ -589,6 +592,9 @@ export function EditorPanel({
       if (db && db.id && !String(db.id).startsWith('banco-curso-')) {
         map.set(db.id, {
           ...db,
+          name: String(db.name ?? 'Banco de Preguntas'),
+          code: String(db.code ?? 'BCO-DB'),
+          description: String(db.description ?? 'Base de datos de banco de preguntas'),
           questions: Array.isArray(db.questions) ? db.questions : []
         });
       }
@@ -622,11 +628,13 @@ export function EditorPanel({
     const updatedDbEntry: StudentRosterDatabaseEntry = {
       id: effectiveDbId,
       name:
-        (editingRosterDbId === effectiveDbId && newRosterDbName.trim()) ||
-        existingDb.name,
+        (editingRosterDbId === effectiveDbId && (newRosterDbName || '').trim()) ||
+        existingDb.name ||
+        'Nómina de Estudiantes',
       code:
-        (editingRosterDbId === effectiveDbId && newRosterDbCode.trim()) ||
-        existingDb.code,
+        (editingRosterDbId === effectiveDbId && (newRosterDbCode || '').trim()) ||
+        existingDb.code ||
+        'NOM-DB',
       description: existingDb.description || 'Base de datos de nómina de estudiantes',
       students: nextStudents,
       updatedAtIso: new Date().toISOString()
@@ -710,14 +718,14 @@ export function EditorPanel({
     setViewingRosterDbId(null);
     setActiveRosterDbId(db.id);
     setSelectedStudentRosterDbId(db.id);
-    setNewRosterDbName(db.name);
-    setNewRosterDbCode(db.code);
+    setNewRosterDbName(db.name || '');
+    setNewRosterDbCode(db.code || '');
     setRosterNameError(false);
     setCourseStudentsBank((db.students || []).map((s) => ({ ...s })));
     setEdStudentSearch('');
     setEdSelectedStudentIdsForBatch([]);
     setEdStudentBanner(
-      `✓ Modificando base de datos de Nómina: «${db.name}» (${db.students.length} estudiantes). Al terminar haga clic en «Guardar base de datos».`
+      `✓ Modificando base de datos de Nómina: «${db.name || 'Nómina'}» (${(db.students || []).length} estudiantes). Al terminar haga clic en «Guardar base de datos».`
     );
   };
 
@@ -731,7 +739,7 @@ export function EditorPanel({
 
   const handleSaveRosterDatabase = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    const cleanName = newRosterDbName.trim();
+    const cleanName = (newRosterDbName || '').trim();
     if (!cleanName) {
       setRosterNameError(true);
       setEdStudentBanner(
@@ -750,7 +758,7 @@ export function EditorPanel({
     setRosterNameError(false);
 
     const cleanCode =
-      newRosterDbCode.trim().toUpperCase().replace(/\s+/g, '') ||
+      (newRosterDbCode || '').trim().toUpperCase().replace(/\s+/g, '') ||
       `NOM-${cleanName
         .replace(/[^A-Za-z0-9]/g, '')
         .toUpperCase()
@@ -876,15 +884,15 @@ export function EditorPanel({
   };
 
   const edFilteredStudents = useMemo(() => {
-    const q = edStudentSearch.trim().toLowerCase();
+    const q = (edStudentSearch || '').trim().toLowerCase();
     if (!q) return courseStudentsBank;
     return courseStudentsBank.filter(
       (s) =>
-        s.id.toLowerCase().includes(q) ||
-        s.nombre.toLowerCase().includes(q) ||
+        (s.id || '').toLowerCase().includes(q) ||
+        (s.nombre || '').toLowerCase().includes(q) ||
         (s.correo || '').toLowerCase().includes(q) ||
         (s.whatsapp || '').toLowerCase().includes(q) ||
-        s.codigoAcceso.toLowerCase().includes(q)
+        (s.codigoAcceso || '').toLowerCase().includes(q)
     );
   }, [courseStudentsBank, edStudentSearch]);
 
@@ -900,24 +908,24 @@ export function EditorPanel({
 
   const openEdEditStudentModal = (st: StudentRecord) => {
     setEdEditingStudent(st);
-    setEdFormStudentId(st.id);
-    setEdFormStudentName(st.nombre);
+    setEdFormStudentId(st.id || '');
+    setEdFormStudentName(st.nombre || '');
     setEdFormStudentCorreo(st.correo || '');
     setEdFormStudentWhatsapp(st.whatsapp || '');
-    setEdFormStudentCode(st.codigoAcceso);
+    setEdFormStudentCode(st.codigoAcceso || '');
     setEdStudentModalOpen(true);
   };
 
   const handleEdSaveStudent = async (e: React.FormEvent) => {
     e.preventDefault();
-    const cleanId = edFormStudentId.trim().replace(/\s+/g, '');
-    const cleanName = edFormStudentName.trim();
-    const cleanCorreo = edFormStudentCorreo.trim().toLowerCase();
-    const cleanWhatsapp = edFormStudentWhatsapp.trim().replace(/[^\d+]/g, '');
+    const cleanId = (edFormStudentId || '').trim().replace(/\s+/g, '');
+    const cleanName = (edFormStudentName || '').trim();
+    const cleanCorreo = (edFormStudentCorreo || '').trim().toLowerCase();
+    const cleanWhatsapp = (edFormStudentWhatsapp || '').trim().replace(/[^\d+]/g, '');
     if (!cleanId || !cleanName) return;
 
     const cleanCode =
-      edFormStudentCode.trim().toUpperCase() || generateDeterministicAccessCode(cleanId);
+      (edFormStudentCode || '').trim().toUpperCase() || generateDeterministicAccessCode(cleanId);
 
     let nextList: StudentRecord[] = [];
     if (edEditingStudent) {
@@ -976,10 +984,10 @@ export function EditorPanel({
   };
 
   const handleEdSaveDirectStudentCode = (st: StudentRecord) => {
-    const rawDraft = edStudentCodeDrafts[st.id] ?? st.codigoAcceso;
-    const cleanCode = rawDraft.trim().toUpperCase();
+    const rawDraft = edStudentCodeDrafts[st.id] ?? st.codigoAcceso ?? '';
+    const cleanCode = (rawDraft || '').trim().toUpperCase();
     if (!cleanCode || cleanCode.length < 4) return;
-    if (cleanCode === st.codigoAcceso.trim().toUpperCase()) return;
+    if (cleanCode === (st.codigoAcceso || '').trim().toUpperCase()) return;
 
     const nextList = courseStudentsBank.map((s) =>
       s.id === st.id ? { ...s, codigoAcceso: cleanCode } : s
@@ -1044,7 +1052,7 @@ export function EditorPanel({
         const seq = String((idx + 1) % 100).padStart(2, '0');
         newCode = `${cleanPrefix}${last4}${initials}${seq}`;
       } else if (edBatchAccessCodeMode === 'same_shared_code') {
-        const shared = edBatchSharedAccessCode.trim().toUpperCase();
+        const shared = (edBatchSharedAccessCode || '').trim().toUpperCase();
         if (shared.length >= 4) newCode = shared;
       } else if (edBatchAccessCodeMode === 'individual_list') {
         const customIndividual = (edBatchIndividualCodesMap[st.id] || '').trim().toUpperCase();
@@ -1243,11 +1251,13 @@ export function EditorPanel({
     const updatedDbEntry: QuestionBankDatabaseEntry = {
       id: effectiveDbId,
       name:
-        (editingQBankDbId === effectiveDbId && newQBankDbName.trim()) ||
-        existingDb.name,
+        (editingQBankDbId === effectiveDbId && (newQBankDbName || '').trim()) ||
+        existingDb.name ||
+        'Banco de Preguntas',
       code:
-        (editingQBankDbId === effectiveDbId && newQBankDbCode.trim()) ||
-        existingDb.code,
+        (editingQBankDbId === effectiveDbId && (newQBankDbCode || '').trim()) ||
+        existingDb.code ||
+        'BCO-DB',
       description: existingDb.description || 'Base de datos de banco de preguntas',
       questions: nextQuestions,
       updatedAtIso: new Date().toISOString()
@@ -1326,8 +1336,8 @@ export function EditorPanel({
     setViewingQBankDbId(null);
     setActiveQuestionBankDbId(db.id);
     setSelectedQuestionBankDbId(db.id);
-    setNewQBankDbName(db.name);
-    setNewQBankDbCode(db.code);
+    setNewQBankDbName(db.name || '');
+    setNewQBankDbCode(db.code || '');
     setQBankNameError(false);
     setCourseQuestionsBank(
       (db.questions || []).map((q) => ({
@@ -1339,7 +1349,7 @@ export function EditorPanel({
     setQModFilter('all');
     setQCurrentPage(1);
     setBankActionNotice(
-      `✓ Modificando base de datos de Banco de preguntas: «${db.name}» (${db.questions.length} reactivos). Al terminar haga clic en «Guardar base de datos».`
+      `✓ Modificando base de datos de Banco de preguntas: «${db.name || 'Banco de preguntas'}» (${(db.questions || []).length} reactivos). Al terminar haga clic en «Guardar base de datos».`
     );
   };
 
@@ -1353,7 +1363,7 @@ export function EditorPanel({
 
   const handleSaveQuestionBankDatabase = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    const cleanName = newQBankDbName.trim();
+    const cleanName = (newQBankDbName || '').trim();
     if (!cleanName) {
       setQBankNameError(true);
       setBankActionNotice(
@@ -1372,7 +1382,7 @@ export function EditorPanel({
     setQBankNameError(false);
 
     const cleanCode =
-      newQBankDbCode.trim().toUpperCase().replace(/\s+/g, '') ||
+      (newQBankDbCode || '').trim().toUpperCase().replace(/\s+/g, '') ||
       `BCO-${cleanName
         .replace(/[^A-Za-z0-9]/g, '')
         .toUpperCase()
@@ -1548,8 +1558,8 @@ export function EditorPanel({
     const expectedEditorUser = (config.editorUsuario || 'EDITOR2026').trim().toUpperCase();
     const expectedEditorPass = (config.editorClave || 'EDITOR2026').trim();
 
-    const enteredId = editorUserInput.trim().replace(/[\s.-]/g, '').toUpperCase();
-    const enteredPin = editorPassInput.trim();
+    const enteredId = (editorUserInput || '').trim().replace(/[\s.-]/g, '').toUpperCase();
+    const enteredPin = (editorPassInput || '').trim();
 
     if (!enteredId || !enteredPin) {
       setAuthDenied(true);
@@ -1568,8 +1578,8 @@ export function EditorPanel({
     const matchedRegisteredTeacher = registeredTeachers.find(
       (t) =>
         t.activo !== false &&
-        t.id.trim().replace(/[\s.-]/g, '').toUpperCase() === enteredId &&
-        t.claveAcceso.trim() === enteredPin
+        (t.id || '').trim().replace(/[\s.-]/g, '').toUpperCase() === enteredId &&
+        (t.claveAcceso || '').trim() === enteredPin
     );
     const isMasterTeacherMatch =
       (enteredId === expectedTeacherId || enteredId === 'DOCENTE2026') &&
@@ -1583,11 +1593,11 @@ export function EditorPanel({
     }
 
     const matchedStudent = students.find(
-      (s) => s.id.trim().replace(/[\s.-]/g, '').toUpperCase() === enteredId
+      (s) => (s.id || '').trim().replace(/[\s.-]/g, '').toUpperCase() === enteredId
     );
     if (
       matchedStudent &&
-      matchedStudent.codigoAcceso.trim().toUpperCase() === enteredPin.toUpperCase()
+      (matchedStudent.codigoAcceso || '').trim().toUpperCase() === enteredPin.toUpperCase()
     ) {
       setAuthDenied(false);
       loginStudent(matchedStudent.id);
@@ -1613,10 +1623,10 @@ export function EditorPanel({
   // =========================================================================
   const handleSaveEditorSecurity = async (e: React.FormEvent) => {
     e.preventDefault();
-    const cleanName = secEditorName.trim();
-    const cleanAccount = secEditorAccount.trim().replace(/\s+/g, '').toUpperCase();
-    const cleanPass = secEditorPass.trim();
-    const cleanEmail = secEditorEmail.trim();
+    const cleanName = (secEditorName || '').trim();
+    const cleanAccount = (secEditorAccount || '').trim().replace(/\s+/g, '').toUpperCase();
+    const cleanPass = (secEditorPass || '').trim();
+    const cleanEmail = (secEditorEmail || '').trim();
 
     if (!cleanAccount || !cleanPass) {
       showEditorNotice('⚠️ La Cuenta del editor y la Clave de acceso son obligatorias.');
@@ -1671,7 +1681,7 @@ export function EditorPanel({
     try {
       const lower = file.name.toLowerCase();
       const nextMap = new Map<string, TeacherAccountRecord>();
-      registeredTeachers.forEach((t) => nextMap.set(t.id.trim().toUpperCase(), t));
+      registeredTeachers.forEach((t) => nextMap.set((t.id || '').trim().toUpperCase(), t));
 
       if (lower.endsWith('.json')) {
         const text = await file.text();
@@ -1770,7 +1780,7 @@ export function EditorPanel({
     }
 
     const nextMap = new Map<string, TeacherAccountRecord>();
-    registeredTeachers.forEach((t) => nextMap.set(t.id.trim().toUpperCase(), t));
+    registeredTeachers.forEach((t) => nextMap.set((t.id || '').trim().toUpperCase(), t));
     parsedTeachers.forEach((item) => {
       const prev = nextMap.get(item.cuenta);
       nextMap.set(item.cuenta, {
@@ -1811,10 +1821,10 @@ export function EditorPanel({
 
   const handleAddSingleTeacher = (e: React.FormEvent) => {
     e.preventDefault();
-    const cleanName = newTeacherName.trim();
-    const cleanAccount = newTeacherAccount.trim().replace(/\s+/g, '').toUpperCase();
-    const cleanPass = newTeacherPass.trim();
-    const cleanEmail = newTeacherEmail.trim();
+    const cleanName = (newTeacherName || '').trim();
+    const cleanAccount = (newTeacherAccount || '').trim().replace(/\s+/g, '').toUpperCase();
+    const cleanPass = (newTeacherPass || '').trim();
+    const cleanEmail = (newTeacherEmail || '').trim();
 
     if (!cleanName || !cleanAccount || !cleanPass) {
       showEditorNotice('⚠️ Ingrese Nombre, Cuenta y Clave de acceso del docente.');
@@ -1822,7 +1832,7 @@ export function EditorPanel({
     }
 
     const exists = registeredTeachers.some(
-      (t) => t.id.trim().toUpperCase() === cleanAccount
+      (t) => (t.id || '').trim().toUpperCase() === cleanAccount
     );
 
     const newRecord: TeacherAccountRecord = {
@@ -1838,7 +1848,7 @@ export function EditorPanel({
 
     const updatedTeachers = exists
       ? registeredTeachers.map((t) =>
-          t.id.trim().toUpperCase() === cleanAccount ? { ...t, ...newRecord } : t
+          (t.id || '').trim().toUpperCase() === cleanAccount ? { ...t, ...newRecord } : t
         )
       : [...registeredTeachers, newRecord];
 
@@ -1864,19 +1874,19 @@ export function EditorPanel({
     e.preventDefault();
     const validFromTable = batchRows
       .map((r) => ({
-        nombre: r.nombre.trim(),
-        cuenta: r.cuenta.trim().replace(/\s+/g, '').toUpperCase(),
-        clave: r.clave.trim(),
-        correo: r.correo.trim()
+        nombre: (r.nombre || '').trim(),
+        cuenta: (r.cuenta || '').trim().replace(/\s+/g, '').toUpperCase(),
+        clave: (r.clave || '').trim(),
+        correo: (r.correo || '').trim()
       }))
       .filter((r) => r.nombre && r.cuenta && r.clave);
 
-    const validFromText = batchRawText
+    const validFromText = (batchRawText || '')
       .split(/\r?\n/)
-      .map((line) => line.trim())
+      .map((line) => (line || '').trim())
       .filter(Boolean)
       .map((line) => {
-        const parts = line.split(/[;\t,]/).map((p) => p.trim());
+        const parts = line.split(/[;\t,]/).map((p) => (p || '').trim());
         return {
           nombre: parts[0] || '',
           cuenta: (parts[1] || '').replace(/\s+/g, '').toUpperCase(),
@@ -1896,7 +1906,7 @@ export function EditorPanel({
 
     const nextMap = new Map<string, TeacherAccountRecord>();
     registeredTeachers.forEach((t) => {
-      nextMap.set(t.id.trim().toUpperCase(), t);
+      nextMap.set((t.id || '').trim().toUpperCase(), t);
     });
 
     combined.forEach((item) => {
@@ -2335,41 +2345,41 @@ export function EditorPanel({
 
   const openEditQuestionModal = (q: Question) => {
     setEditingQuestion(q);
-    setQFormId(q.id);
-    setQFormModulo(q.modulo);
-    setQFormTema(q.tema);
-    setQFormBloom(q.bloom);
-    setQFormEnunciado(q.enunciado);
-    setQFormA(q.opciones.A);
-    setQFormB(q.opciones.B);
-    setQFormC(q.opciones.C);
-    setQFormD(q.opciones.D);
-    setQFormCorrecta(q.correcta);
-    setQFormJustificacion(q.justificacion);
+    setQFormId(q.id || '');
+    setQFormModulo(q.modulo || 1);
+    setQFormTema(q.tema || '');
+    setQFormBloom(q.bloom || 'Comprensión');
+    setQFormEnunciado(q.enunciado || '');
+    setQFormA(q.opciones?.A || '');
+    setQFormB(q.opciones?.B || '');
+    setQFormC(q.opciones?.C || '');
+    setQFormD(q.opciones?.D || '');
+    setQFormCorrecta(q.correcta || 'A');
+    setQFormJustificacion(q.justificacion || '');
     setQModalOpen(true);
   };
 
   const handleSaveQuestion = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!qFormEnunciado.trim() || !qFormA.trim() || !qFormB.trim()) return;
+    if (!(qFormEnunciado || '').trim() || !(qFormA || '').trim() || !(qFormB || '').trim()) return;
 
     savePreviousQuestionsSnapshot(courseQuestionsBank);
 
     const newQ: Question = {
-      id: qFormId.trim() || `M${qFormModulo}-${Date.now()}`,
+      id: (qFormId || '').trim() || `M${qFormModulo}-${Date.now()}`,
       modulo: (qFormModulo as 1 | 2 | 3 | 4 | 5) || 1,
-      tema: qFormTema.trim() || `Tema Módulo ${qFormModulo}`,
+      tema: (qFormTema || '').trim() || `Tema Módulo ${qFormModulo}`,
       bloom: qFormBloom,
-      enunciado: qFormEnunciado.trim(),
+      enunciado: (qFormEnunciado || '').trim(),
       opciones: {
-        A: qFormA.trim(),
-        B: qFormB.trim(),
-        C: qFormC.trim(),
-        D: qFormD.trim()
+        A: (qFormA || '').trim(),
+        B: (qFormB || '').trim(),
+        C: (qFormC || '').trim(),
+        D: (qFormD || '').trim()
       },
       correcta: qFormCorrecta,
       justificacion:
-        qFormJustificacion.trim() ||
+        (qFormJustificacion || '').trim() ||
         'Respuesta fundamentada en el marco teórico del módulo.'
     };
 
@@ -2447,7 +2457,7 @@ export function EditorPanel({
   };
 
   const handleBulkImportQuestions = () => {
-    const trimmed = bulkQText.trim();
+    const trimmed = (bulkQText || '').trim();
     if (!trimmed) {
       setBulkQFeedback(
         '⚠️ Pegue datos en el cuadro de texto o suba un archivo Excel (.xlsx), JSON o CSV arriba.'
@@ -2672,14 +2682,14 @@ export function EditorPanel({
   };
 
   const filteredQuestions = useMemo(() => {
-    const q = qSearch.trim().toLowerCase();
+    const q = (qSearch || '').trim().toLowerCase();
     return courseQuestionsBank.filter((item) => {
       const matchMod = qModFilter === 'all' || Number(item.modulo) === Number(qModFilter);
       const matchText =
         !q ||
-        item.id.toLowerCase().includes(q) ||
-        item.tema.toLowerCase().includes(q) ||
-        item.enunciado.toLowerCase().includes(q);
+        (item.id || '').toLowerCase().includes(q) ||
+        (item.tema || '').toLowerCase().includes(q) ||
+        (item.enunciado || '').toLowerCase().includes(q);
       return matchMod && matchText;
     });
   }, [courseQuestionsBank, qSearch, qModFilter]);
@@ -2703,31 +2713,31 @@ export function EditorPanel({
     }[] = [];
 
     courseQuestionsBank.forEach((q) => {
-      const idKey = q.id.trim().toUpperCase();
+      const idKey = (q.id || '').trim().toUpperCase();
       seenIds.set(idKey, (seenIds.get(idKey) || 0) + 1);
 
-      const normStatement = q.enunciado
+      const normStatement = (q.enunciado || '')
         .toLowerCase()
         .replace(/[^a-z0-9áéíóúñü]/g, '')
         .slice(0, 95);
       if (seenStatements.has(normStatement)) {
         issues.push({
-          questionId: q.id,
+          questionId: q.id || 'SIN-ID',
           modulo: q.modulo,
           severity: 'ALTA',
           category: 'Enunciado Duplicado',
           detail: `Coincide con el reactivo ${seenStatements.get(normStatement)}`
         });
       } else {
-        seenStatements.set(normStatement, q.id);
+        seenStatements.set(normStatement, q.id || 'SIN-ID');
       }
 
-      const opts = [q.opciones.A, q.opciones.B, q.opciones.C, q.opciones.D].map((o) =>
+      const opts = [q.opciones?.A, q.opciones?.B, q.opciones?.C, q.opciones?.D].map((o) =>
         (o || '').trim()
       );
       if (opts.some((o) => o.length < 2)) {
         issues.push({
-          questionId: q.id,
+          questionId: q.id || 'SIN-ID',
           modulo: q.modulo,
           severity: 'ALTA',
           category: 'Opción Incompleta',
@@ -2738,7 +2748,7 @@ export function EditorPanel({
       const uniqueOpts = new Set(opts.map((o) => o.toLowerCase()));
       if (uniqueOpts.size < 4) {
         issues.push({
-          questionId: q.id,
+          questionId: q.id || 'SIN-ID',
           modulo: q.modulo,
           severity: 'ALTA',
           category: 'Distractores Repetidos',
@@ -2746,10 +2756,10 @@ export function EditorPanel({
         });
       }
 
-      const correctLen = (q.opciones[q.correcta] || '').trim().length;
+      const correctLen = (q.opciones?.[q.correcta] || '').trim().length;
       const otherLens = (['A', 'B', 'C', 'D'] as const)
         .filter((l) => l !== q.correcta)
-        .map((l) => (q.opciones[l] || '').trim().length);
+        .map((l) => (q.opciones?.[l] || '').trim().length);
       const avgOtherLen = otherLens.reduce((a, b) => a + b, 0) / 3;
       if (avgOtherLen > 12 && correctLen > avgOtherLen * 2.2) {
         issues.push({
@@ -2867,12 +2877,12 @@ export function EditorPanel({
   // Validación en Tiempo Real para el Asistente Guiado por Pasos (Wizard 1 a 4)
   const wizardValidation = useMemo(() => {
     const step1Valid = Boolean(
-      courseName.trim() &&
-        courseCode.trim() &&
-        courseSubjectName.trim() &&
-        courseSede.trim() &&
-        assignedTeacherAccount.trim() &&
-        assignedTeacherPass.trim()
+      (courseName || '').trim() &&
+        (courseCode || '').trim() &&
+        (courseSubjectName || '').trim() &&
+        (courseSede || '').trim() &&
+        (assignedTeacherAccount || '').trim() &&
+        (assignedTeacherPass || '').trim()
     );
 
     const moduleWeightSums = courseModules.map((m) => {
@@ -3002,15 +3012,15 @@ export function EditorPanel({
   }, [courseQuestionsBank, config.preguntasExamenModulo]);
 
   const buildCourseMetaFromForm = (): UniversalCourseMetadata => {
-    const cleanName = courseName.trim() || 'Nuevo Curso';
+    const cleanName = (courseName || '').trim() || 'Nuevo Curso';
     const cleanCode =
-      courseCode.trim().replace(/\s+/g, '').toUpperCase().slice(0, 6) || 'CUR26';
-    const cleanSubject = courseSubjectName.trim();
-    const cleanSede = courseSede.trim();
-    const cleanTeacherId = assignedTeacherAccount.trim().replace(/\s+/g, '').toUpperCase();
-    const cleanTeacherPass = assignedTeacherPass.trim();
+      (courseCode || '').trim().replace(/\s+/g, '').toUpperCase().slice(0, 6) || 'CUR26';
+    const cleanSubject = (courseSubjectName || '').trim();
+    const cleanSede = (courseSede || '').trim();
+    const cleanTeacherId = (assignedTeacherAccount || '').trim().replace(/\s+/g, '').toUpperCase();
+    const cleanTeacherPass = (assignedTeacherPass || '').trim();
     const cleanTeacherName =
-      assignedTeacherName.trim() ||
+      (assignedTeacherName || '').trim() ||
       registeredTeachers.find((t) => t.id === cleanTeacherId)?.nombre ||
       cleanTeacherId;
 
@@ -3023,14 +3033,15 @@ export function EditorPanel({
         m.shortTitle || `Módulo ${modNum}`
       );
       const cleanTopics = Array.isArray(m.temasModulo)
-        ? m.temasModulo.map((t) => t.trim()).filter(Boolean)
+        ? m.temasModulo.map((t) => (t || '').trim()).filter(Boolean)
         : [];
+      const cleanShortTitle = (m.shortTitle || '').trim() || `Módulo ${modNum}`;
       return {
         ...m,
         id: modNum,
         code: `M${modNum}`,
-        shortTitle: m.shortTitle.trim() || `Módulo ${modNum}`,
-        fullTitle: `Módulo ${modNum}: ${m.shortTitle.trim() || `Módulo ${modNum}`}`,
+        shortTitle: cleanShortTitle,
+        fullTitle: `Módulo ${modNum}: ${cleanShortTitle}`,
         horasModulo: m.horasModulo ?? '',
         description: m.description || '',
         observacion: m.observacion || '',
@@ -3135,11 +3146,11 @@ export function EditorPanel({
 
   const handleSaveCreatedCourse = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!courseName.trim() || !courseCode.trim()) {
+    if (!(courseName || '').trim() || !(courseCode || '').trim()) {
       showEditorNotice('⚠️ Ingrese el Nombre del curso y el Código.');
       return;
     }
-    if (!assignedTeacherAccount.trim() || !assignedTeacherPass.trim()) {
+    if (!(assignedTeacherAccount || '').trim() || !(assignedTeacherPass || '').trim()) {
       showEditorNotice(
         '⚠️ Ingrese o seleccione la Cuenta de docente asignado (Usuario y Clave).'
       );
@@ -3203,11 +3214,11 @@ export function EditorPanel({
     const cleanTeacherId = builtMeta.docenteAsignadoId!;
     const cleanTeacherPass = builtMeta.docenteAsignadoClave!;
     const teacherExists = registeredTeachers.some(
-      (t) => t.id.trim().toUpperCase() === cleanTeacherId
+      (t) => (t.id || '').trim().toUpperCase() === cleanTeacherId
     );
     const nextTeachers: TeacherAccountRecord[] = teacherExists
       ? registeredTeachers.map((t) =>
-          t.id.trim().toUpperCase() === cleanTeacherId
+          (t.id || '').trim().toUpperCase() === cleanTeacherId
             ? {
                 ...t,
                 nombre: builtMeta.docenteResponsable || t.nombre,
@@ -6521,12 +6532,12 @@ export function EditorPanel({
                       }}
                       placeholder="Obligatorio *: Escriba el nombre de la base de datos (Ej: Nómina Marketing Grupo 1 - 2026)"
                       className={`w-full px-3.5 py-2.5 rounded-xl border-2 bg-white text-xs sm:text-sm font-bold text-slate-900 focus:outline-none focus:ring-2 ${
-                        rosterNameError && !newRosterDbName.trim()
+                        rosterNameError && !(newRosterDbName || '').trim()
                           ? 'border-red-500 ring-2 ring-red-500/20 focus:ring-red-600'
                           : 'border-teal-300 focus:ring-teal-600'
                       }`}
                     />
-                    {rosterNameError && !newRosterDbName.trim() && (
+                    {rosterNameError && !(newRosterDbName || '').trim() && (
                       <p className="mt-1 text-[11px] font-bold text-red-600">
                         * Campo obligatorio: ingrese el Nombre de la base de datos a crear antes de guardar.
                       </p>
@@ -6564,7 +6575,7 @@ export function EditorPanel({
                 <OptionServerSaveBar
                   sectionKey="nomina_estudiantes_editor"
                   label="Nómina Oficial de Estudiantes Asignados al Curso"
-                  autoSave={Boolean(editingRosterDbId && newRosterDbName.trim())}
+                  autoSave={Boolean(editingRosterDbId && (newRosterDbName || '').trim())}
                   watchValue={courseStudentsBank.map(
                     (s) =>
                       `${s.id}:${s.nombre}:${s.correo || ''}:${s.whatsapp || ''}:${s.codigoAcceso}`
@@ -6579,8 +6590,8 @@ export function EditorPanel({
                         Nómina Oficial de Estudiantes Asignados al Curso ({courseStudentsBank.length} Estudiantes)
                       </h3>
                       <span className="px-2.5 py-0.5 rounded-full bg-teal-100 text-teal-900 border border-teal-200 text-[11px] font-bold">
-                        {newRosterDbName.trim()
-                          ? `Base: ${newRosterDbName.trim()}`
+                        {(newRosterDbName || '').trim()
+                          ? `Base: ${(newRosterDbName || '').trim()}`
                           : 'Nueva base de datos en edición'}
                       </span>
                     </div>
@@ -6827,11 +6838,11 @@ export function EditorPanel({
                           const currentDraftCode =
                             edStudentCodeDrafts[st.id] !== undefined
                               ? edStudentCodeDrafts[st.id]
-                              : st.codigoAcceso;
+                              : (st.codigoAcceso || '');
                           const pendingChange =
-                            currentDraftCode.trim().toUpperCase() !==
-                              st.codigoAcceso.trim().toUpperCase() &&
-                            currentDraftCode.trim().length >= 4;
+                            (currentDraftCode || '').trim().toUpperCase() !==
+                              (st.codigoAcceso || '').trim().toUpperCase() &&
+                            (currentDraftCode || '').trim().length >= 4;
 
                           return (
                             <tr
@@ -6990,12 +7001,12 @@ export function EditorPanel({
                       }}
                       placeholder="Obligatorio *: Ingrese el nombre de la base de datos a crear..."
                       className={`w-full px-3.5 py-2.5 rounded-xl border-2 bg-white text-xs sm:text-sm font-bold text-slate-900 focus:outline-none focus:ring-2 ${
-                        rosterNameError && !newRosterDbName.trim()
+                        rosterNameError && !(newRosterDbName || '').trim()
                           ? 'border-red-500 ring-2 ring-red-500/20 focus:ring-red-600'
                           : 'border-teal-300 focus:ring-teal-600'
                       }`}
                     />
-                    {rosterNameError && !newRosterDbName.trim() && (
+                    {rosterNameError && !(newRosterDbName || '').trim() && (
                       <p className="text-[11px] font-bold text-red-600">
                         * Es obligatorio ingresar el Nombre de la base de datos a crear antes de guardar.
                       </p>
@@ -7355,12 +7366,12 @@ export function EditorPanel({
                       }}
                       placeholder="Obligatorio *: Escriba el nombre de la base de datos (Ej: Banco Marketing Digital Módulos 1 al 5)"
                       className={`w-full px-3.5 py-2.5 rounded-xl border-2 bg-white text-xs sm:text-sm font-bold text-slate-900 focus:outline-none focus:ring-2 ${
-                        qBankNameError && !newQBankDbName.trim()
+                        qBankNameError && !(newQBankDbName || '').trim()
                           ? 'border-red-500 ring-2 ring-red-500/20 focus:ring-red-600'
                           : 'border-amber-300 focus:ring-amber-600'
                       }`}
                     />
-                    {qBankNameError && !newQBankDbName.trim() && (
+                    {qBankNameError && !(newQBankDbName || '').trim() && (
                       <p className="mt-1 text-[11px] font-bold text-red-600">
                         * Campo obligatorio: ingrese el Nombre de la base de datos a crear antes de guardar.
                       </p>
@@ -7398,7 +7409,7 @@ export function EditorPanel({
                 <OptionServerSaveBar
                   sectionKey="banco_preguntas"
                   label="Base de datos de las preguntas/respuestas de todos los módulos cargados (Banco de preguntas)"
-                  autoSave={Boolean(editingQBankDbId && newQBankDbName.trim())}
+                  autoSave={Boolean(editingQBankDbId && (newQBankDbName || '').trim())}
                   watchValue={`${courseQuestionsBank.length}:${courseQuestionsBank[0]?.id || ''}:${
                     courseQuestionsBank[courseQuestionsBank.length - 1]?.id || ''
                   }:${courseQuestionsBank[0]?.opciones?.A?.length || 0}`}
@@ -7414,8 +7425,8 @@ export function EditorPanel({
                           Base de datos de las preguntas/respuestas de todos los módulos cargados — Banco de Preguntas ({courseQuestionsBank.length} Reactivos)
                         </h3>
                         <span className="px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-950 border border-amber-300 text-[11px] font-bold">
-                          {newQBankDbName.trim()
-                            ? `Base: ${newQBankDbName.trim()}`
+                          {(newQBankDbName || '').trim()
+                            ? `Base: ${(newQBankDbName || '').trim()}`
                             : 'Nueva base de datos en edición'}
                         </span>
                       </div>
@@ -7844,12 +7855,12 @@ export function EditorPanel({
                       }}
                       placeholder="Obligatorio *: Ingrese el nombre de la base de datos a crear..."
                       className={`w-full px-3.5 py-2.5 rounded-xl border-2 bg-white text-xs sm:text-sm font-bold text-slate-900 focus:outline-none focus:ring-2 ${
-                        qBankNameError && !newQBankDbName.trim()
+                        qBankNameError && !(newQBankDbName || '').trim()
                           ? 'border-red-500 ring-2 ring-red-500/20 focus:ring-red-600'
                           : 'border-amber-300 focus:ring-amber-600'
                       }`}
                     />
-                    {qBankNameError && !newQBankDbName.trim() && (
+                    {qBankNameError && !(newQBankDbName || '').trim() && (
                       <p className="text-[11px] font-bold text-red-600">
                         * Es obligatorio ingresar el Nombre de la base de datos a crear antes de guardar.
                       </p>
@@ -8926,7 +8937,7 @@ M1-801 ; 1 ; Aplicación ; Ecosistema P2P ; Enunciado de la pregunta... ; Texto 
                     const modQCount = courseQuestionsBank.filter(
                       (q) => Number(q.modulo) === Number(m.id || i + 1)
                     ).length;
-                    const topics = (m.temasModulo || []).filter((t) => t.trim());
+                    const topics = (m.temasModulo || []).filter((t) => (t || '').trim());
                     return (
                       <div
                         key={m.id || i}

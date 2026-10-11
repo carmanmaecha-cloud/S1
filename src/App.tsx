@@ -1874,11 +1874,11 @@ function AppContent() {
 
 class AppErrorBoundary extends React.Component<
   { children: React.ReactNode },
-  { hasError: boolean; errorMsg: string }
+  { hasError: boolean; errorMsg: string; retryCount: number }
 > {
   constructor(props: { children: React.ReactNode }) {
     super(props);
-    this.state = { hasError: false, errorMsg: '' };
+    this.state = { hasError: false, errorMsg: '', retryCount: 0 };
   }
 
   static getDerivedStateFromError(error: any) {
@@ -1895,40 +1895,53 @@ class AppErrorBoundary extends React.Component<
       reason: error?.message || 'Excepción de renderizado capturada por ErrorBoundary',
       missingFields: ['render_component_tree'],
       detectedSchemaVersion: null,
-      autoRepaired: false
+      autoRepaired: true
     });
+    try {
+      const sanitizeArrayKey = (key: string) => {
+        const raw = localStorage.getItem(key);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) {
+          localStorage.removeItem(key);
+        }
+      };
+      sanitizeArrayKey('evaluaplus_saved_roster_dbs_v1');
+      sanitizeArrayKey('evaluaplus_saved_question_dbs_v1');
+    } catch {
+      // ignore
+    }
+
+    if (this.state.retryCount < 2) {
+      setTimeout(() => {
+        this.setState((prev) => ({
+          hasError: false,
+          errorMsg: '',
+          retryCount: prev.retryCount + 1
+        }));
+      }, 40);
+    }
   }
 
   render() {
-    if (this.state.hasError) {
+    if (this.state.hasError && this.state.retryCount >= 2) {
       return (
         <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
           <div className="bg-white border border-slate-200 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-lg text-center">
             <div className="text-base font-bold text-slate-900">
-              Sincronización de Seguridad Requerida
+              Recuperación Automática de Vista
             </div>
             <p className="text-xs text-slate-600">
-              Se detectó una estructura de caché antigua en el navegador ({this.state.errorMsg}). Pulse el botón inferior para limpiar la caché local y recargar los datos oficiales desde el servidor.
+              Se detectó un dato incompleto temporal ({this.state.errorMsg}). Pulse el botón inferior para reanudar el panel conservando sus bases de datos.
             </p>
             <button
               type="button"
-              onClick={async () => {
-                try {
-                  localStorage.clear();
-                  sessionStorage.clear();
-                  if ('caches' in window) {
-                    const names = await window.caches.keys();
-                    await Promise.all(names.map((n) => window.caches.delete(n)));
-                  }
-                } catch {
-                  // ignore
-                }
-                const cleanUrl = `${window.location.pathname}?_v=${Date.now()}`;
-                window.location.replace(cleanUrl);
+              onClick={() => {
+                this.setState({ hasError: false, errorMsg: '', retryCount: 0 });
               }}
               className="w-full px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold cursor-pointer"
             >
-              Limpiar Caché Antigua y Recargar Ahora
+              Reanudar Panel Ahora
             </button>
           </div>
         </div>

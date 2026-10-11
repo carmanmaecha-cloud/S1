@@ -771,8 +771,8 @@ export function StudentPortal({
       return;
     }
 
-    const cleanId = docIdInput.trim().replace(/[\s.-]/g, '').toUpperCase();
-    const cleanCode = accessCodeInput.trim().toUpperCase();
+    const cleanId = (docIdInput || '').trim().replace(/[\s.-]/g, '').toUpperCase();
+    const cleanCode = (accessCodeInput || '').trim().toUpperCase();
 
     if (!cleanId || !cleanCode) {
       setLoginError('Código de acceso de sesión inválido para este ID de estudiante. Solicite su código al docente.');
@@ -780,7 +780,7 @@ export function StudentPortal({
     }
 
     if (config.exigirPinAula) {
-      if (classroomPinInput.trim().toUpperCase() !== config.pinAulaDia.trim().toUpperCase()) {
+      if ((classroomPinInput || '').trim().toUpperCase() !== String(config.pinAulaDia || '').trim().toUpperCase()) {
         setLoginError('El PIN de Aula del Día ingresado no coincide con el proyectado por el docente en el salón.');
         return;
       }
@@ -788,7 +788,7 @@ export function StudentPortal({
 
     // Find student in official roster (ignores dots, spaces or hyphens in document ID)
     const matchedStudent = students.find(
-      (s) => s.id.trim().replace(/[\s.-]/g, '').toUpperCase() === cleanId
+      (s) => String(s?.id || '').trim().replace(/[\s.-]/g, '').toUpperCase() === cleanId
     );
 
     const storedStudentCode = (matchedStudent?.codigoAcceso || '').trim().toUpperCase();
@@ -818,8 +818,8 @@ export function StudentPortal({
     onForceServerSync?.();
     setVerifiedStudentId(matchedStudent.id);
     loginStudent(matchedStudent.id);
-    setProfileNameInput(matchedStudent.nombre);
-    setProfileCodeInput(matchedStudent.codigoAcceso);
+    setProfileNameInput(matchedStudent.nombre || '');
+    setProfileCodeInput(matchedStudent.codigoAcceso || '');
     setTabHistory([]);
     setStudentDashboardTabState('inicio');
     persistStudentTab('inicio');
@@ -830,8 +830,8 @@ export function StudentPortal({
   const handleSaveStudentProfile = (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentStudent) return;
-    const cleanName = profileNameInput.trim();
-    const cleanCode = profileCodeInput.trim().toUpperCase();
+    const cleanName = (profileNameInput || '').trim();
+    const cleanCode = (profileCodeInput || '').trim().toUpperCase();
     if (!cleanName || cleanCode.length < 6) {
       setProfileSaveMsg('Ingrese su nombre completo y un código válido (mínimo 6 caracteres).');
       return;

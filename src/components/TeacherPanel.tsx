@@ -376,20 +376,20 @@ export function TeacherPanel({
 
     const teachersList = Array.isArray(config.registeredTeachers) ? config.registeredTeachers : [];
     const teacherRec = teachersList.find(
-      (t) => t.id.trim().replace(/[\s.-]/g, '').toUpperCase() === teacherId
+      (t) => String(t?.id || '').trim().replace(/[\s.-]/g, '').toUpperCase() === teacherId
     );
 
     const matchesTeacher = (meta: typeof activeCourseMeta) => {
       if (
-        meta.docenteAsignadoId &&
-        meta.docenteAsignadoId.trim().replace(/[\s.-]/g, '').toUpperCase() === teacherId
+        meta?.docenteAsignadoId &&
+        String(meta.docenteAsignadoId || '').trim().replace(/[\s.-]/g, '').toUpperCase() === teacherId
       ) {
         return true;
       }
       if (
-        Array.isArray(meta.docentesAutorizadosIds) &&
+        Array.isArray(meta?.docentesAutorizadosIds) &&
         meta.docentesAutorizadosIds.some(
-          (id) => id.trim().replace(/[\s.-]/g, '').toUpperCase() === teacherId
+          (id) => String(id || '').trim().replace(/[\s.-]/g, '').toUpperCase() === teacherId
         )
       ) {
         return true;
@@ -987,11 +987,11 @@ export function TeacherPanel({
   const [newPassInput, setNewPassInput] = useState('');
   const [confirmPassInput, setConfirmPassInput] = useState('');
   const [passChangeStatus, setPassChangeStatus] = useState<{ type: 'ok' | 'err'; msg: string } | null>(null);
-  const [emailInput, setEmailInput] = useState(config.correoRecuperacion);
+  const [emailInput, setEmailInput] = useState(() => String(config.correoRecuperacion || ''));
   const [emailSaveStatus, setEmailSaveStatus] = useState<string | null>(null);
 
   // Webhook Tester & Copy States
-  const [webhookUrlInput, setWebhookUrlInput] = useState(config.webhookUrl);
+  const [webhookUrlInput, setWebhookUrlInput] = useState(() => String(config.webhookUrl || ''));
   const [webhookStatus, setWebhookStatus] = useState<string | null>(null);
   const [copiedAppsScript, setCopiedAppsScript] = useState(false);
   const [copiedBlogger, setCopiedBlogger] = useState(false);
@@ -1069,11 +1069,11 @@ export function TeacherPanel({
 
     // Check if a student accidentally entered their valid Student ID + Access Code on the Teacher Login form
     const matchedStudent = students.find(
-      (s) => s.id.trim().replace(/[\s.-]/g, '').toUpperCase() === enteredId
+      (s) => (s.id || '').trim().replace(/[\s.-]/g, '').toUpperCase() === enteredId
     );
     if (
       matchedStudent &&
-      matchedStudent.codigoAcceso.trim().toUpperCase() === enteredPin.toUpperCase()
+      (matchedStudent.codigoAcceso || '').trim().toUpperCase() === enteredPin.toUpperCase()
     ) {
       setAuthDenied(false);
       loginStudent(matchedStudent.id);
@@ -1086,8 +1086,8 @@ export function TeacherPanel({
     const matchedRegisteredTeacher = allTeachers.find(
       (t) =>
         t.activo !== false &&
-        t.id.trim().replace(/[\s.-]/g, '').toUpperCase() === enteredId &&
-        t.claveAcceso.trim() === enteredPin
+        (t.id || '').trim().replace(/[\s.-]/g, '').toUpperCase() === enteredId &&
+        (t.claveAcceso || '').trim() === enteredPin
     );
 
     // Also check if credentials match any course's directly assigned teacher (docenteAsignadoId + docenteAsignadoClave)
@@ -2381,10 +2381,10 @@ export function TeacherPanel({
   };
 
   const openEditStudentModal = (st: StudentRecord) => {
-    setEditingOriginalId(st.id);
-    setFormStudentId(st.id);
-    setFormStudentName(st.nombre);
-    setFormStudentCode(st.codigoAcceso);
+    setEditingOriginalId(st.id || '');
+    setFormStudentId(st.id || '');
+    setFormStudentName(st.nombre || '');
+    setFormStudentCode(st.codigoAcceso || '');
     setFormStudentEmail(st.correo || '');
     setFormStudentWhatsapp(st.whatsapp || '');
     setStudentModalError(null);
@@ -2397,14 +2397,14 @@ export function TeacherPanel({
   const pendingStudentModalChange = editingOriginalId
     ? Boolean(
         originalEditingStudent &&
-          (formStudentId.trim() !== originalEditingStudent.id.trim() ||
-            formStudentName.trim() !== originalEditingStudent.nombre.trim() ||
-            formStudentCode.trim().toUpperCase() !==
-              originalEditingStudent.codigoAcceso.trim().toUpperCase() ||
-            formStudentEmail.trim() !== (originalEditingStudent.correo || '').trim() ||
-            formStudentWhatsapp.trim() !== (originalEditingStudent.whatsapp || '').trim())
+          ((formStudentId || '').trim() !== (originalEditingStudent.id || '').trim() ||
+            (formStudentName || '').trim() !== (originalEditingStudent.nombre || '').trim() ||
+            (formStudentCode || '').trim().toUpperCase() !==
+              (originalEditingStudent.codigoAcceso || '').trim().toUpperCase() ||
+            (formStudentEmail || '').trim() !== (originalEditingStudent.correo || '').trim() ||
+            (formStudentWhatsapp || '').trim() !== (originalEditingStudent.whatsapp || '').trim())
       )
-    : Boolean(formStudentId.trim() && formStudentName.trim());
+    : Boolean((formStudentId || '').trim() && (formStudentName || '').trim());
 
   const handleSaveStudentModal = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -2501,10 +2501,10 @@ export function TeacherPanel({
   };
 
   const handleSaveDirectStudentCode = async (student: StudentRecord, rawCodeValue?: string) => {
-    const cleanCode = (rawCodeValue ?? studentCodeDrafts[student.id] ?? student.codigoAcceso)
+    const cleanCode = (rawCodeValue ?? studentCodeDrafts[student.id] ?? student.codigoAcceso ?? '')
       .trim()
       .toUpperCase();
-    const hasPendingChange = cleanCode !== student.codigoAcceso.trim().toUpperCase();
+    const hasPendingChange = cleanCode !== (student.codigoAcceso || '').trim().toUpperCase();
     if (!hasPendingChange) return;
 
     if (cleanCode.length < 4 || cleanCode.length > 24) {
@@ -2579,7 +2579,7 @@ export function TeacherPanel({
     if (batchCodeStrategy === 'deterministic') {
       return generateDeterministicAccessCode(st.id).toUpperCase();
     }
-    const customVal = (batchCodeCustomDrafts[st.id] ?? st.codigoAcceso).trim().toUpperCase();
+    const customVal = (batchCodeCustomDrafts[st.id] ?? st.codigoAcceso ?? '').trim().toUpperCase();
     return customVal.slice(0, 24);
   };
 
@@ -2649,11 +2649,11 @@ export function TeacherPanel({
   };
 
   const pendingPinAulaChange =
-    pinAulaDraft.trim().toUpperCase() !== (config.pinAulaDia || '').trim().toUpperCase();
+    (pinAulaDraft || '').trim().toUpperCase() !== (config.pinAulaDia || '').trim().toUpperCase();
 
   const handleSavePinAula = async () => {
     if (!pendingPinAulaChange || isSavingPinAula) return;
-    const cleanPin = pinAulaDraft.trim().toUpperCase() || 'AULA26';
+    const cleanPin = (pinAulaDraft || '').trim().toUpperCase() || 'AULA26';
     setIsSavingPinAula(true);
     try {
       commitTeacherConfigUpdate({
@@ -2670,7 +2670,7 @@ export function TeacherPanel({
   };
 
   const pendingMensajeSalaChange =
-    mensajeSalaDraft.trim() !== (config.mensajeSalaEspera || '').trim();
+    (mensajeSalaDraft || '').trim() !== (config.mensajeSalaEspera || '').trim();
 
   const handleSaveMensajeSala = async () => {
     if (!pendingMensajeSalaChange || isSavingMensajeSala) return;
@@ -2722,7 +2722,7 @@ export function TeacherPanel({
 
   // Guardado automático de PIN de Aula al detectar cambios
   useEffect(() => {
-    if (!pendingPinAulaChange || isSavingPinAula || pinAulaDraft.trim().length < 3) return;
+    if (!pendingPinAulaChange || isSavingPinAula || (pinAulaDraft || '').trim().length < 3) return;
     const timer = setTimeout(() => {
       void handleSavePinAula();
     }, 650);
@@ -2755,8 +2755,8 @@ export function TeacherPanel({
       for (const [stId, draftVal] of entries) {
         const st = students.find((s) => s.id === stId);
         if (!st) continue;
-        const clean = draftVal.trim().toUpperCase();
-        if (clean.length >= 4 && clean.length <= 24 && clean !== st.codigoAcceso.trim().toUpperCase()) {
+        const clean = (draftVal || '').trim().toUpperCase();
+        if (clean.length >= 4 && clean.length <= 24 && clean !== (st.codigoAcceso || '').trim().toUpperCase()) {
           void handleSaveDirectStudentCode(st, clean);
           break;
         }
@@ -3139,45 +3139,46 @@ export function TeacherPanel({
   };
 
   const openEditQuestionModal = (q: Question) => {
-    setEditingQuestionId(q.id);
-    setFormQId(q.id);
-    setFormQMod(q.modulo);
+    setEditingQuestionId(q.id || '');
+    setFormQId(q.id || '');
+    setFormQMod((q.modulo as 1 | 2 | 3 | 4 | 5) || 1);
     setFormQTipoPregunta(q.tipoPregunta || 'Selección Múltiple con Única Respuesta');
-    setFormQRap(q.rap || `RAP-M${q.modulo}: Competencia del Módulo ${q.modulo}`);
-    setFormQContexto(q.contexto || `Caso comercial aplicado en La Dorada (Módulo ${q.modulo})`);
-    setFormQTema(q.tema);
-    setFormQBloom(q.bloom);
-    setFormQEnunciado(q.enunciado);
-    setFormQA(q.opciones.A);
-    setFormQB(q.opciones.B);
-    setFormQC(q.opciones.C);
-    setFormQD(q.opciones.D);
-    setFormQCorrecta(q.correcta);
-    setFormQJustificacion(q.justificacion);
+    setFormQRap(q.rap || `RAP-M${q.modulo || 1}: Competencia del Módulo ${q.modulo || 1}`);
+    setFormQContexto(q.contexto || `Caso comercial aplicado en La Dorada (Módulo ${q.modulo || 1})`);
+    setFormQTema(q.tema || '');
+    setFormQBloom(q.bloom || 'Aplicación');
+    setFormQEnunciado(q.enunciado || q.pregunta || '');
+    setFormQA(q.opciones?.A || '');
+    setFormQB(q.opciones?.B || '');
+    setFormQC(q.opciones?.C || '');
+    setFormQD(q.opciones?.D || '');
+    setFormQCorrecta(q.correcta || 'A');
+    setFormQJustificacion(q.justificacion || '');
     setQModalOpen(true);
   };
 
   const handleSaveQuestion = (e: React.FormEvent) => {
     e.preventDefault();
+    const safeEnunciado = (formQEnunciado || '').trim();
     const newQ: Question = {
-      id: formQId.trim() || `MM-M${formQMod}-${Date.now()}`,
+      id: (formQId || '').trim() || `MM-M${formQMod}-${Date.now()}`,
       modulo: formQMod,
-      tema: formQTema.trim() || `Módulo ${formQMod}`,
+      tema: (formQTema || '').trim() || `Módulo ${formQMod}`,
       bloom: formQBloom,
-      enunciado: formQEnunciado.trim(),
-      tipoPregunta: formQTipoPregunta.trim() || 'Selección Múltiple con Única Respuesta',
+      enunciado: safeEnunciado,
+      tipoPregunta: (formQTipoPregunta || '').trim() || 'Selección Múltiple con Única Respuesta',
       nivel: formQBloom,
-      rap: formQRap.trim() || `RAP-M${formQMod}: Competencia del Módulo ${formQMod}`,
-      contexto: formQContexto.trim() || `Contexto comercial en La Dorada, Caldas`,
-      pregunta: formQEnunciado.trim(),
+      rap: (formQRap || '').trim() || `RAP-M${formQMod}: Competencia del Módulo ${formQMod}`,
+      contexto: (formQContexto || '').trim() || `Contexto comercial en La Dorada, Caldas`,
+      pregunta: safeEnunciado,
       opciones: {
-        A: formQA.trim(),
-        B: formQB.trim(),
-        C: formQC.trim(),
-        D: formQD.trim()
+        A: (formQA || '').trim(),
+        B: (formQB || '').trim(),
+        C: (formQC || '').trim(),
+        D: (formQD || '').trim()
       },
       correcta: formQCorrecta,
-      justificacion: formQJustificacion.trim()
+      justificacion: (formQJustificacion || '').trim()
     };
 
     savePreviousQuestionsSnapshot(questions);
@@ -3283,10 +3284,10 @@ export function TeacherPanel({
 
   // Password, Recovery Email & Webhook Handlers with pendingChange and handleExecuteServerSave
   const pendingPasswordChange = Boolean(
-    currentPassInput.trim().length > 0 &&
-      newPassInput.trim().length > 0 &&
-      confirmPassInput.trim().length > 0 &&
-      newPassInput.trim() !== config.claveDocente
+    (currentPassInput || '').trim().length > 0 &&
+      (newPassInput || '').trim().length > 0 &&
+      (confirmPassInput || '').trim().length > 0 &&
+      (newPassInput || '').trim() !== config.claveDocente
   );
 
   const handlePasswordChange = async (e: React.FormEvent) => {
@@ -3296,7 +3297,7 @@ export function TeacherPanel({
       setPassChangeStatus({ type: 'err', msg: 'La contraseña actual ingresada es incorrecta.' });
       return;
     }
-    if (newPassInput.trim().length < 6) {
+    if ((newPassInput || '').trim().length < 6) {
       setPassChangeStatus({ type: 'err', msg: 'La nueva contraseña debe tener al menos 6 caracteres.' });
       return;
     }
@@ -3306,7 +3307,7 @@ export function TeacherPanel({
     }
     setIsSavingPassword(true);
     try {
-      commitTeacherConfigUpdate({ ...config, claveDocente: newPassInput.trim() });
+      commitTeacherConfigUpdate({ ...config, claveDocente: (newPassInput || '').trim() });
       await handleExecuteServerSave(
         'seguridad_y_respaldo',
         'Contraseña del Panel Docente actualizada en BD del Servidor'
@@ -3323,8 +3324,9 @@ export function TeacherPanel({
     }
   };
 
+  const safeEmailInput = String(emailInput || '');
   const pendingEmailChange =
-    emailInput.trim() !== (config.correoRecuperacion || '').trim() && emailInput.includes('@');
+    safeEmailInput.trim() !== String(config.correoRecuperacion || '').trim() && safeEmailInput.includes('@');
   const isSavingRecoveryEmail = isSavingEmail;
 
   const handleSaveRecoveryEmail = async (e: React.FormEvent) => {
@@ -3332,10 +3334,10 @@ export function TeacherPanel({
     if (!pendingEmailChange || isSavingEmail) return;
     setIsSavingEmail(true);
     try {
-      commitTeacherConfigUpdate({ ...config, correoRecuperacion: emailInput.trim() });
+      commitTeacherConfigUpdate({ ...config, correoRecuperacion: safeEmailInput.trim() });
       await handleExecuteServerSave(
         'seguridad_y_respaldo',
-        `Correo oficial (${emailInput.trim()}) guardado en BD del Servidor`
+        `Correo oficial (${safeEmailInput.trim()}) guardado en BD del Servidor`
       );
       setEmailSaveStatus('✓ Dirección de correo oficial guardada y confirmada en el servidor.');
       setTimeout(() => setEmailSaveStatus(null), 4000);
@@ -3344,14 +3346,15 @@ export function TeacherPanel({
     }
   };
 
+  const safeWebhookUrlInput = String(webhookUrlInput || '');
   const pendingWebhookChange =
-    webhookUrlInput.trim() !== (config.webhookUrl || '').trim();
+    safeWebhookUrlInput.trim() !== String(config.webhookUrl || '').trim();
 
   const handleSaveWebhookUrl = async () => {
     if (!pendingWebhookChange || isSavingWebhook) return;
     setIsSavingWebhook(true);
     try {
-      commitTeacherConfigUpdate({ ...config, webhookUrl: webhookUrlInput.trim() });
+      commitTeacherConfigUpdate({ ...config, webhookUrl: safeWebhookUrlInput.trim() });
       await handleExecuteServerSave(
         'integraciones_webhook',
         'URL de Webhook Google Sheets actualizada automáticamente en BD del Servidor'
@@ -3364,13 +3367,13 @@ export function TeacherPanel({
 
   // Guardado automático de Correo de Recuperación al detectar cambios válidos
   useEffect(() => {
-    if (!pendingEmailChange || isSavingEmail || !emailInput.includes('.')) return;
+    if (!pendingEmailChange || isSavingEmail || !safeEmailInput.includes('.')) return;
     const timer = setTimeout(() => {
       setIsSavingEmail(true);
-      commitTeacherConfigUpdate({ ...config, correoRecuperacion: emailInput.trim() });
+      commitTeacherConfigUpdate({ ...config, correoRecuperacion: safeEmailInput.trim() });
       void handleExecuteServerSave(
         'seguridad_y_respaldo',
-        `Correo oficial (${emailInput.trim()}) actualizado automáticamente en BD del Servidor`
+        `Correo oficial (${safeEmailInput.trim()}) actualizado automáticamente en BD del Servidor`
       ).finally(() => {
         setIsSavingEmail(false);
         setEmailSaveStatus('✓ Correo oficial actualizado automáticamente en la Base de Datos del Servidor.');
@@ -3378,7 +3381,7 @@ export function TeacherPanel({
       });
     }, 800);
     return () => clearTimeout(timer);
-  }, [emailInput, pendingEmailChange, isSavingEmail]);
+  }, [safeEmailInput, pendingEmailChange, isSavingEmail]);
 
   // Guardado automático de URL de Webhook al detectar cambios
   useEffect(() => {
@@ -3387,23 +3390,23 @@ export function TeacherPanel({
       void handleSaveWebhookUrl();
     }, 800);
     return () => clearTimeout(timer);
-  }, [webhookUrlInput, pendingWebhookChange, isSavingWebhook]);
+  }, [safeWebhookUrlInput, pendingWebhookChange, isSavingWebhook]);
 
   // Live Webhook Ping
   const handleTestWebhook = async () => {
     setIsSavingWebhook(true);
     setWebhookStatus('Guardando URL y enviando ping de prueba a Google Sheets Apps Script...');
     try {
-      commitTeacherConfigUpdate({ ...config, webhookUrl: webhookUrlInput.trim() });
+      commitTeacherConfigUpdate({ ...config, webhookUrl: safeWebhookUrlInput.trim() });
       await handleExecuteServerSave(
         'integraciones_webhook',
         'URL de Webhook Google Sheets sincronizada en BD del Servidor'
       );
-      if (!webhookUrlInput.trim()) {
+      if (!safeWebhookUrlInput.trim()) {
         setWebhookStatus('Ingrese primero la URL del Webhook desplegado en Google Apps Script.');
         return;
       }
-      await fetch(webhookUrlInput.trim(), {
+      await fetch(safeWebhookUrlInput.trim(), {
         method: 'POST',
         mode: 'no-cors',
         headers: { 'Content-Type': 'application/json' },
@@ -16469,7 +16472,7 @@ function doPost(e) {
               c.asistenciaB2Estado === 'presente_manual';
             if (isConfirmed) {
               // Solo primer nombre e inicial del apellido para privacidad en el proyector del salón
-              const parts = rec.nombre.trim().split(/\s+/);
+              const parts = (rec.nombre || '').trim().split(/\s+/);
               const safePublicName =
                 parts.length > 1 ? `${parts[0]} ${parts[1][0]}.` : parts[0];
               confirmedNames.push(safePublicName);
