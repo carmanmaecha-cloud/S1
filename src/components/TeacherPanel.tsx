@@ -13539,7 +13539,7 @@ function doPost(e) {
                                   >
                                     <div className="flex flex-wrap items-center gap-1.5">
                                       <span className="px-1.5 py-0.5 rounded bg-rose-600 text-white font-mono font-bold text-[10px]">
-                                        Falta #{log.numeroFalta || lIdx + 1}
+                                        Falta #{(log as any).numeroFalta || (log as any).llamadoNumero || (log as any).numeroLlamado || lIdx + 1}
                                       </span>
                                       <span
                                         className={`px-2 py-0.5 rounded font-mono text-[10px] font-extrabold ${log.classification.badgeClass}`}
@@ -13547,13 +13547,13 @@ function doPost(e) {
                                         {log.classification.typeLabel} · {log.classification.severityLabel}
                                       </span>
                                       <span className="font-bold text-slate-900">
-                                        {log.motivo || 'Infracción detectada por escudo anti-trampa'}
+                                        {(log as any).motivo || (log as any).descripcion || 'Infracción detectada por escudo anti-trampa'}
                                       </span>
                                     </div>
                                     <div className="font-mono text-[10px] text-slate-600 shrink-0">
-                                      {log.moduloIntentado ? `[${log.moduloIntentado}] · ` : ''}
-                                      {log.fechaIso
-                                        ? new Date(log.fechaIso).toLocaleString('es-CO')
+                                      {(log as any).moduloIntentado || (log as any).modalidadOModulo ? `[${(log as any).moduloIntentado || (log as any).modalidadOModulo}] · ` : ''}
+                                      {(log as any).fechaIso || (log as any).fecha
+                                        ? new Date((log as any).fechaIso || (log as any).fecha).toLocaleString('es-CO')
                                         : 'Registrado'}
                                     </div>
                                   </div>
@@ -14050,7 +14050,7 @@ function doPost(e) {
                       const isPresent =
                         currentState === 'presente_manual' ||
                         currentState === 'presente_virtual' ||
-                        currentState === 'excusa_aprobada';
+                        currentState === ('excusa_aprobada' as any);
                       return (
                         <div
                           key={rec.studentId}

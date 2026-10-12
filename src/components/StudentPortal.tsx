@@ -1619,15 +1619,15 @@ export function StudentPortal({
     setConfirmSubmitModal(false);
     setDrawerOpen(false);
     setInductionModalOpen(false);
-    if (isExamFullscreenGuardEnabled) {
-      try {
-        if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
-          document.documentElement.requestFullscreen().catch(() => {});
-        }
-      } catch {
-        // ignore if blocked by iframe policy
-      }
+
+    // Iniciar en modo ventana maximizada del navegador (sin forzar pantalla completa para evitar bloqueos del sistema)
+    hasEnteredFullscreenRef.current = Boolean(document.fullscreenElement);
+    try {
+      window.scrollTo({ top: 0, behavior: 'instant' });
+    } catch {
+      // ignore
     }
+
     setExamPhase('active_exam');
   };
 
@@ -1635,6 +1635,7 @@ export function StudentPortal({
   const timeLeftRef = useRef(timeLeftSeconds);
   const perQuestionSecondsRef = useRef<Record<string, number>>({});
   const currentIndexRef = useRef(currentIndex);
+  const hasEnteredFullscreenRef = useRef<boolean>(false);
   useEffect(() => {
     timeLeftRef.current = timeLeftSeconds;
   }, [timeLeftSeconds]);
@@ -1692,9 +1693,9 @@ export function StudentPortal({
       });
 
       const baseRawNota = isSuspended ? 0.0 : Number(((aciertosCount / totalQ) * 5.0).toFixed(1));
-      const latePenaltyEval = !isSuspended
+      const latePenaltyEval = !isSuspended && liveActivityWindows?.EXAMENES
         ? applyLateSubmissionPenalty(baseRawNota, liveActivityWindows.EXAMENES)
-        : { finalGrade: 0.0, penaltyApplied: false, penaltyDetail: '' };
+        : { finalGrade: baseRawNota, penaltyApplied: false, penaltyDetail: '' };
       const rawNota = latePenaltyEval.finalGrade;
       const porcentaje = isSuspended ? 0 : Math.round((aciertosCount / totalQ) * 100);
       const baseConcept = isSuspended
@@ -1718,8 +1719,10 @@ export function StudentPortal({
         1
       )}-${payloadChecksum.slice(-6)}`;
 
+      const attemptIdStr = `ATT-${currentStudent.id}-${selectedModality}-${currentAttemptNumber}-${Date.now()}`;
       const result: ExamAttemptResult = {
-        attemptId: `ATT-${currentStudent.id}-${selectedModality}-${currentAttemptNumber}-${Date.now()}`,
+        attemptId: attemptIdStr,
+        id: attemptIdStr,
         fecha: fechaStr,
         timestampMs: Date.now(),
         studentId: currentStudent.id,
@@ -1728,12 +1731,16 @@ export function StudentPortal({
         intentoNumero: currentAttemptNumber,
         modalidad: selectedModality,
         modalidadLabel: modConfig.title,
+        modalidadTitle: modConfig.title,
         totalPreguntas: totalQ,
         aciertos: aciertosCount,
         incorrectas: totalQ - aciertosCount,
         notaColombiana: rawNota,
+        notaFinal: rawNota,
+        nota: rawNota,
         porcentaje,
         tiempoEmpleadoSegundos: elapsedSec,
+        duracionSegundos: elapsedSec,
         estado: estadoFinal,
         conceptoInfraccion: finalConcept,
         incidenciasCount: isSuspended ? Math.max(warningsCount, maxLlamadosPermitidos + 1) : warningsCount,
@@ -1813,14 +1820,19 @@ export function StudentPortal({
         suspendido: isSuspended,
         pantallaMaximizada: true
       });
-      onRecordAttempt(result, updatedStudent);
+      try {
+        onRecordAttempt(result, updatedStudent);
+      } catch (err) {
+        console.error('Error no crítico al invocar onRecordAttempt:', err);
+      }
+
       if (!navigator.onLine || !isOnline) {
         try {
           localStorage.setItem(
             'evaluaplus_pending_offline_submission_v1',
             JSON.stringify({
               studentId: currentStudent.id,
-              attemptId: result.id,
+              attemptId: result.attemptId || result.id || '',
               nota: rawNota,
               savedAtIso: new Date().toISOString()
             })
@@ -2224,7 +2236,10 @@ export function StudentPortal({
     };
 
     const handleFullscreenChange = () => {
-      if (armed && isExamFullscreenGuardEnabled && !document.fullscreenElement) {
+      if (document.fullscreenElement) {
+        hasEnteredFullscreenRef.current = true;
+      } else if (armed && isExamFullscreenGuardEnabled && hasEnteredFullscreenRef.current) {
+        hasEnteredFullscreenRef.current = false;
         registerInfraction(
           'Salida del modo de Pantalla Completa durante el examen',
           'SALIDA_PANTALLA_COMPLETA',
@@ -5529,7 +5544,7 @@ export function StudentPortal({
                           tipo: 'RECALIFICACION_EXAMEN',
                           targetId: 'integral',
                           targetLabel: 'Examen Integral Final',
-                          notaActual: studentBestGrade
+                          notaActual: 0.0
                         })
                       }
                       className="min-h-[44px] px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold text-xs shrink-0 cursor-pointer shadow-2xs"
@@ -6966,24 +6981,33 @@ export function StudentPortal({
             )}
           </div>
 
-          {isExamFullscreenGuardEnabled && (
-            <button
-              type="button"
-              onClick={() => {
-                try {
-                  if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
-                    document.documentElement.requestFullscreen().catch(() => {});
-                  }
-                } catch {
-                  // ignore
-                }
-              }}
-              className="px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-semibold flex items-center gap-1.5 cursor-pointer"
-            >
+          <div className="flex items-center gap-2">
+            <span className="hidden sm:inline-flex px-2.5 py-1 rounded-md bg-slate-800 text-sky-300 font-mono text-[11px] items-center gap-1.5 border border-slate-700">
               <Maximize2 className="w-3.5 h-3.5 text-sky-400" />
-              <span>Pantalla Completa Segura</span>
-            </button>
-          )}
+              <span>Modo Maximizado</span>
+            </span>
+            {isExamFullscreenGuardEnabled && (
+              <button
+                type="button"
+                onClick={() => {
+                  try {
+                    if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
+                      document.documentElement.requestFullscreen().catch(() => {});
+                    } else if (document.fullscreenElement && document.exitFullscreen) {
+                      document.exitFullscreen().catch(() => {});
+                    }
+                  } catch {
+                    // ignore
+                  }
+                }}
+                className="px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-semibold flex items-center gap-1.5 cursor-pointer text-xs"
+                title="Alternar pantalla completa de forma opcional"
+              >
+                <Maximize2 className="w-3.5 h-3.5 text-sky-400" />
+                <span>{document.fullscreenElement ? 'Salir de Completa' : 'Pantalla Completa (Opcional)'}</span>
+              </button>
+            )}
+          </div>
           </div>
         )}
 
@@ -7418,57 +7442,158 @@ export function StudentPortal({
           </div>
         )}
 
-        {/* Confirmation Modal Before Definitive Submission */}
-        {confirmSubmitModal && (
-          <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4">
-            <div className="bg-white border border-slate-200 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-xl">
-              <h3 className="text-lg font-bold text-slate-900">Confirmar Entrega Definitiva</h3>
-              <p className="text-xs text-slate-600 leading-relaxed">
-                Verifique el estado de su evaluación antes de enviar para calificación automática en escala 0.0 a 5.0:
-              </p>
+        {/* Confirmation & Missing Questions Warning Modal Before Submission */}
+        {confirmSubmitModal && (() => {
+          const missingQuestions = activeQuestions
+            .map((q, idx) => ({ q, idx, isAnswered: Boolean(answers[q.id]) }))
+            .filter((item) => !item.isAnswered);
+          const hasMissing = missingQuestions.length > 0;
 
-              <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 space-y-1.5 text-xs font-mono">
-                <div className="flex justify-between">
-                  <span>Preguntas respondidas:</span>
-                  <strong className="text-emerald-700">
-                    {answeredCount} / {activeQuestions.length}
-                  </strong>
-                </div>
-                <div className="flex justify-between">
-                  <span>Preguntas sin responder:</span>
-                  <strong className={pendingCount > 0 ? 'text-red-600' : 'text-slate-700'}>
-                    {pendingCount}
-                  </strong>
-                </div>
-                <div className="flex justify-between">
-                  <span>Marcadas para revisión:</span>
-                  <strong className="text-amber-700">{markedCount}</strong>
-                </div>
-                <div className="flex justify-between">
-                  <span>Tiempo restante:</span>
-                  <strong>{formatTime(timeLeftSeconds)}</strong>
-                </div>
-              </div>
+          return (
+            <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+              <div className="bg-white border border-slate-200 rounded-2xl max-w-lg w-full p-6 space-y-4 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+                {hasMissing ? (
+                  <>
+                    <div className="flex items-start gap-3">
+                      <div className="p-2.5 rounded-xl bg-amber-100 text-amber-700 shrink-0 mt-0.5">
+                        <AlertTriangle className="w-6 h-6" />
+                      </div>
+                      <div>
+                        <h3 className="text-lg font-bold text-slate-900">
+                          ⚠️ Advertencia: Preguntas Faltantes Sin Responder
+                        </h3>
+                        <p className="text-xs text-amber-900 font-medium mt-1">
+                          Tienes <span className="font-bold underline">{missingQuestions.length}</span> de {activeQuestions.length} preguntas sin responder.
+                        </p>
+                      </div>
+                    </div>
 
-              <div className="flex items-center justify-end gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setConfirmSubmitModal(false)}
-                  className="px-4 py-2.5 rounded-xl border border-slate-300 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-                >
-                  Volver al Examen
-                </button>
-                <button
-                  type="button"
-                  onClick={() => finalizeExam(false)}
-                  className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold"
-                >
-                  Entregar Evaluación Ahora
-                </button>
+                    <div className="bg-amber-50/90 border border-amber-300 rounded-xl p-3.5 text-xs text-amber-950 space-y-2">
+                      <p className="leading-relaxed">
+                        Si entregas la evaluación ahora, las preguntas sin contestar obtendrán <strong className="text-red-700 font-bold">0.0 puntos (incorrectas)</strong> y se descontarán de tu calificación final.
+                      </p>
+                      <div>
+                        <div className="text-[11px] font-bold text-amber-900 uppercase tracking-wider mb-1.5">
+                          Preguntas faltantes (clic en un número para ir a responderla):
+                        </div>
+                        <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto pr-1">
+                          {missingQuestions.map((item) => (
+                            <button
+                              key={item.q.id}
+                              type="button"
+                              onClick={() => {
+                                setCurrentIndex(item.idx);
+                                setConfirmSubmitModal(false);
+                              }}
+                              className="px-2.5 py-1 rounded-lg bg-white hover:bg-amber-100 border border-amber-300 text-amber-950 text-xs font-mono font-bold flex items-center gap-1 shadow-2xs cursor-pointer transition-colors"
+                              title={`Ir a responder pregunta #${item.idx + 1}`}
+                            >
+                              <span>#{item.idx + 1}</span>
+                              <span className="text-[10px] text-amber-700 font-normal">Ir ➔</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="bg-slate-50 rounded-xl p-3.5 border border-slate-200 space-y-1.5 text-xs font-mono">
+                      <div className="flex justify-between">
+                        <span>Preguntas respondidas:</span>
+                        <strong className="text-emerald-700">{answeredCount} / {activeQuestions.length}</strong>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>Preguntas sin responder:</span>
+                        <strong className="text-red-600 font-bold">{missingQuestions.length}</strong>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>Marcadas para revisión:</span>
+                        <strong className="text-amber-700">{markedCount}</strong>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>Tiempo restante:</span>
+                        <strong>{formatTime(timeLeftSeconds)}</strong>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2.5 pt-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const firstMissingIdx = missingQuestions[0]?.idx ?? 0;
+                          setCurrentIndex(firstMissingIdx);
+                          setConfirmSubmitModal(false);
+                        }}
+                        className="px-4 py-2.5 rounded-xl border border-slate-300 text-xs font-bold text-slate-700 hover:bg-slate-100 flex items-center justify-center gap-1.5 cursor-pointer order-2 sm:order-1 transition-colors"
+                      >
+                        <ArrowLeft className="w-3.5 h-3.5" />
+                        <span>Volver a Responder Faltantes</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => finalizeExam(false)}
+                        className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer shadow-md order-1 sm:order-2 transition-colors"
+                      >
+                        <FileCheck2 className="w-4 h-4" />
+                        <span>Entregar evaluación ahora</span>
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="flex items-start gap-3">
+                      <div className="p-2.5 rounded-xl bg-emerald-100 text-emerald-700 shrink-0 mt-0.5">
+                        <CheckCircle2 className="w-6 h-6" />
+                      </div>
+                      <div>
+                        <h3 className="text-lg font-bold text-slate-900">Confirmar Entrega Definitiva</h3>
+                        <p className="text-xs text-slate-600 mt-1">
+                          Has respondido el 100% de las preguntas ({activeQuestions.length}/{activeQuestions.length}).
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 space-y-1.5 text-xs font-mono">
+                      <div className="flex justify-between">
+                        <span>Preguntas respondidas:</span>
+                        <strong className="text-emerald-700">{answeredCount} / {activeQuestions.length} (100%)</strong>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>Preguntas sin responder:</span>
+                        <strong className="text-emerald-700">0 ✓</strong>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>Marcadas para revisión:</span>
+                        <strong className="text-amber-700">{markedCount}</strong>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>Tiempo restante:</span>
+                        <strong>{formatTime(timeLeftSeconds)}</strong>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-end gap-3 pt-2">
+                      <button
+                        type="button"
+                        onClick={() => setConfirmSubmitModal(false)}
+                        className="px-4 py-2.5 rounded-xl border border-slate-300 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
+                      >
+                        Volver al Examen
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => finalizeExam(false)}
+                        className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer shadow-xs"
+                      >
+                        <FileCheck2 className="w-4 h-4" />
+                        <span>Entregar evaluación ahora</span>
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* Anti-Cheat Preventive Warning Modal */}
         {warningModalText && (
@@ -7485,15 +7610,6 @@ export function StudentPortal({
                 type="button"
                 onClick={() => {
                   setWarningModalText(null);
-                  if (isExamFullscreenGuardEnabled) {
-                    try {
-                      if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
-                        document.documentElement.requestFullscreen().catch(() => {});
-                      }
-                    } catch {
-                      // ignore
-                    }
-                  }
                 }}
                 className="w-full py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold cursor-pointer"
               >

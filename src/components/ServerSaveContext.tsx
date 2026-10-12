@@ -142,9 +142,10 @@ export function ServerSaveProvider({
         if (autoSaveTimersRef.current[sectionKey]) {
           clearTimeout(autoSaveTimersRef.current[sectionKey]);
         }
+        // Debounce of 1500ms (1.5 seconds) to allow typing completion without congesting network/server
         autoSaveTimersRef.current[sectionKey] = setTimeout(() => {
           void saveSectionToServer(sectionKey, description);
-        }, 350);
+        }, 1500);
         return;
       }
       setDirtySections((prev) => ({
@@ -318,6 +319,7 @@ export function OptionServerSaveBar({
   } = useServerSave();
   const [localError, setLocalError] = useState<string | null>(null);
   const [justSavedFlash, setJustSavedFlash] = useState(false);
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const isAutoSave = autoSave ?? true;
 
@@ -338,21 +340,32 @@ export function OptionServerSaveBar({
     if (serializedWatch === undefined) return;
     if (prevWatchRef.current !== undefined && prevWatchRef.current !== serializedWatch) {
       if (isAutoSave) {
-        onBeforeSave?.();
-        void saveSectionToServer(
-          sectionKey,
-          `Actualización automática en «${label}»`
-        ).then((res) => {
-          if (res.ok) {
-            setJustSavedFlash(true);
-            setTimeout(() => setJustSavedFlash(false), 4500);
-          }
-        });
+        if (debounceTimerRef.current) {
+          clearTimeout(debounceTimerRef.current);
+        }
+        // Debounce of 1500ms (1.5 seconds) so continuous typing or multiple selections only fire ONE save
+        debounceTimerRef.current = setTimeout(() => {
+          onBeforeSave?.();
+          void saveSectionToServer(
+            sectionKey,
+            `Actualización automática en «${label}»`
+          ).then((res) => {
+            if (res.ok) {
+              setJustSavedFlash(true);
+              setTimeout(() => setJustSavedFlash(false), 3500);
+            }
+          });
+        }, 1500);
       } else {
         markSectionDirty(sectionKey, `Cambio realizado en «${label}»`);
       }
     }
     prevWatchRef.current = serializedWatch;
+    return () => {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+    };
   }, [serializedWatch, sectionKey, label, isAutoSave, markSectionDirty, saveSectionToServer, onBeforeSave]);
 
   const isDirty = Boolean(dirtySections[sectionKey]);

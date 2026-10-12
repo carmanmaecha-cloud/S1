@@ -1750,13 +1750,26 @@ function AppContent() {
         student: enrichedUpdatedStudent
       });
 
-      logCriticalAppEvent({
-        category: 'CALIFICACIONES',
-        action: 'ENTREGA_EXAMEN_REGISTRADA',
-        actorRole: 'ESTUDIANTE',
-        actorId: updatedStudent.id,
-        details: `Estudiante ${updatedStudent.nombre} (${updatedStudent.id}) entregó ${result.modalidadTitle || result.modalidad} · Nota: ${result.notaFinal.toFixed(2)}/5.0 · Tiempo: ${Math.round((result.duracionSegundos || 0) / 60)} min`
-      });
+      const finalGrade =
+        typeof result.notaColombiana === 'number'
+          ? result.notaColombiana
+          : typeof result.notaFinal === 'number'
+          ? result.notaFinal
+          : 0;
+      const modTitle = result.modalidadLabel || result.modalidadTitle || result.modalidad;
+      const elapsedSec = result.tiempoEmpleadoSegundos || result.duracionSegundos || 0;
+
+      try {
+        logCriticalAppEvent({
+          category: 'CALIFICACIONES',
+          action: 'ENTREGA_EXAMEN_REGISTRADA',
+          actorRole: 'ESTUDIANTE',
+          actorId: updatedStudent.id,
+          details: `Estudiante ${updatedStudent.nombre} (${updatedStudent.id}) entregó ${modTitle} · Nota: ${finalGrade.toFixed(2)}/5.0 · Tiempo: ${Math.round(elapsedSec / 60)} min`
+        });
+      } catch (logErr) {
+        console.error('Error no crítico al registrar entrega en Audit Log:', logErr);
+      }
 
       if (stateRef.current.config.webhookUrl) {
         fetch(stateRef.current.config.webhookUrl, {
@@ -2313,26 +2326,73 @@ function AppContent() {
           stateRef.current.questionsBankExplicitlyCleared
         );
 
-        const includeQuestions =
-          sectionKey.includes('pregunta') ||
-          sectionKey.includes('banco') ||
-          sectionKey === 'global_save';
-        if (includeQuestions) {
-          safeWriteLocalStorage(STORAGE_KEYS.QUESTIONS, stateRef.current.questions);
+        const isGlobal =
+          sectionKey === 'global_save' ||
+          sectionKey.includes('full') ||
+          sectionKey === 'Panel General';
+
+        let data: any = null;
+
+        if (isGlobal) {
+          const includeQuestions =
+            sectionKey.includes('pregunta') ||
+            sectionKey.includes('banco') ||
+            sectionKey === 'global_save';
+          if (includeQuestions) {
+            safeWriteLocalStorage(STORAGE_KEYS.QUESTIONS, stateRef.current.questions);
+          }
+
+          data = await pushServerMutation('/api/state/save-all', 'POST', {
+            section: sectionKey,
+            description,
+            config: stateRef.current.config,
+            students: stateRef.current.students,
+            questions: includeQuestions ? stateRef.current.questions : undefined,
+            attempts: stateRef.current.attempts,
+            abproEvaluations: stateRef.current.abproEvaluations,
+            customMiniRetos: stateRef.current.customMiniRetos,
+            academicDataset: stateRef.current.academicDataset,
+            questionsBankExplicitlyCleared: stateRef.current.questionsBankExplicitlyCleared
+          });
+        } else {
+          // Ultra-fast granular differential save (only transmits the modified entity, reducing payload from 1.5MB to ~2KB)
+          let entity = 'config';
+          let payloadData: any = stateRef.current.config;
+
+          if (sectionKey.includes('pregunta') || sectionKey.includes('banco')) {
+            entity = 'questions';
+            payloadData = stateRef.current.questions;
+            safeWriteLocalStorage(STORAGE_KEYS.QUESTIONS, stateRef.current.questions);
+          } else if (
+            sectionKey.includes('nomina') ||
+            sectionKey.includes('estudiante') ||
+            sectionKey.includes('student')
+          ) {
+            entity = 'students';
+            payloadData = stateRef.current.students;
+          } else if (
+            sectionKey.includes('asistencia') ||
+            sectionKey.includes('clase') ||
+            sectionKey.includes('academic')
+          ) {
+            entity = 'academicDataset';
+            payloadData = stateRef.current.academicDataset;
+          } else if (sectionKey.includes('intento') || sectionKey.includes('attempt')) {
+            entity = 'attempts';
+            payloadData = stateRef.current.attempts;
+          } else if (sectionKey.includes('mini_reto') || sectionKey.includes('reto')) {
+            entity = 'customMiniRetos';
+            payloadData = stateRef.current.customMiniRetos;
+          }
+
+          data = await pushServerMutation('/api/state/differential', 'POST', {
+            entity,
+            data: payloadData,
+            section: sectionKey,
+            description
+          });
         }
 
-        const data = await pushServerMutation('/api/state/save-all', 'POST', {
-          section: sectionKey,
-          description,
-          config: stateRef.current.config,
-          students: stateRef.current.students,
-          questions: includeQuestions ? stateRef.current.questions : undefined,
-          attempts: stateRef.current.attempts,
-          abproEvaluations: stateRef.current.abproEvaluations,
-          customMiniRetos: stateRef.current.customMiniRetos,
-          academicDataset: stateRef.current.academicDataset,
-          questionsBankExplicitlyCleared: stateRef.current.questionsBankExplicitlyCleared
-        });
         if (data && data.ok) {
           return {
             ok: true,

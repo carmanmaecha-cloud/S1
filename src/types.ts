@@ -19,6 +19,7 @@ export interface Question {
     D: string;
   };
   correcta: 'A' | 'B' | 'C' | 'D';
+  respuestaCorrecta?: string;
   justificacion: string;
   casoGrafico?: {
     tipo: 'embudo' | 'segmentacion' | 'matriz_mep' | 'tendencia_consumo';
@@ -340,14 +341,19 @@ export interface StudentRecord {
   modulosRetosBloqueados?: (1 | 2 | 3 | 4 | 5)[]; // Módulos de Mini Retos (1 al 5) deshabilitados específicamente para este estudiante
   progresoRetos?: Partial<Record<1 | 2 | 3 | 4 | 5, StudentRetoModuleProgress>>;
   historialIntentosRetos?: MiniRetoAttemptRecord[];
-  historialLlamadosAtencion?: AntiCheatLogEntry[];
+  historialLlamadosAtencion?: any[];
   solicitudesRevision?: AcademicReviewTicket[];
   resumenServidor?: StudentServerAcademicSummary;
+  motivoUltimoLlamado?: string;
+  fechaUltimoLlamado?: string;
+  llamadosAtencion?: number;
+  bloqueadoPorTrampa?: boolean;
 }
 
 export interface ExamAttemptResult {
   attemptId: string;
   fecha: string;
+  fechaHora?: string;
   timestampMs: number;
   studentId: string;
   studentName: string;
@@ -368,6 +374,11 @@ export interface ExamAttemptResult {
   historialLlamadosIntento?: AntiCheatLogEntry[];
   firmaVerificacion: string;
   sincronizadoSheets?: boolean;
+  id?: string;
+  notaFinal?: number;
+  nota?: number;
+  duracionSegundos?: number;
+  modalidadTitle?: string;
   respuestasDetalle: {
     questionId: string;
     modulo: number;
@@ -403,6 +414,12 @@ export interface LiveClassroomSession {
   inactividadMouseSegundos?: number;
   inactividadSospechosa?: boolean;
   pantallaMaximizada?: boolean;
+  modalidad?: string;
+  remainingSeconds?: number;
+  lastUpdatedMs?: number;
+  windowFocused?: boolean;
+  currentQuestion?: number;
+  totalQuestions?: number;
 }
 
 export interface ABProProjectEvaluation {
@@ -421,6 +438,8 @@ export interface SystemConfig {
   examenAbierto: boolean;
   estudiantesConEstadoCerrado?: string[]; // IDs de estudiantes que tienen el Estado Maestro del Examen en CERRADO (Deshabilitado)
   mensajeSalaEspera: string;
+  nombreDocente?: string;
+  maxIntentosMiniReto?: number;
   ventanaHorariaActiva?: boolean;
   diasPermitidos?: number[]; // 0=Dom, 1=Lun, ..., 6=Sáb
   horaInicioPermitida?: string;

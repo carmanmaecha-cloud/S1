@@ -256,6 +256,8 @@ export interface StudentClassSessionRecord {
   participacion: number; // 30%
   examen: number; // 30%
   trabajoPractico: number; // 30%
+  trabajoNota?: number;
+  notaTrabajoPractico?: number;
   notaFinal: number; // 0.0 - 5.0
   // Explicit graded flags: false = "Sin nota"
   comportamientoCalificado?: boolean;
@@ -301,6 +303,15 @@ export interface StudentClassSessionRecord {
   excusaSolicitadaAtIso?: string;
   excusaRespuestaDocente?: string;
   observacionDocente: string;
+  trabajoEntregaUrl?: string;
+  trabajoComentarioEstudiante?: string;
+  asistenciaSolicitudEstado?: string;
+  asistenciaSolicitudBloque?: string;
+  asistenciaSolicitudMotivo?: string;
+  asistenciaSolicitudSoporteUrl?: string;
+  asistenciaB1?: boolean;
+  asistenciaB2?: boolean;
+  llamadoVirtualExpiraMs?: number;
 }
 
 export interface ActiveClassOpeningConfig {
