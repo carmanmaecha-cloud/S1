@@ -10,8 +10,12 @@ import {
   CustomMiniRetoTemplate,
   MiniRetoAttemptRecord,
   StudentRetoModuleProgress,
-  AntiCheatLogEntry
+  AntiCheatLogEntry,
+  UniversalCourseWorkspace,
+  AcademicReviewTicket,
+  CourseScheduleConfig
 } from '../types';
+import { CourseScheduleManagerPanel } from './CourseScheduleManagerPanel';
 import {
   getEffectiveMaxLlamadosAtencion,
   computeStudentServerSummary,
@@ -37,10 +41,12 @@ import { AcademicSummaryDashboard } from './AcademicSummaryDashboard';
 import {
   getEffectiveCourseMetadata,
   getEffectiveRegisteredTeachers,
-  canTeacherAccessCourse
+  canTeacherAccessCourse,
+  generateBaseRetosForCourseModules
 } from '../utils/universalCourseEngine';
 import {
   AcademicDataset,
+  ClassSessionId,
   buildInitialAcademicDataset,
   computeStudentAcademicSummary,
   normalizeAndSyncAcademicDataset
@@ -52,6 +58,10 @@ import { recordApiRequestDiagnostic } from '../utils/systemDiagnostics';
 import { OptionServerSaveBar, useServerSave } from './ServerSaveContext';
 import { useAuthSession } from '../context/AuthContext';
 import type { ForceServerResyncResult } from '../App';
+import {
+  recordEncryptedAuditEvent,
+  type DecryptedAuditEvent
+} from '../utils/encryptedAuditLogger';
 import {
   OFFICIAL_BADGES,
   getEffectiveBadgesForCourse,
@@ -111,7 +121,8 @@ import {
   TrendingUp,
   ChevronRight,
   ChevronDown,
-  ArrowLeft
+  ArrowLeft,
+  ArrowRight
 } from 'lucide-react';
 import { ExamModality } from '../types';
 
@@ -158,6 +169,9 @@ interface TeacherPanelProps {
   lastServerSyncFormatted?: string;
   currentServerRevision?: number;
   serverRevision?: number;
+  encryptedAuditLogs?: DecryptedAuditEvent[];
+  onForceFlushEncryptedAuditLogs?: () => Promise<{ flushedCount: number; pendingCount: number }>;
+  isCourseDataHydratedOnDemand?: boolean;
 }
 
 type TeacherTab =
@@ -207,7 +221,10 @@ export function TeacherPanel({
   onForceServerSync,
   lastServerSyncFormatted,
   currentServerRevision,
-  serverRevision
+  serverRevision,
+  encryptedAuditLogs = [],
+  onForceFlushEncryptedAuditLogs,
+  isCourseDataHydratedOnDemand = true
 }: TeacherPanelProps) {
   const effectiveServerRevision = currentServerRevision ?? serverRevision ?? 1;
   // Teacher Authentication State (Persisted across page reloads via AuthContext + sessionStorageWrapper)
@@ -215,6 +232,7 @@ export function TeacherPanel({
     authState,
     loginTeacher,
     logoutTeacher,
+    setTeacherSelectedCourseId,
     loginStudent,
     loginEditor,
     setTeacherActiveTab
@@ -223,6 +241,11 @@ export function TeacherPanel({
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(
     () => authState.teacherSessionActive
   );
+  const [courseSelectionWindowOpen, setCourseSelectionWindowOpen] = useState<boolean>(
+    () => !authState.teacherSelectedCourseId
+  );
+  const [courseSelectionSearch, setCourseSelectionSearch] = useState<string>('');
+  const [isSelectingCourseId, setIsSelectingCourseId] = useState<string | null>(null);
   const [teacherIdAttempt, setTeacherIdAttempt] = useState('');
   const [pinAttempt, setPinAttempt] = useState('');
   const [authDenied, setAuthDenied] = useState(false);
@@ -233,11 +256,21 @@ export function TeacherPanel({
     onSessionActiveChange?.(isAuthenticated);
   }, [isAuthenticated, onSessionActiveChange]);
 
+  useEffect(() => {
+    if (authState.teacherSessionActive && !isAuthenticated) {
+      setIsAuthenticated(true);
+      if (!authState.teacherSelectedCourseId) {
+        setCourseSelectionWindowOpen(true);
+      }
+    }
+  }, [authState.teacherSessionActive, authState.teacherSelectedCourseId, isAuthenticated]);
+
   // Respond to parent logout signal
   useEffect(() => {
     if (logoutSignal && logoutSignal > 0) {
       logoutTeacher();
       setIsAuthenticated(false);
+      setCourseSelectionWindowOpen(true);
       setTeacherIdAttempt('');
       setPinAttempt('');
       setAuthDenied(false);
@@ -348,8 +381,13 @@ export function TeacherPanel({
   }, [projectorModeOpen, projectorCustomTimerRunning]);
 
   const activeCourseMeta = useMemo(
-    () => getEffectiveCourseMetadata(config, authState.teacherAuthenticatedId),
-    [config, authState.teacherAuthenticatedId]
+    () =>
+      getEffectiveCourseMetadata(
+        config,
+        authState.teacherAuthenticatedId,
+        authState.teacherSelectedCourseId
+      ),
+    [config, authState.teacherAuthenticatedId, authState.teacherSelectedCourseId]
   );
   const activeCourseExamModalities = useMemo(
     () => getActiveExamModalitiesForConfig(config),
@@ -360,9 +398,307 @@ export function TeacherPanel({
   const activeCourseBadges = useMemo(() => getEffectiveBadgesForCourse(config), [config]);
   const totalRetosCount = Math.max(1, activeCourseBadges.length);
 
-  // Auto-sync teacher's assigned course from universalCoursesCatalog when teacher is logged in
+  // List of courses assigned to the currently authenticated teacher
+  const assignedTeacherCourseWorkspaces = useMemo(() => {
+    const teacherId = (
+      authState.teacherAuthenticatedId ||
+      teacherIdAttempt ||
+      config.idDocente ||
+      'DOCENTE2026'
+    )
+      .trim()
+      .replace(/[\s.-]/g, '')
+      .toUpperCase();
+
+    const rawCatalog = Array.isArray(config.universalCoursesCatalog)
+      ? config.universalCoursesCatalog.filter((w) => w && w.meta && w.meta.courseId)
+      : [];
+
+    const catalogMap = new Map<string, UniversalCourseWorkspace>();
+    rawCatalog.forEach((w) => {
+      catalogMap.set(w.meta.courseId, w);
+    });
+
+    if (
+      config.activeCourseMeta &&
+      config.activeCourseMeta.courseId &&
+      !catalogMap.has(config.activeCourseMeta.courseId)
+    ) {
+      catalogMap.set(config.activeCourseMeta.courseId, {
+        meta: config.activeCourseMeta,
+        studentsCount: students.length,
+        questionsCount: questions.length,
+        attemptsCount: attempts.length,
+        retosCount: customMiniRetos.length,
+        students,
+        questions,
+        attempts,
+        abproEvaluations,
+        customMiniRetos,
+        academicDataset
+      });
+    }
+
+    const allWorkspaces = Array.from(catalogMap.values());
+    if (allWorkspaces.length === 0) return [];
+
+    const allTeachers = getEffectiveRegisteredTeachers(config);
+    const teacherRec = allTeachers.find(
+      (t) => String(t?.id || '').trim().replace(/[\s.-]/g, '').toUpperCase() === teacherId
+    );
+
+    const matchesTeacher = (ws: UniversalCourseWorkspace) => {
+      const meta = ws.meta;
+      if (!meta) return false;
+      const assignedId = String(meta.docenteAsignadoId || '')
+        .trim()
+        .replace(/[\s.-]/g, '')
+        .toUpperCase();
+      if (assignedId && assignedId === teacherId) return true;
+
+      if (
+        Array.isArray(meta.docentesAutorizadosIds) &&
+        meta.docentesAutorizadosIds.some(
+          (id) => String(id || '').trim().replace(/[\s.-]/g, '').toUpperCase() === teacherId
+        )
+      ) {
+        return true;
+      }
+
+      if (
+        teacherRec &&
+        Array.isArray(teacherRec.cursosAsignadosIds) &&
+        teacherRec.cursosAsignadosIds.includes(meta.courseId)
+      ) {
+        return true;
+      }
+
+      if (
+        teacherRec?.nombre &&
+        meta.docenteResponsable &&
+        String(meta.docenteResponsable).trim().toLowerCase() ===
+          String(teacherRec.nombre).trim().toLowerCase()
+      ) {
+        return true;
+      }
+
+      return false;
+    };
+
+    const assignedList = allWorkspaces.filter(matchesTeacher);
+    if (assignedList.length > 0) {
+      return assignedList;
+    }
+
+    return allWorkspaces;
+  }, [
+    authState.teacherAuthenticatedId,
+    teacherIdAttempt,
+    config,
+    students,
+    questions,
+    attempts,
+    abproEvaluations,
+    customMiniRetos,
+    academicDataset
+  ]);
+
+  const resolveWorkspaceCompleteData = (ws: UniversalCourseWorkspace) => {
+    const isCurrentlyActive = config.activeCourseId === ws.meta.courseId;
+    const rosterDbs = Array.isArray(config.studentRosterDatabases)
+      ? config.studentRosterDatabases
+      : [];
+    const qBankDbs = Array.isArray(config.questionBankDatabases)
+      ? config.questionBankDatabases
+      : [];
+
+    const matchedRosterDb = ws.meta.selectedStudentRosterDbId
+      ? rosterDbs.find((d) => d.id === ws.meta.selectedStudentRosterDbId)
+      : undefined;
+    const matchedQBankDb = ws.meta.selectedQuestionBankDbId
+      ? qBankDbs.find((d) => d.id === ws.meta.selectedQuestionBankDbId)
+      : undefined;
+
+    const resolvedStudents =
+      isCurrentlyActive && students.length > 0
+        ? students
+        : Array.isArray(ws.students) && ws.students.length > 0
+        ? ws.students
+        : matchedRosterDb && Array.isArray(matchedRosterDb.students)
+        ? matchedRosterDb.students
+        : [];
+
+    const resolvedQuestions =
+      isCurrentlyActive && questions.length > 0
+        ? questions
+        : Array.isArray(ws.questions) && ws.questions.length > 0
+        ? ws.questions
+        : matchedQBankDb && Array.isArray(matchedQBankDb.questions)
+        ? matchedQBankDb.questions
+        : [];
+
+    const resolvedAttempts =
+      isCurrentlyActive && attempts.length > 0
+        ? attempts
+        : Array.isArray(ws.attempts)
+        ? ws.attempts
+        : [];
+
+    const resolvedAbpro =
+      isCurrentlyActive && abproEvaluations.length > 0
+        ? abproEvaluations
+        : Array.isArray(ws.abproEvaluations)
+        ? ws.abproEvaluations
+        : [];
+
+    const resolvedRetos =
+      Array.isArray(ws.customMiniRetos) && ws.customMiniRetos.length > 0
+        ? ws.customMiniRetos
+        : generateBaseRetosForCourseModules(ws.meta, resolvedQuestions);
+
+    const resolvedAcademic = normalizeAndSyncAcademicDataset(
+      ws.academicDataset ||
+        (isCurrentlyActive ? academicDataset : undefined) ||
+        buildInitialAcademicDataset(resolvedStudents),
+      resolvedStudents,
+      ws.meta.modulosCurso,
+      ws.meta.nombreCurso
+    );
+
+    return {
+      ws,
+      meta: ws.meta,
+      students: resolvedStudents,
+      questions: resolvedQuestions,
+      attempts: resolvedAttempts,
+      abproEvaluations: resolvedAbpro,
+      customMiniRetos: resolvedRetos,
+      academicDataset: resolvedAcademic,
+      rosterDbName:
+        matchedRosterDb?.name ||
+        ws.meta.selectedStudentRosterDbName ||
+        (resolvedStudents.length > 0 ? 'Nómina del Curso' : 'Sin nómina asignada'),
+      qBankDbName:
+        matchedQBankDb?.name ||
+        ws.meta.selectedQuestionBankDbName ||
+        (resolvedQuestions.length > 0 ? 'Banco del Curso' : 'Sin banco asignado')
+    };
+  };
+
+  const handleSelectCourseForTeacher = async (ws: UniversalCourseWorkspace) => {
+    if (isSelectingCourseId) return;
+    setIsSelectingCourseId(ws.meta.courseId);
+    try {
+      const resolved = resolveWorkspaceCompleteData(ws);
+
+      const existingCatalog = Array.isArray(config.universalCoursesCatalog)
+        ? config.universalCoursesCatalog.filter((c) => c && c.meta && c.meta.courseId)
+        : [];
+      const hasTargetInCatalog = existingCatalog.some(
+        (c) => c.meta.courseId === resolved.meta.courseId
+      );
+
+      const updatedCatalog: UniversalCourseWorkspace[] = (
+        hasTargetInCatalog
+          ? existingCatalog
+          : [
+              ...existingCatalog,
+              {
+                meta: resolved.meta,
+                studentsCount: resolved.students.length,
+                questionsCount: resolved.questions.length,
+                attemptsCount: resolved.attempts.length,
+                retosCount: resolved.customMiniRetos.length,
+                students: resolved.students,
+                questions: resolved.questions,
+                attempts: resolved.attempts,
+                abproEvaluations: resolved.abproEvaluations,
+                customMiniRetos: resolved.customMiniRetos,
+                academicDataset: resolved.academicDataset
+              }
+            ]
+      ).map((entry) => {
+        if (entry.meta.courseId === resolved.meta.courseId) {
+          return {
+            ...entry,
+            meta: resolved.meta,
+            studentsCount: resolved.students.length,
+            questionsCount: resolved.questions.length,
+            attemptsCount: resolved.attempts.length,
+            retosCount: resolved.customMiniRetos.length,
+            students: resolved.students,
+            questions: resolved.questions,
+            attempts: resolved.attempts,
+            abproEvaluations: resolved.abproEvaluations,
+            customMiniRetos: resolved.customMiniRetos,
+            academicDataset: resolved.academicDataset
+          };
+        }
+        if (
+          config.activeCourseId &&
+          entry.meta.courseId === config.activeCourseId &&
+          config.activeCourseId !== resolved.meta.courseId
+        ) {
+          return {
+            ...entry,
+            studentsCount: students.length,
+            questionsCount: questions.length,
+            attemptsCount: attempts.length,
+            retosCount: customMiniRetos.length,
+            students,
+            questions,
+            attempts,
+            abproEvaluations,
+            customMiniRetos,
+            academicDataset
+          };
+        }
+        return entry;
+      });
+
+      const nextConfig: SystemConfig = {
+        ...config,
+        activeCourseId: resolved.meta.courseId,
+        activeCourseMeta: resolved.meta,
+        universalCoursesCatalog: updatedCatalog
+      };
+
+      if (onFullSystemRestore) {
+        await onFullSystemRestore({
+          config: nextConfig,
+          students: resolved.students,
+          questions: resolved.questions,
+          attempts: resolved.attempts,
+          abproEvaluations: resolved.abproEvaluations,
+          customMiniRetos: resolved.customMiniRetos,
+          academicDataset: resolved.academicDataset
+        });
+      } else {
+        onUpdateConfig(nextConfig);
+        onUpdateStudents(resolved.students);
+        onUpdateQuestions(resolved.questions);
+        onUpdateAttempts(resolved.attempts);
+        onUpdateABProEvaluations(resolved.abproEvaluations);
+        onUpdateCustomMiniRetos(resolved.customMiniRetos);
+        onUpdateAcademicDataset?.(resolved.academicDataset);
+      }
+
+      setTeacherSelectedCourseId(resolved.meta.courseId);
+      setCourseSelectionWindowOpen(false);
+      setActiveTabState('panel_central');
+      setTabHistory(['panel_central']);
+      setActiveControlDrawer('none');
+      if (typeof window !== 'undefined') {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+    } finally {
+      setIsSelectingCourseId(null);
+    }
+  };
+
+  // Auto-sync teacher's selected course from universalCoursesCatalog when teacher has already chosen a course
   useEffect(() => {
-    if (!isAuthenticated) return;
+    if (!isAuthenticated || courseSelectionWindowOpen || !authState.teacherSelectedCourseId) return;
     const teacherId = (authState.teacherAuthenticatedId || '')
       .trim()
       .replace(/[\s.-]/g, '')
@@ -374,41 +710,9 @@ export function TeacherPanel({
       : [];
     if (catalog.length === 0) return;
 
-    const teachersList = Array.isArray(config.registeredTeachers) ? config.registeredTeachers : [];
-    const teacherRec = teachersList.find(
-      (t) => String(t?.id || '').trim().replace(/[\s.-]/g, '').toUpperCase() === teacherId
-    );
-
-    const matchesTeacher = (meta: typeof activeCourseMeta) => {
-      if (
-        meta?.docenteAsignadoId &&
-        String(meta.docenteAsignadoId || '').trim().replace(/[\s.-]/g, '').toUpperCase() === teacherId
-      ) {
-        return true;
-      }
-      if (
-        Array.isArray(meta?.docentesAutorizadosIds) &&
-        meta.docentesAutorizadosIds.some(
-          (id) => String(id || '').trim().replace(/[\s.-]/g, '').toUpperCase() === teacherId
-        )
-      ) {
-        return true;
-      }
-      if (
-        teacherRec &&
-        Array.isArray(teacherRec.cursosAsignadosIds) &&
-        teacherRec.cursosAsignadosIds.includes(meta.courseId)
-      ) {
-        return true;
-      }
-      return false;
-    };
-
-    const currentActiveInCat = catalog.find((w) => w.meta.courseId === config.activeCourseId);
     const targetWorkspace =
-      currentActiveInCat && matchesTeacher(currentActiveInCat.meta)
-        ? currentActiveInCat
-        : catalog.find((w) => matchesTeacher(w.meta));
+      catalog.find((w) => w.meta.courseId === authState.teacherSelectedCourseId) ||
+      catalog.find((w) => w.meta.courseId === config.activeCourseId);
 
     if (!targetWorkspace) return;
 
@@ -470,6 +774,8 @@ export function TeacherPanel({
     }
   }, [
     isAuthenticated,
+    courseSelectionWindowOpen,
+    authState.teacherSelectedCourseId,
     authState.teacherAuthenticatedId,
     config.universalCoursesCatalog,
     config.activeCourseId,
@@ -545,6 +851,150 @@ export function TeacherPanel({
   const [isForcingServerResync, setIsForcingServerResync] = useState<boolean>(false);
   const [forceResyncResult, setForceResyncResult] = useState<ForceServerResyncResult | null>(null);
 
+  // Bitácora de Auditoría Institucional (/api/audit-logs)
+  const [institutionalAuditLogs, setInstitutionalAuditLogs] = useState<
+    Array<{
+      id: string;
+      timestampIso: string;
+      actor: string;
+      action: string;
+      detail: string;
+      revision: number;
+    }>
+  >([]);
+  const [isLoadingAuditLogs, setIsLoadingAuditLogs] = useState<boolean>(false);
+  const [showTeacherPasswordInput, setShowTeacherPasswordInput] = useState<boolean>(false);
+  const [projectorPrivacyBlur, setProjectorPrivacyBlur] = useState<boolean>(false);
+  const [classroomCodeHelpRequests, setClassroomCodeHelpRequests] = useState<
+    Array<{
+      id: string;
+      studentId: string;
+      studentName: string;
+      documento?: string;
+      accessCode?: string;
+      requestedAtIso: string;
+      courseName?: string;
+    }>
+  >([]);
+  const [lockedAcademicCuts, setLockedAcademicCuts] = useState<Record<string, boolean>>(() => {
+    try {
+      const raw = localStorage.getItem('evaluaplus_locked_academic_cuts_v1');
+      return raw ? JSON.parse(raw) : { corte1: false, corte2: false, corte3: false };
+    } catch {
+      return { corte1: false, corte2: false, corte3: false };
+    }
+  });
+
+  const fetchClassroomCodeHelpRequests = async () => {
+    try {
+      const res = await fetch('/api/auth/code-help-requests', { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data?.requests)) {
+          setClassroomCodeHelpRequests(data.requests);
+        }
+      }
+    } catch {
+      // ignore offline
+    }
+  };
+
+  const handleDismissCodeHelpRequest = async (studentId: string) => {
+    try {
+      await fetch(`/api/auth/code-help-requests/${encodeURIComponent(studentId)}`, {
+        method: 'DELETE'
+      });
+      setClassroomCodeHelpRequests((prev) => prev.filter((r) => r.studentId !== studentId));
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleToggleAcademicCutLock = (cutKey: 'corte1' | 'corte2' | 'corte3', label: string) => {
+    setLockedAcademicCuts((prev) => {
+      const nextVal = !prev[cutKey];
+      const nextState = { ...prev, [cutKey]: nextVal };
+      try {
+        localStorage.setItem('evaluaplus_locked_academic_cuts_v1', JSON.stringify(nextState));
+      } catch {
+        // ignore
+      }
+      void recordInstitutionalAuditLog(
+        nextVal ? 'CIERRE_OFICIAL_CORTE' : 'REAPERTURA_CORTE',
+        `${nextVal ? 'Congelación / Cierre oficial' : 'Reapertura'} de ${label} en el curso ${
+          config.activeCourseMeta?.nombreCurso || 'Curso Activo'
+        }.`
+      );
+      return nextState;
+    });
+  };
+
+  const fetchInstitutionalAuditLogs = async () => {
+    setIsLoadingAuditLogs(true);
+    try {
+      const res = await fetch('/api/audit-logs?limit=80', { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        const rawList = Array.isArray(data?.logs)
+          ? data.logs
+          : Array.isArray(data?.entries)
+          ? data.entries
+          : [];
+        const normalized = rawList.map((item: any, idx: number) => ({
+          id: item.id || `audit_${idx}_${item.saved_at || item.timestampIso || Date.now()}`,
+          timestampIso: item.timestampIso || item.saved_at || new Date().toISOString(),
+          actor: item.actor || item.actorId || item.actorRole || 'sistema',
+          action: item.action || item.section || 'AuditoriaInstitucional',
+          detail: item.detail || item.description || 'Evento registrado',
+          revision: Number(item.revision) || 0
+        }));
+        setInstitutionalAuditLogs(normalized);
+      }
+    } catch {
+      // ignore offline
+    } finally {
+      setIsLoadingAuditLogs(false);
+    }
+  };
+
+  const recordInstitutionalAuditLog = async (action: string, detail: string) => {
+    try {
+      const actor = authState.teacherAuthenticatedId || config.idDocente || 'DOCENTE2026';
+      const res = await fetch('/api/audit-logs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          section: action,
+          description: detail,
+          actorId: actor,
+          actorRole: 'docente'
+        })
+      });
+      if (res.ok) {
+        void fetchInstitutionalAuditLogs();
+      }
+    } catch {
+      // ignore offline
+    }
+  };
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    void fetchClassroomCodeHelpRequests();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'hidden') {
+        void fetchClassroomCodeHelpRequests();
+      }
+    }, 6000);
+    return () => window.clearInterval(timer);
+  }, [isAuthenticated]);
+
+  useEffect(() => {
+    if (isAuthenticated && activeTab === 'seguridad_convivencia') {
+      void fetchInstitutionalAuditLogs();
+    }
+  }, [isAuthenticated, activeTab]);
+
   // Editable Config fields with explicit local pendingChange & Guardando... states
   const [pinAulaDraft, setPinAulaDraft] = useState<string>(config.pinAulaDia || 'AULA26');
   const [isSavingPinAula, setIsSavingPinAula] = useState<boolean>(false);
@@ -601,6 +1051,219 @@ export function TeacherPanel({
   const deletingExamAttemptId = deletingAuditAttemptId;
   const deletingRetoAttemptId = deletingAuditAttemptId;
   const [auditActionNotice, setAuditActionNotice] = useState<string | null>(null);
+
+  // Estados para Bandeja Centralizada de Solicitudes de Revisión de Nota y Excusas de Asistencia
+  const [ticketCommentDrafts, setTicketCommentDrafts] = useState<Record<string, string>>({});
+  const [ticketGradeDrafts, setTicketGradeDrafts] = useState<Record<string, string>>({});
+  const [ticketInboxFilter, setTicketInboxFilter] = useState<'PENDIENTE' | 'TODAS'>('PENDIENTE');
+
+  const handleResolveAcademicReviewTicket = (
+    studentId: string,
+    ticket: AcademicReviewTicket,
+    decision: 'APROBADA' | 'RECHAZADA'
+  ) => {
+    const actor = authState.teacherAuthenticatedId || config.idDocente || 'DOCENTE2026';
+    const nowIso = new Date().toISOString();
+    const nowFormatted = new Date(nowIso).toLocaleString('es-CO');
+    const rawComment = (ticketCommentDrafts[ticket.id] || '').trim();
+    const officialComment =
+      rawComment ||
+      (decision === 'APROBADA'
+        ? ticket.tipo === 'EXCUSA_INASISTENCIA'
+          ? 'Se valida el soporte presentado y se homologa la asistencia de la sesión en 5.0.'
+          : 'Se acepta la solicitud de revisión académica y se actualiza la calificación oficial.'
+        : 'Revisada la solicitud conforme a los criterios de evaluación, se mantiene el registro original.');
+
+    const draftGradeStr =
+      ticketGradeDrafts[ticket.id] ??
+      String(ticket.notaSolicitada ?? ticket.notaActual ?? 4.0);
+    const approvedGrade = Math.min(
+      5.0,
+      Math.max(0.0, Number((parseFloat(draftGradeStr) || 0).toFixed(1)))
+    );
+
+    let ajusteDetalle =
+      decision === 'RECHAZADA'
+        ? 'Solicitud rechazada sin modificación de nota/asistencia'
+        : 'Solicitud aprobada por el docente';
+
+    // 1. Si se aprueba Recalificación de Examen -> actualizar calificación del intento en 1 clic
+    if (decision === 'APROBADA' && ticket.tipo === 'RECALIFICACION_EXAMEN') {
+      const targetMod = (ticket.targetId || ticket.referenciaId || 'integral') as ExamModality;
+      const studentModAttempts = attempts.filter(
+        (a) => a.studentId === studentId && a.modalidad === targetMod
+      );
+      if (studentModAttempts.length > 0) {
+        const latestAttempt = [...studentModAttempts].sort(
+          (a, b) => (b.timestampMs || 0) - (a.timestampMs || 0)
+        )[0];
+        const minPass = Number(config.notaMinimaAprobacion) || 3.0;
+        const nextAttempts = attempts.map((att) =>
+          att.attemptId === latestAttempt.attemptId
+            ? {
+                ...att,
+                notaColombiana: approvedGrade,
+                porcentaje: Math.round((approvedGrade / 5) * 100),
+                estado: (approvedGrade >= minPass ? 'APROBADO' : 'REPROBADO') as
+                  | 'APROBADO'
+                  | 'REPROBADO'
+                  | 'SUSPENDIDO'
+              }
+            : att
+        );
+        onUpdateAttempts(nextAttempts);
+        ajusteDetalle = `Calificación de ${ticket.targetLabel || ticket.referenciaLabel} actualizada a ${approvedGrade.toFixed(1)} / 5.0`;
+      }
+    }
+
+    // 2. Si se aprueba Revisión de Corte / Nota de Clase -> actualizar nota en effectiveAcademicDataset
+    if (decision === 'APROBADA' && ticket.tipo === 'REVISION_CORTE_NOTA') {
+      const ref = (ticket.targetId || ticket.referenciaId || 'corte_1').toLowerCase();
+      const targetClassIds: ClassSessionId[] =
+        ref === 'corte_1'
+          ? [1, 2]
+          : ref === 'corte_2'
+          ? [3, 4]
+          : ref === 'corte_3'
+          ? [5, 6]
+          : ([Number(ref.replace('clase_', '')) || 1] as ClassSessionId[]);
+
+      const nextRecords = effectiveAcademicDataset.records.map((rec) => {
+        if (rec.studentId !== studentId) return rec;
+        const nextClases = { ...rec.clases };
+        targetClassIds.forEach((cId) => {
+          const prevCl = nextClases[cId];
+          if (prevCl) {
+            nextClases[cId] = {
+              ...prevCl,
+              notaTrabajoPractico: approvedGrade,
+              trabajoEstado: 'calificado',
+              observacionesDocente: `[Ticket #${ticket.id} Aprobado]: ${officialComment}`
+            };
+          }
+        });
+        return {
+          ...rec,
+          ultimaActualizacionIso: nowIso,
+          clases: nextClases
+        };
+      });
+      onUpdateAcademicDataset?.({
+        ...effectiveAcademicDataset,
+        records: nextRecords,
+        updatedAtIso: nowIso
+      });
+      ajusteDetalle = `Nota de ${ticket.targetLabel || ticket.referenciaLabel} actualizada a ${approvedGrade.toFixed(1)} / 5.0`;
+    }
+
+    // 3. Si es Excusa de Inasistencia -> actualizar asistencia en effectiveAcademicDataset
+    if (ticket.tipo === 'EXCUSA_INASISTENCIA') {
+      const cId: ClassSessionId =
+        ticket.claseId ||
+        (Number(
+          String(ticket.targetId || ticket.referenciaId || '1').replace(/\D+/g, '')
+        ) as ClassSessionId) ||
+        1;
+      const blk = ticket.bloqueExcusa || 'AB';
+      const nextRecords = effectiveAcademicDataset.records.map((rec) => {
+        if (rec.studentId !== studentId) return rec;
+        const cl = rec.clases[cId];
+        if (!cl) return rec;
+        if (decision === 'APROBADA') {
+          return {
+            ...rec,
+            ultimaActualizacionIso: nowIso,
+            clases: {
+              ...rec.clases,
+              [cId]: {
+                ...cl,
+                asistenciaSolicitudEstado: 'aprobada' as const,
+                excusaEstado: 'aprobada' as const,
+                excusaComentarioDocente: officialComment,
+                asistenciaB1Estado:
+                  blk === 'A' || blk === 'AB' ? 'excusa_aprobada' : cl.asistenciaB1Estado,
+                asistenciaB1: blk === 'A' || blk === 'AB' ? 5.0 : cl.asistenciaB1,
+                bloque1Asistio: blk === 'A' || blk === 'AB' ? true : cl.bloque1Asistio,
+                asistenciaB2Estado:
+                  blk === 'B' || blk === 'AB' ? 'excusa_aprobada' : cl.asistenciaB2Estado,
+                asistenciaB2: blk === 'B' || blk === 'AB' ? 5.0 : cl.asistenciaB2,
+                bloque2Asistio: blk === 'B' || blk === 'AB' ? true : cl.bloque2Asistio
+              }
+            }
+          };
+        }
+        return {
+          ...rec,
+          ultimaActualizacionIso: nowIso,
+          clases: {
+            ...rec.clases,
+            [cId]: {
+              ...cl,
+              asistenciaSolicitudEstado: 'rechazada' as const,
+              excusaEstado: 'rechazada' as const,
+              excusaComentarioDocente: officialComment
+            }
+          }
+        };
+      });
+      onUpdateAcademicDataset?.({
+        ...effectiveAcademicDataset,
+        records: nextRecords,
+        updatedAtIso: nowIso
+      });
+      if (decision === 'APROBADA') {
+        ajusteDetalle = `Excusa homologada en Clase C${cId} (Bloque ${blk}) con nota de asistencia 5.0`;
+      }
+    }
+
+    // 4. Actualizar el estado del ticket en el perfil del estudiante
+    const nextStudents = students.map((st) => {
+      if (st.id !== studentId) return st;
+      const currentTickets = Array.isArray(st.solicitudesRevision) ? st.solicitudesRevision : [];
+      const updatedTickets = currentTickets.map((t) =>
+        t.id === ticket.id
+          ? {
+              ...t,
+              estado: decision,
+              comentarioDocente: officialComment,
+              notaAprobada:
+                decision === 'APROBADA' && ticket.tipo !== 'EXCUSA_INASISTENCIA'
+                  ? approvedGrade
+                  : undefined,
+              respondedAtIso: nowIso,
+              fechaResolucion: nowFormatted,
+              resueltoPor: actor,
+              ajusteAplicadoDetalle: ajusteDetalle
+            }
+          : t
+      );
+      return {
+        ...st,
+        solicitudesRevision: updatedTickets
+      };
+    });
+    commitTeacherStudentsUpdate(nextStudents);
+
+    // 5. Registrar en Audit Log Cifrado + Bitácora Institucional
+    const auditDescription = `Ticket #${ticket.id} (${ticket.tipo}) de ${ticket.studentName} (${studentId}) -> ${decision}. ${ajusteDetalle}. Comentario Docente: "${officialComment}"`;
+    recordEncryptedAuditEvent({
+      actorRole: 'DOCENTE',
+      actorId: actor,
+      courseId: activeCourseMeta.courseId || 'COURSE-MARKETING-2026',
+      category:
+        ticket.tipo === 'EXCUSA_INASISTENCIA' ? 'ASISTENCIA_ACADEMICA' : 'CALIFICACIONES',
+      action: `RESOLUCION_TICKET_${decision}`,
+      details: auditDescription
+    });
+    void recordInstitutionalAuditLog(`RESOLUCION_TICKET_${decision}`, auditDescription);
+
+    setQuickTouchFeedbackNotice(
+      `✓ Ticket #${ticket.id} de ${ticket.studentName} ${
+        decision === 'APROBADA' ? 'APROBADO y actualizado en 1 clic' : 'RECHAZADO con comentario oficial'
+      } (Registrado en Audit Log).`
+    );
+    setTimeout(() => setQuickTouchFeedbackNotice(null), 4500);
+  };
 
   // Ensure selectedAuditStudentId always points to a valid student
   useEffect(() => {
@@ -1130,48 +1793,15 @@ export function TeacherPanel({
       matchedCourseWorkspace?.meta.docenteAsignadoId ||
       enteredId;
 
-    if (matchedCourseWorkspace) {
-      const switchingCourse = config.activeCourseId !== matchedCourseWorkspace.meta.courseId;
-      onUpdateConfig((prev) => ({
-        ...prev,
-        activeCourseId: matchedCourseWorkspace.meta.courseId,
-        activeCourseMeta: matchedCourseWorkspace.meta
-      }));
-      if (
-        Array.isArray(matchedCourseWorkspace.questions) &&
-        (switchingCourse ||
-          (questions.length === 0 && matchedCourseWorkspace.questions.length > 0))
-      ) {
-        onUpdateQuestions(matchedCourseWorkspace.questions);
-      }
-      if (
-        switchingCourse &&
-        Array.isArray(matchedCourseWorkspace.students) &&
-        matchedCourseWorkspace.students.length > 0
-      ) {
-        onUpdateStudents(matchedCourseWorkspace.students);
-      }
-      if (
-        switchingCourse &&
-        Array.isArray(matchedCourseWorkspace.attempts) &&
-        matchedCourseWorkspace.attempts.length > 0
-      ) {
-        onUpdateAttempts(matchedCourseWorkspace.attempts);
-      }
-      if (
-        Array.isArray(matchedCourseWorkspace.customMiniRetos) &&
-        matchedCourseWorkspace.customMiniRetos.length > 0
-      ) {
-        onUpdateCustomMiniRetos(matchedCourseWorkspace.customMiniRetos);
-      }
-    }
-
     setAuthDenied(false);
     setIsAuthenticated(true);
+    setCourseSelectionWindowOpen(true);
+    setCourseSelectionSearch('');
     setActiveTabState('panel_central');
     setTabHistory(['panel_central']);
     setActiveControlDrawer('none');
     loginTeacher(authenticatedTeacherId);
+    setTeacherSelectedCourseId(null);
     onForceServerSync?.();
     if (
       isMasterMatch &&
@@ -1680,6 +2310,11 @@ export function TeacherPanel({
   const executeManualAntiCheatUnlock = (studentId: string) => {
     const target = students.find((s) => s.id === studentId);
     if (!target) return;
+
+    void recordInstitutionalAuditLog(
+      'DESBLOQUEO_ESTUDIANTE_ANTITRAMPA',
+      `Desbloqueo manual autorizado para ${target.nombre} (${target.id}) en curso ${activeCourseMeta.codigoCurso}`
+    );
 
     const validAttempts = attempts.filter(
       (a) => !(a.studentId === studentId && a.estado === 'SUSPENDIDO')
@@ -2696,6 +3331,268 @@ export function TeacherPanel({
     Number(examParamsDraft.tiempoExamenModuloMin) !== Number(config.tiempoExamenModuloMin ?? 50) ||
     Number(examParamsDraft.notaMinimaAprobacion) !== Number(config.notaMinimaAprobacion ?? 3.0);
 
+  const [applyingQuickPresetId, setApplyingQuickPresetId] = useState<string | null>(null);
+  const [quickPresetNotice, setQuickPresetNotice] = useState<string | null>(null);
+
+  const QUICK_ASSESSMENT_PRESETS = useMemo(
+    () => [
+      {
+        id: 'estandar_institucional',
+        title: 'Estándar Institucional',
+        badge: 'Balanceado · Recomendado',
+        description: 'Parámetros oficiales equilibrados para cursos regulares y certificación modular.',
+        preguntasExamenIntegral: 40,
+        tiempoExamenIntegralMin: 80,
+        preguntasExamenModulo: 25,
+        tiempoExamenModuloMin: 50,
+        notaMinimaAprobacion: 3.0,
+        umbralAprobacionMiniRetoPct: 60,
+        maxIntentosMiniReto: 3,
+        accentColor: 'border-sky-300 bg-sky-50/60 hover:bg-sky-50 text-sky-950',
+        btnColor: 'bg-sky-600 hover:bg-sky-700 text-white'
+      },
+      {
+        id: 'evaluacion_agil_express',
+        title: 'Evaluación Ágil / Express',
+        badge: 'Corta Duración · Rápida',
+        description: 'Ideal para controles de lectura, sesiones cortas o validación rápida en aula.',
+        preguntasExamenIntegral: 20,
+        tiempoExamenIntegralMin: 40,
+        preguntasExamenModulo: 10,
+        tiempoExamenModuloMin: 20,
+        notaMinimaAprobacion: 3.0,
+        umbralAprobacionMiniRetoPct: 60,
+        maxIntentosMiniReto: 3,
+        accentColor: 'border-emerald-300 bg-emerald-50/60 hover:bg-emerald-50 text-emerald-950',
+        btnColor: 'bg-emerald-600 hover:bg-emerald-700 text-white'
+      },
+      {
+        id: 'alta_exigencia_rigor',
+        title: 'Rigor Intensivo / Certificación',
+        badge: 'Alta Exigencia · 3.5/5.0',
+        description: 'Mayor volumen de reactivos y umbrales estrictos para evaluación sumativa avanzada.',
+        preguntasExamenIntegral: 50,
+        tiempoExamenIntegralMin: 90,
+        preguntasExamenModulo: 30,
+        tiempoExamenModuloMin: 50,
+        notaMinimaAprobacion: 3.5,
+        umbralAprobacionMiniRetoPct: 75,
+        maxIntentosMiniReto: 2,
+        accentColor: 'border-indigo-300 bg-indigo-50/60 hover:bg-indigo-50 text-indigo-950',
+        btnColor: 'bg-indigo-600 hover:bg-indigo-700 text-white'
+      },
+      {
+        id: 'diagnostico_formativo',
+        title: 'Diagnóstico Formativo Flexible',
+        badge: 'Nivelación · Tiempo Amplio',
+        description: 'Más minutos por pregunta y umbral accesible para cursos introductorios o práctica.',
+        preguntasExamenIntegral: 25,
+        tiempoExamenIntegralMin: 60,
+        preguntasExamenModulo: 15,
+        tiempoExamenModuloMin: 35,
+        notaMinimaAprobacion: 3.0,
+        umbralAprobacionMiniRetoPct: 50,
+        maxIntentosMiniReto: 3,
+        accentColor: 'border-amber-300 bg-amber-50/60 hover:bg-amber-50 text-amber-950',
+        btnColor: 'bg-amber-600 hover:bg-amber-700 text-white'
+      }
+    ],
+    []
+  );
+
+  const isPresetCurrentlyActive = (preset: (typeof QUICK_ASSESSMENT_PRESETS)[number]) => {
+    return (
+      Number(config.preguntasExamenIntegral ?? 40) === preset.preguntasExamenIntegral &&
+      Number(config.tiempoExamenIntegralMin ?? 80) === preset.tiempoExamenIntegralMin &&
+      Number(config.preguntasExamenModulo ?? 25) === preset.preguntasExamenModulo &&
+      Number(config.tiempoExamenModuloMin ?? 50) === preset.tiempoExamenModuloMin &&
+      Number(config.notaMinimaAprobacion ?? 3.0) === preset.notaMinimaAprobacion &&
+      Number(config.umbralAprobacionMiniRetoPct ?? 60) === preset.umbralAprobacionMiniRetoPct
+    );
+  };
+
+  const handleApplyQuickAssessmentPreset = async (
+    preset: (typeof QUICK_ASSESSMENT_PRESETS)[number]
+  ) => {
+    if (applyingQuickPresetId || isSavingExamParams) return;
+    setApplyingQuickPresetId(preset.id);
+    try {
+      setExamParamsDraft({
+        preguntasExamenIntegral: preset.preguntasExamenIntegral,
+        tiempoExamenIntegralMin: preset.tiempoExamenIntegralMin,
+        preguntasExamenModulo: preset.preguntasExamenModulo,
+        tiempoExamenModuloMin: preset.tiempoExamenModuloMin,
+        notaMinimaAprobacion: preset.notaMinimaAprobacion
+      });
+
+      const nextConfig: SystemConfig = {
+        ...config,
+        preguntasExamenIntegral: preset.preguntasExamenIntegral,
+        tiempoExamenIntegralMin: preset.tiempoExamenIntegralMin,
+        preguntasExamenModulo: preset.preguntasExamenModulo,
+        tiempoExamenModuloMin: preset.tiempoExamenModuloMin,
+        notaMinimaAprobacion: preset.notaMinimaAprobacion,
+        umbralAprobacionMiniRetoPct: preset.umbralAprobacionMiniRetoPct,
+        maxIntentosMiniReto: preset.maxIntentosMiniReto
+      };
+
+      commitTeacherConfigUpdate(nextConfig);
+      await handleExecuteServerSave(
+        'parametros_y_horarios_examen',
+        `Configuración Rápida aplicada (${preset.title}): Integral ${preset.preguntasExamenIntegral} preg/${preset.tiempoExamenIntegralMin}m, Módulo ${preset.preguntasExamenModulo} preg/${preset.tiempoExamenModuloMin}m, Nota Mín ${preset.notaMinimaAprobacion.toFixed(1)}, Umbral Retos ${preset.umbralAprobacionMiniRetoPct}%`
+      );
+      setQuickPresetNotice(
+        `✓ Preset «${preset.title}» aplicado con un clic y guardado en el Servidor: Integral (${preset.preguntasExamenIntegral} preg / ${preset.tiempoExamenIntegralMin} min) · Módulo (${preset.preguntasExamenModulo} preg / ${preset.tiempoExamenModuloMin} min) · Nota mínima ${preset.notaMinimaAprobacion.toFixed(1)} / 5.0 · Umbral Retos ${preset.umbralAprobacionMiniRetoPct}%.`
+      );
+      setTimeout(() => setQuickPresetNotice(null), 7000);
+    } finally {
+      setApplyingQuickPresetId(null);
+    }
+  };
+
+  const renderQuickAssessmentPresetsSection = (contextLabel?: string) => (
+    <div className="bg-white border-2 border-sky-200 rounded-2xl p-4 sm:p-5 shadow-xs space-y-3.5">
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 border-b border-slate-100 pb-3">
+        <div className="space-y-0.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="px-2.5 py-0.5 rounded-md bg-sky-600 text-white font-mono text-[10px] font-extrabold uppercase tracking-wide">
+              ⚡ Configuración Rápida · 1 Clic
+            </span>
+            <h3 className="text-sm sm:text-base font-extrabold text-slate-900">
+              Presets de Parámetros de Evaluación ({contextLabel || activeCourseMeta.codigoCurso})
+            </h3>
+          </div>
+          <p className="text-xs text-slate-600">
+            Aplique tiempo límite, número de preguntas y umbrales de aprobación con un solo clic, evitando la configuración manual en cada curso nuevo.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 shrink-0">
+          <span className="text-slate-500 font-sans font-semibold">Actual:</span>
+          <span className="font-bold text-slate-900">
+            Integral: {config.preguntasExamenIntegral ?? 40}p/{config.tiempoExamenIntegralMin ?? 80}m
+          </span>
+          <span className="text-slate-300">·</span>
+          <span className="font-bold text-slate-900">
+            Módulo: {config.preguntasExamenModulo ?? 25}p/{config.tiempoExamenModuloMin ?? 50}m
+          </span>
+          <span className="text-slate-300">·</span>
+          <span className="font-bold text-emerald-700">
+            Nota ≥ {(config.notaMinimaAprobacion ?? 3.0).toFixed(1)}
+          </span>
+          <span className="text-slate-300">·</span>
+          <span className="font-bold text-amber-800">
+            Retos ≥ {config.umbralAprobacionMiniRetoPct ?? 60}%
+          </span>
+        </div>
+      </div>
+
+      {quickPresetNotice && (
+        <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-300 text-emerald-950 text-xs font-bold flex items-center justify-between gap-2">
+          <span>{quickPresetNotice}</span>
+          <button
+            type="button"
+            onClick={() => setQuickPresetNotice(null)}
+            className="text-emerald-800 hover:text-emerald-950 px-2 font-extrabold cursor-pointer"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+        {QUICK_ASSESSMENT_PRESETS.map((preset) => {
+          const isActive = isPresetCurrentlyActive(preset);
+          const isApplying = applyingQuickPresetId === preset.id;
+          return (
+            <div
+              key={preset.id}
+              className={`rounded-xl border-2 p-3.5 flex flex-col justify-between gap-3 transition-all ${
+                isActive
+                  ? 'border-emerald-500 bg-emerald-50/70 ring-2 ring-emerald-500/15'
+                  : preset.accentColor
+              }`}
+            >
+              <div className="space-y-2">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <span className="inline-block px-2 py-0.5 rounded bg-white/90 border border-slate-200 font-mono text-[10px] font-bold text-slate-700">
+                      {preset.badge}
+                    </span>
+                    <h4 className="text-xs sm:text-sm font-extrabold text-slate-900 mt-1">
+                      {preset.title}
+                    </h4>
+                  </div>
+                  {isActive && (
+                    <span className="px-2 py-0.5 rounded-full bg-emerald-600 text-white text-[10px] font-extrabold shrink-0">
+                      ✓ Activo
+                    </span>
+                  )}
+                </div>
+                <p className="text-[11px] text-slate-600 leading-snug">{preset.description}</p>
+
+                <div className="grid grid-cols-2 gap-1.5 pt-1 text-[11px] font-mono">
+                  <div className="bg-white/90 border border-slate-200/80 rounded-lg px-2 py-1">
+                    <span className="text-[10px] text-slate-500 block font-sans">Examen Integral</span>
+                    <strong className="text-slate-900">
+                      {preset.preguntasExamenIntegral} preg · {preset.tiempoExamenIntegralMin} min
+                    </strong>
+                  </div>
+                  <div className="bg-white/90 border border-slate-200/80 rounded-lg px-2 py-1">
+                    <span className="text-[10px] text-slate-500 block font-sans">Por Módulo</span>
+                    <strong className="text-slate-900">
+                      {preset.preguntasExamenModulo} preg · {preset.tiempoExamenModuloMin} min
+                    </strong>
+                  </div>
+                  <div className="bg-white/90 border border-slate-200/80 rounded-lg px-2 py-1">
+                    <span className="text-[10px] text-slate-500 block font-sans">Umbral Examen</span>
+                    <strong className="text-emerald-800">
+                      Nota ≥ {preset.notaMinimaAprobacion.toFixed(1)} / 5.0
+                    </strong>
+                  </div>
+                  <div className="bg-white/90 border border-slate-200/80 rounded-lg px-2 py-1">
+                    <span className="text-[10px] text-slate-500 block font-sans">Umbral Retos</span>
+                    <strong className="text-amber-900">
+                      ≥ {preset.umbralAprobacionMiniRetoPct}% ({preset.maxIntentosMiniReto} int.)
+                    </strong>
+                  </div>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                disabled={Boolean(applyingQuickPresetId)}
+                onClick={() => handleApplyQuickAssessmentPreset(preset)}
+                className={`w-full min-h-[40px] px-3 py-2 rounded-xl text-xs font-extrabold flex items-center justify-center gap-1.5 cursor-pointer transition-all shadow-2xs ${
+                  isActive
+                    ? 'bg-emerald-700 hover:bg-emerald-800 text-white'
+                    : preset.btnColor
+                }`}
+              >
+                {isApplying ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Aplicando preset...</span>
+                  </>
+                ) : isActive ? (
+                  <>
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>Preset Aplicado (Reaplicar)</span>
+                  </>
+                ) : (
+                  <>
+                    <Sliders className="w-3.5 h-3.5" />
+                    <span>Aplicar en 1 Clic</span>
+                  </>
+                )}
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+
   const handleSaveExamParams = async () => {
     if (!pendingExamParamsChange || isSavingExamParams) return;
     setIsSavingExamParams(true);
@@ -3632,10 +4529,17 @@ function doPost(e) {
       (acc, s) => acc + (s.trabajosPendientesRevisionCount || 0),
       0
     );
-    const pendingExcusesCount = classSummaries.reduce(
-      (acc, s) => acc + (s.excusasPendientesRevisionCount || 0),
+    const pendingReviewTicketsCount = students.reduce(
+      (acc, st) =>
+        acc +
+        (Array.isArray(st.solicitudesRevision)
+          ? st.solicitudesRevision.filter((t) => t.estado === 'PENDIENTE').length
+          : 0),
       0
     );
+    const pendingExcusesCount =
+      classSummaries.reduce((acc, s) => acc + (s.excusasPendientesRevisionCount || 0), 0) +
+      pendingReviewTicketsCount;
 
     // Cruce de Alertas Tempranas Automatizadas («Riesgo Académico Integral»: ≥ 2 factores simultáneos)
     const integralRiskStudents = classSummaries
@@ -3787,12 +4691,31 @@ function doPost(e) {
             </div>
 
             <div className="space-y-1.5">
-              <label htmlFor="teacher-pin" className="block text-xs font-semibold text-slate-800">
-                Código de Acceso de Sesión
-              </label>
+              <div className="flex items-center justify-between">
+                <label htmlFor="teacher-pin" className="block text-xs font-semibold text-slate-800">
+                  Código de Acceso de Sesión
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setShowTeacherPasswordInput((v) => !v)}
+                  className="text-[11px] font-bold text-slate-700 hover:text-slate-950 inline-flex items-center gap-1 cursor-pointer"
+                >
+                  {showTeacherPasswordInput ? (
+                    <>
+                      <EyeOff className="w-3.5 h-3.5" />
+                      <span>Ocultar</span>
+                    </>
+                  ) : (
+                    <>
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>Mostrar</span>
+                    </>
+                  )}
+                </button>
+              </div>
               <input
                 id="teacher-pin"
-                type="password"
+                type={showTeacherPasswordInput ? 'text' : 'password'}
                 required
                 autoComplete="off"
                 value={pinAttempt}
@@ -3808,6 +4731,359 @@ function doPost(e) {
               Iniciar Sesión
             </button>
           </form>
+
+          {/* Navegación rápida entre perfiles de acceso */}
+          <div className="pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+            <span>Cambiar perfil de ingreso:</span>
+            <div className="flex items-center gap-3 font-semibold">
+              {onSwitchToStudentLogin && (
+                <button
+                  type="button"
+                  onClick={onSwitchToStudentLogin}
+                  className="text-sky-700 hover:text-sky-900 hover:underline underline-offset-4 cursor-pointer"
+                >
+                  Estudiante
+                </button>
+              )}
+              {onSwitchToStudentLogin && onSwitchToEditorLogin && (
+                <span aria-hidden="true" className="text-slate-300">·</span>
+              )}
+              {onSwitchToEditorLogin && (
+                <button
+                  type="button"
+                  onClick={onSwitchToEditorLogin}
+                  className="text-indigo-700 hover:text-indigo-900 hover:underline underline-offset-4 cursor-pointer"
+                >
+                  Editor
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ================= VENTANA INICIAL DE CURSOS DISPONIBLES ASIGNADOS AL DOCENTE =================
+  if (courseSelectionWindowOpen || !authState.teacherSelectedCourseId) {
+    const currentTeacherId = (
+      authState.teacherAuthenticatedId ||
+      teacherIdAttempt ||
+      config.idDocente ||
+      'DOCENTE2026'
+    )
+      .trim()
+      .replace(/[\s.-]/g, '')
+      .toUpperCase();
+
+    const allTeachers = getEffectiveRegisteredTeachers(config);
+    const loggedInTeacherRec = allTeachers.find(
+      (t) => String(t?.id || '').trim().replace(/[\s.-]/g, '').toUpperCase() === currentTeacherId
+    );
+    const teacherDisplayName =
+      loggedInTeacherRec?.nombre ||
+      assignedTeacherCourseWorkspaces[0]?.meta?.docenteResponsable ||
+      config.activeCourseMeta?.docenteResponsable ||
+      currentTeacherId;
+
+    const searchQ = courseSelectionSearch.trim().toLowerCase();
+    const filteredAssignedCourses = assignedTeacherCourseWorkspaces.filter((ws) => {
+      if (!searchQ) return true;
+      const m = ws.meta;
+      return (
+        (m.nombreCurso || '').toLowerCase().includes(searchQ) ||
+        (m.codigoCurso || '').toLowerCase().includes(searchQ) ||
+        (m.programaAcademico || '').toLowerCase().includes(searchQ) ||
+        (m.nombreAsignatura || '').toLowerCase().includes(searchQ) ||
+        (m.institucionSede || '').toLowerCase().includes(searchQ)
+      );
+    });
+
+    return (
+      <div className="min-h-screen bg-[#f2f5f9] text-slate-900 py-8 px-4 sm:px-6 lg:px-8">
+        <div className="max-w-6xl mx-auto space-y-6">
+          {/* Encabezado Institucional de Selección de Curso */}
+          <div className="bg-white border border-slate-200 rounded-2xl p-6 sm:p-7 shadow-xs flex flex-col lg:flex-row lg:items-center justify-between gap-5">
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-xs font-bold text-emerald-800">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>Sesión Docente Activa</span>
+                </span>
+                <span className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200 text-xs font-mono font-bold text-slate-800">
+                  ID: {currentTeacherId}
+                </span>
+                {loggedInTeacherRec?.correo && (
+                  <span className="text-xs text-slate-500 font-medium">
+                    {loggedInTeacherRec.correo}
+                  </span>
+                )}
+              </div>
+              <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight">
+                Cursos Disponibles Asignados al Docente
+              </h1>
+              <p className="text-xs sm:text-sm text-slate-600 max-w-3xl">
+                Bienvenido(a), <strong className="text-slate-900">{teacherDisplayName}</strong>. A continuación se listan todos los cursos que tiene asignados. Seleccione el curso que desea administrar para cargar su nómina de estudiantes, módulos, banco de preguntas, calificaciones y abrir el Panel de Control Docente.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+              {Boolean(authState.teacherSelectedCourseId) && (
+                <button
+                  type="button"
+                  onClick={() => setCourseSelectionWindowOpen(false)}
+                  className="px-4 py-2.5 rounded-xl bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-900 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                  <span>Volver al Curso Actual</span>
+                </button>
+              )}
+              <button
+                type="button"
+                disabled={isForcingServerResync}
+                onClick={handleExecuteForceServerResync}
+                className="px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-800 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors disabled:opacity-50"
+                title="Sincronizar catálogo de cursos asignados desde el servidor"
+              >
+                <RefreshCw className={`w-4 h-4 ${isForcingServerResync ? 'animate-spin' : ''}`} />
+                <span>Actualizar Cursos</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  logoutTeacher();
+                  setIsAuthenticated(false);
+                  setCourseSelectionWindowOpen(true);
+                  setTeacherIdAttempt('');
+                  setPinAttempt('');
+                  setAuthDenied(false);
+                  onGoToInitialHome?.();
+                }}
+                className="px-4 py-2.5 rounded-xl bg-red-50 hover:bg-red-100 border border-red-200 text-red-700 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
+              >
+                <Lock className="w-3.5 h-3.5" />
+                <span>Cerrar Sesión</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Barra de Resumen y Filtro Rápido */}
+          <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-2xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-xl bg-[#25579e] text-white flex items-center justify-center shrink-0">
+                <BookOpen className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="text-sm font-bold text-slate-900">
+                  {assignedTeacherCourseWorkspaces.length}{' '}
+                  {assignedTeacherCourseWorkspaces.length === 1
+                    ? 'Curso Asignado Disponible'
+                    : 'Cursos Asignados Disponibles'}
+                </div>
+                <div className="text-xs text-slate-500">
+                  Haga clic en «Seleccionar y Administrar Curso» sobre cualquiera de sus cursos asignados
+                </div>
+              </div>
+            </div>
+
+            {assignedTeacherCourseWorkspaces.length > 1 && (
+              <div className="relative w-full sm:w-80">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={courseSelectionSearch}
+                  onChange={(e) => setCourseSelectionSearch(e.target.value)}
+                  placeholder="Buscar por nombre, código o sede..."
+                  className="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-300 text-xs focus:outline-none focus:ring-2 focus:ring-[#25579e]"
+                />
+              </div>
+            )}
+          </div>
+
+          {/* Listado de Tarjetas de Cursos Asignados al Docente */}
+          {filteredAssignedCourses.length === 0 ? (
+            <div className="bg-white border border-slate-200 rounded-2xl p-10 text-center space-y-3 shadow-2xs">
+              <div className="w-12 h-12 rounded-2xl bg-amber-50 border border-amber-200 text-amber-700 flex items-center justify-center mx-auto">
+                <BookOpen className="w-6 h-6" />
+              </div>
+              <div className="text-base font-bold text-slate-900">
+                No se encontraron cursos asignados con ese criterio
+              </div>
+              <p className="text-xs text-slate-600 max-w-md mx-auto">
+                Verifique con el Editor Académico que su cuenta docente ({currentTeacherId}) tenga cursos creados y asignados en el catálogo institucional, o pulse «Actualizar Cursos».
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+              {filteredAssignedCourses.map((ws) => {
+                const resolved = resolveWorkspaceCompleteData(ws);
+                const meta = resolved.meta;
+                const isCurrentActive =
+                  authState.teacherSelectedCourseId === meta.courseId ||
+                  config.activeCourseId === meta.courseId;
+                const isLoadingThis = isSelectingCourseId === meta.courseId;
+                const modulesList = Array.isArray(meta.modulosCurso) ? meta.modulosCurso : [];
+
+                return (
+                  <div
+                    key={meta.courseId}
+                    onClick={() => void handleSelectCourseForTeacher(ws)}
+                    className={`group bg-white rounded-2xl border-2 p-6 shadow-xs hover:shadow-md transition-all flex flex-col justify-between gap-5 cursor-pointer ${
+                      isCurrentActive
+                        ? 'border-[#25579e] ring-2 ring-sky-100'
+                        : 'border-slate-200 hover:border-[#25579e]'
+                    }`}
+                  >
+                    <div className="space-y-4">
+                      {/* Cabecera de la Tarjeta del Curso */}
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="px-2.5 py-1 rounded-lg bg-[#1e3a6e] text-white font-mono text-xs font-extrabold">
+                            {meta.codigoCurso || 'CURSO'}
+                          </span>
+                          {meta.periodoAcademico && (
+                            <span className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200 text-xs font-semibold text-slate-700">
+                              Periodo {meta.periodoAcademico}
+                            </span>
+                          )}
+                          <span className="px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-200 text-[11px] font-bold text-emerald-800">
+                            Asignado al Docente
+                          </span>
+                        </div>
+                        {isCurrentActive && (
+                          <span className="px-2.5 py-1 rounded-full bg-sky-100 text-sky-900 text-[11px] font-extrabold shrink-0">
+                            ● Curso Activo
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Título y Programa / Sede */}
+                      <div className="space-y-1">
+                        <h2 className="text-xl font-extrabold text-slate-900 group-hover:text-[#25579e] transition-colors">
+                          {meta.nombreCurso || 'Curso Académico'}
+                        </h2>
+                        {(meta.programaAcademico || meta.nombreAsignatura) && (
+                          <div className="text-xs font-semibold text-slate-700">
+                            {meta.programaAcademico || meta.nombreAsignatura}
+                          </div>
+                        )}
+                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500 pt-0.5">
+                          {meta.institucionSede && <span>📍 {meta.institucionSede}</span>}
+                          <span>
+                            👤 Docente: <strong>{meta.docenteResponsable || teacherDisplayName}</strong>
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Resumen de Datos que se Cargarán al Elegir el Curso */}
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-1">
+                        <div className="bg-slate-50 border border-slate-200/90 rounded-xl p-2.5">
+                          <div className="text-[10px] font-bold uppercase text-slate-500">
+                            Estudiantes
+                          </div>
+                          <div className="text-base font-extrabold font-mono text-slate-900">
+                            {resolved.students.length}
+                          </div>
+                          <div className="text-[10px] text-slate-500 truncate" title={resolved.rosterDbName}>
+                            {resolved.rosterDbName}
+                          </div>
+                        </div>
+
+                        <div className="bg-slate-50 border border-slate-200/90 rounded-xl p-2.5">
+                          <div className="text-[10px] font-bold uppercase text-slate-500">
+                            Módulos / Clases
+                          </div>
+                          <div className="text-base font-extrabold font-mono text-slate-900">
+                            {modulesList.length || meta.cantidadModulos || 0}
+                          </div>
+                          <div className="text-[10px] text-slate-500 truncate">
+                            C1 a C{Math.max(1, modulesList.length || meta.cantidadModulos || 1)}
+                          </div>
+                        </div>
+
+                        <div className="bg-slate-50 border border-slate-200/90 rounded-xl p-2.5">
+                          <div className="text-[10px] font-bold uppercase text-slate-500">
+                            Preguntas
+                          </div>
+                          <div className="text-base font-extrabold font-mono text-slate-900">
+                            {resolved.questions.length}
+                          </div>
+                          <div className="text-[10px] text-slate-500 truncate" title={resolved.qBankDbName}>
+                            {resolved.qBankDbName}
+                          </div>
+                        </div>
+
+                        <div className="bg-slate-50 border border-slate-200/90 rounded-xl p-2.5">
+                          <div className="text-[10px] font-bold uppercase text-slate-500">
+                            Evaluaciones
+                          </div>
+                          <div className="text-base font-extrabold font-mono text-slate-900">
+                            {meta.cantidadExamenes || 0} Ex. / {meta.cantidadRetos || 0} Ret.
+                          </div>
+                          <div className="text-[10px] text-slate-500 truncate">
+                            {resolved.attempts.length} intento(s) reg.
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Vista previa de los Módulos del Curso */}
+                      {modulesList.length > 0 && (
+                        <div className="space-y-1.5">
+                          <div className="text-[11px] font-bold text-slate-600">
+                            Estructura de Módulos del Curso:
+                          </div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {modulesList.slice(0, 6).map((mod) => (
+                              <span
+                                key={mod.id}
+                                className="px-2 py-0.5 rounded-md bg-slate-100 border border-slate-200 text-[11px] font-medium text-slate-700 truncate max-w-[240px]"
+                              >
+                                <strong className="font-mono">{mod.code || `M${mod.id}`}:</strong>{' '}
+                                {mod.shortTitle}
+                              </span>
+                            ))}
+                            {modulesList.length > 6 && (
+                              <span className="px-2 py-0.5 rounded-md bg-slate-100 text-[11px] font-bold text-slate-600">
+                                +{modulesList.length - 6} más
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Botón de Acción Principal para Seleccionar y Cargar el Curso */}
+                    <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-3">
+                      <span className="text-[11px] text-slate-500">
+                        Carga nómina, banco de ítems, asistencia y panel completo
+                      </span>
+                      <button
+                        type="button"
+                        disabled={Boolean(isSelectingCourseId)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void handleSelectCourseForTeacher(ws);
+                        }}
+                        className="px-4 py-2.5 rounded-xl bg-[#25579e] group-hover:bg-sky-700 text-white text-xs font-extrabold inline-flex items-center gap-2 shadow-2xs transition-colors cursor-pointer shrink-0 disabled:opacity-60"
+                      >
+                        {isLoadingThis ? (
+                          <>
+                            <RefreshCw className="w-4 h-4 animate-spin" />
+                            <span>Cargando Curso...</span>
+                          </>
+                        ) : (
+                          <>
+                            <span>Seleccionar y Administrar Curso</span>
+                            <ChevronRight className="w-4 h-4" />
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       </div>
     );
@@ -4415,6 +5691,22 @@ function doPost(e) {
               </div>
             </div>
           </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setCourseSelectionSearch('');
+              setCourseSelectionWindowOpen(true);
+            }}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-sky-50 hover:bg-sky-100 border border-sky-200 text-xs font-extrabold text-[#1e3a6e] cursor-pointer transition-colors shrink-0"
+            title="Ver ventana de cursos disponibles asignados al docente y cambiar de curso"
+          >
+            <BookOpen className="w-3.5 h-3.5 text-[#25579e] shrink-0" />
+            <span className="hidden sm:inline">Cambiar Curso</span>
+            <span className="px-1.5 py-0.5 rounded-md bg-white border border-sky-200 font-mono text-[10px] text-sky-900">
+              {assignedTeacherCourseWorkspaces.length}
+            </span>
+          </button>
         </div>
 
         {/* Centro: Indicador Operativo en Vivo y Conmutadores de Consola Rápida (Sin duplicar las pestañas del árbol lateral) */}
@@ -4434,6 +5726,14 @@ function doPost(e) {
             className="px-2.5 py-1 rounded-lg bg-white hover:bg-emerald-50 border border-slate-200/90 text-xs font-bold text-emerald-800 cursor-pointer transition-all active:scale-[0.98]"
           >
             ✋ Pasar Asistencia
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveControlDrawer('horarios_constructor')}
+            className="px-2.5 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-xs font-bold text-indigo-900 flex items-center gap-1.5 cursor-pointer transition-all active:scale-[0.98]"
+            title="Configurar fechas de apertura/cierre del curso, programación por actividad, entregas tardías y prórrogas individuales"
+          >
+            <span>📅 Cronograma y Ventanas</span>
           </button>
           <button
             type="button"
@@ -4481,6 +5781,30 @@ function doPost(e) {
             </kbd>
           </button>
 
+          {/* Botón Privacidad de Proyector (Difuminar códigos y datos sensibles) */}
+          <button
+            type="button"
+            onClick={() => setProjectorPrivacyBlur((v) => !v)}
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border text-xs font-extrabold cursor-pointer transition-colors shadow-2xs ${
+              projectorPrivacyBlur
+                ? 'bg-amber-500 border-amber-600 text-slate-950'
+                : 'bg-slate-100 hover:bg-slate-200 border-slate-300 text-slate-700'
+            }`}
+            title="Activar/Desactivar Privacidad de Videobeam (Oculta códigos de acceso e identificaciones sensibles al proyectar en el aula)"
+          >
+            {projectorPrivacyBlur ? (
+              <>
+                <EyeOff className="w-3.5 h-3.5 shrink-0" />
+                <span className="hidden xl:inline">Privacidad Activa</span>
+              </>
+            ) : (
+              <>
+                <Eye className="w-3.5 h-3.5 shrink-0" />
+                <span className="hidden xl:inline">Ocultar Códigos</span>
+              </>
+            )}
+          </button>
+
           {/* Botón Modo «Clase en Curso» (Vista Proyector / Pantalla de Aula) */}
           <button
             type="button"
@@ -4523,6 +5847,7 @@ function doPost(e) {
               onClick={() => {
                 logoutTeacher();
                 setIsAuthenticated(false);
+                setCourseSelectionWindowOpen(true);
                 setTeacherIdAttempt('');
                 setPinAttempt('');
                 setAuthDenied(false);
@@ -4539,6 +5864,59 @@ function doPost(e) {
       </header>
 
       {/* Notificación Flotante de Sincronización con el Servidor */}
+      {projectorPrivacyBlur && (
+        <style>{`
+          .teacher-lms-workspace table td.font-mono,
+          .teacher-lms-workspace table span.font-mono {
+            filter: blur(5px);
+            transition: filter 0.2s ease;
+          }
+          .teacher-lms-workspace table td.font-mono:hover,
+          .teacher-lms-workspace table span.font-mono:hover {
+            filter: none;
+          }
+        `}</style>
+      )}
+      {classroomCodeHelpRequests.length > 0 && (
+        <div className="max-w-[1600px] mx-auto px-4 pt-3 no-print">
+          <div className="rounded-xl p-3.5 bg-amber-50 border-2 border-amber-400 text-amber-950 flex flex-col lg:flex-row lg:items-center justify-between gap-3 shadow-xs">
+            <div className="flex items-start sm:items-center gap-2.5 text-xs">
+              <Bell className="w-4 h-4 text-amber-600 shrink-0 mt-0.5 sm:mt-0 animate-bounce" />
+              <div>
+                <span className="font-extrabold">
+                  Solicitudes de Código de Acceso en Sala ({classroomCodeHelpRequests.length}):
+                </span>{' '}
+                <span>
+                  Estudiantes intentando iniciar sesión que solicitan consultar su código asignado:
+                </span>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {classroomCodeHelpRequests.map((req) => (
+                <div
+                  key={req.id}
+                  className="px-3 py-1.5 rounded-lg bg-white border border-amber-300 flex items-center gap-2 text-xs shadow-2xs"
+                >
+                  <span className="font-bold text-slate-900">{req.studentName}</span>
+                  <span className="font-mono text-[11px] text-slate-500">({req.studentId})</span>
+                  {req.accessCode && !projectorPrivacyBlur && (
+                    <span className="px-2 py-0.5 rounded bg-sky-50 border border-sky-200 font-mono font-extrabold text-sky-900">
+                      Código: {req.accessCode}
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => void handleDismissCodeHelpRequest(req.studentId)}
+                    className="px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[10px] cursor-pointer"
+                  >
+                    Atendido ✓
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
       {forceResyncResult && (
         <div className="max-w-[1600px] mx-auto px-4 pt-3">
           <div
@@ -4978,7 +6356,60 @@ function doPost(e) {
 
           {/* PANEL DESPLEGABLE 2: HORARIOS Y CONSTRUCTOR DE PRUEBAS A MEDIDA */}
           {isDrawerOpen('horarios_constructor') && (
-            <div className="space-y-3">
+            <div className="space-y-4">
+              {/* CENTRO DE CONTROL DE VIGENCIA DEL CURSO Y PROGRAMACIÓN GRANULAR POR ACTIVIDAD (R1-R9) */}
+              <CourseScheduleManagerPanel
+                scheduleConfig={config.courseScheduleConfig || activeCourseMeta.courseScheduleConfig}
+                students={students}
+                roleLabel="DOCENTE"
+                courseName={activeCourseMeta.nombreCurso}
+                onSaveScheduleConfig={(nextSchedule: CourseScheduleConfig, auditDescription: string) => {
+                  const examWin = nextSchedule.activityWindows.EXAMENES;
+                  const retoWin = nextSchedule.activityWindows.MINI_RETOS;
+                  const nextCatalog = Array.isArray(config.universalCoursesCatalog)
+                    ? config.universalCoursesCatalog.map((ws) =>
+                        ws.meta.courseId === activeCourseMeta.courseId
+                          ? {
+                              ...ws,
+                              meta: {
+                                ...ws.meta,
+                                courseScheduleConfig: nextSchedule,
+                                updatedAtIso: new Date().toISOString()
+                              }
+                            }
+                          : ws
+                      )
+                    : config.universalCoursesCatalog;
+
+                  onUpdateConfig({
+                    ...config,
+                    courseScheduleConfig: nextSchedule,
+                    activeCourseMeta: {
+                      ...activeCourseMeta,
+                      courseScheduleConfig: nextSchedule,
+                      updatedAtIso: new Date().toISOString()
+                    },
+                    universalCoursesCatalog: nextCatalog,
+                    examenAbierto: examWin.overrideMode !== 'FORCE_CLOSED',
+                    ventanaHorariaActiva: Boolean(examWin.enabled),
+                    diasPermitidos: examWin.allowedDays,
+                    horaInicioPermitida: examWin.startTime,
+                    horaFinPermitida: examWin.endTime,
+                    miniRetosAbiertos: retoWin.overrideMode !== 'FORCE_CLOSED',
+                    miniRetosSinRestriccionHora: !retoWin.enabled,
+                    miniRetosDiasPermitidos: retoWin.allowedDays,
+                    miniRetosHoraInicio: retoWin.startTime,
+                    miniRetosHoraFin: retoWin.endTime
+                  });
+
+                  recordInstitutionalAuditLog(
+                    'CONFIG_VENTANA_HORARIA',
+                    auditDescription,
+                    activeCourseMeta.courseId
+                  );
+                }}
+              />
+
               <div className="bg-emerald-50/60 border border-emerald-200 rounded-xl p-3.5 flex flex-col lg:flex-row lg:items-center justify-between gap-3 text-xs">
                 <div className="flex flex-wrap items-center gap-2.5">
                   <div className="flex items-center gap-1.5 font-bold text-slate-900">
@@ -5175,9 +6606,12 @@ function doPost(e) {
               </div>
 
               <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs">
+                <div className="w-full pb-2">
+                  {renderQuickAssessmentPresetsSection('Constructor de Pruebas a Medida')}
+                </div>
                 <div className="font-bold text-slate-900 flex items-center gap-1.5">
                   <Shuffle className="w-4 h-4 text-sky-700" />
-                  <span>Constructor de Pruebas a Medida:</span>
+                  <span>Constructor de Pruebas a Medida (Ajuste Manual Fino):</span>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-3 font-mono">
@@ -5617,24 +7051,26 @@ function doPost(e) {
                         key={dItem.id}
                         type="button"
                         onClick={() => setActiveTab(dItem.id)}
-                        className={`w-full pl-9 pr-3 py-2.5 text-left text-xs flex items-center justify-between gap-1.5 transition-colors cursor-pointer relative ${
+                        className={`w-[calc(100%-16px)] mx-2 my-1 px-3 py-2.5 rounded-xl border text-left text-xs flex items-center justify-between gap-2 transition-all cursor-pointer relative ${
                           isSelected
-                            ? 'bg-[#52627a] text-white font-bold border-l-4 border-sky-400'
-                            : 'text-slate-300 hover:bg-[#273140] hover:text-white font-medium'
+                            ? 'bg-[#25579e] text-white font-bold border-sky-400 shadow-sm'
+                            : 'bg-[#232d3b]/80 border-slate-700/80 text-slate-200 hover:bg-[#2c3849] hover:border-slate-500 hover:text-white font-medium'
                         }`}
                       >
                         <span className="truncate">{dItem.label}</span>
-                        <div className="flex items-center gap-1 shrink-0">
+                        <div className="flex items-center gap-1.5 shrink-0">
                           {dItem.pendingBadge && (
                             <span
-                              className={`px-1.5 py-0.5 rounded-full font-mono text-[10px] font-extrabold ${dItem.pendingColor}`}
+                              className={`px-1.5 py-0.5 rounded-md font-mono text-[10px] font-extrabold ${dItem.pendingColor}`}
                             >
                               {dItem.pendingBadge}
                             </span>
                           )}
-                          {isSelected && (
-                            <span className="w-2 h-2 rotate-45 bg-[#f2f5f9] -mr-4 shrink-0 hidden lg:block" />
-                          )}
+                          <ChevronRight
+                            className={`w-3.5 h-3.5 shrink-0 ${
+                              isSelected ? 'text-sky-200' : 'text-slate-400'
+                            }`}
+                          />
                         </div>
                       </button>
                     );
@@ -5691,23 +7127,23 @@ function doPost(e) {
                   </div>
                 </div>
 
-                {/* MÓDULOS COMPLEMENTARIOS CON BADGES DE CONTEO (ESTILO WIDGETS / UI ELEMENTS / PAGES) */}
-                <div className="mt-3 pt-3 border-t border-slate-700/80 space-y-0.5">
+                {/* MÓDULOS COMPLEMENTARIOS EN TARJETAS INTERACTIVAS DE FÁCIL IDENTIFICACIÓN */}
+                <div className="mt-3 pt-3 px-2 border-t border-slate-700/80 space-y-1.5">
                   <button
                     type="button"
                     onClick={() => setActiveTab('monitor_vivo')}
-                    className={`w-full px-4 py-2.5 text-xs flex items-center justify-between transition-colors cursor-pointer ${
+                    className={`w-full px-3 py-2.5 rounded-xl border text-xs flex items-center justify-between transition-all cursor-pointer ${
                       activeTab === 'monitor_vivo'
-                        ? 'bg-[#52627a] text-white font-bold border-l-4 border-sky-400'
-                        : 'text-slate-300 hover:bg-[#273140] hover:text-white'
+                        ? 'bg-[#25579e] text-white font-bold border-sky-400 shadow-sm'
+                        : 'bg-[#232d3b]/80 border-slate-700/80 text-slate-200 hover:bg-[#2c3849] hover:border-slate-500 hover:text-white'
                     }`}
                   >
                     <span className="flex items-center gap-2.5">
-                      <Activity className="w-4 h-4 text-slate-400" />
+                      <Activity className="w-4 h-4 text-sky-400" />
                       <span>Monitor en Vivo</span>
                     </span>
                     <div className="flex items-center gap-1">
-                      <span className="px-2 py-0.5 rounded bg-blue-600 text-white font-mono text-[10px] font-bold">
+                      <span className="px-2 py-0.5 rounded-md bg-blue-600 text-white font-mono text-[10px] font-bold">
                         {liveSessions.length}
                       </span>
                       <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
@@ -5717,14 +7153,14 @@ function doPost(e) {
                   <button
                     type="button"
                     onClick={() => setActiveTab('estadisticas_grupo')}
-                    className={`w-full px-4 py-2.5 text-xs flex items-center justify-between transition-colors cursor-pointer ${
+                    className={`w-full px-3 py-2.5 rounded-xl border text-xs flex items-center justify-between transition-all cursor-pointer ${
                       activeTab === 'estadisticas_grupo'
-                        ? 'bg-[#52627a] text-white font-bold border-l-4 border-sky-400'
-                        : 'text-slate-300 hover:bg-[#273140] hover:text-white'
+                        ? 'bg-[#25579e] text-white font-bold border-sky-400 shadow-sm'
+                        : 'bg-[#232d3b]/80 border-slate-700/80 text-slate-200 hover:bg-[#2c3849] hover:border-slate-500 hover:text-white'
                     }`}
                   >
                     <span className="flex items-center gap-2.5">
-                      <BarChart3 className="w-4 h-4 text-slate-400" />
+                      <BarChart3 className="w-4 h-4 text-emerald-400" />
                       <span>Estadísticas Grupo</span>
                     </span>
                     <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
@@ -5733,14 +7169,14 @@ function doPost(e) {
                   <button
                     type="button"
                     onClick={() => setActiveTab('diagnostico')}
-                    className={`w-full px-4 py-2.5 text-xs flex items-center justify-between transition-colors cursor-pointer ${
+                    className={`w-full px-3 py-2.5 rounded-xl border text-xs flex items-center justify-between transition-all cursor-pointer ${
                       activeTab === 'diagnostico'
-                        ? 'bg-[#52627a] text-white font-bold border-l-4 border-sky-400'
-                        : 'text-slate-300 hover:bg-[#273140] hover:text-white'
+                        ? 'bg-[#25579e] text-white font-bold border-sky-400 shadow-sm'
+                        : 'bg-[#232d3b]/80 border-slate-700/80 text-slate-200 hover:bg-[#2c3849] hover:border-slate-500 hover:text-white'
                     }`}
                   >
                     <span className="flex items-center gap-2.5">
-                      <Shuffle className="w-4 h-4 text-slate-400" />
+                      <Shuffle className="w-4 h-4 text-amber-400" />
                       <span>Psicometría Bloom</span>
                     </span>
                     <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
@@ -5749,14 +7185,14 @@ function doPost(e) {
                   <button
                     type="button"
                     onClick={() => setActiveTab('seguridad_correo')}
-                    className={`w-full px-4 py-2.5 text-xs flex items-center justify-between transition-colors cursor-pointer ${
+                    className={`w-full px-3 py-2.5 rounded-xl border text-xs flex items-center justify-between transition-all cursor-pointer ${
                       activeTab === 'seguridad_correo' || activeTab === 'integraciones'
-                        ? 'bg-[#52627a] text-white font-bold border-l-4 border-sky-400'
-                        : 'text-slate-300 hover:bg-[#273140] hover:text-white'
+                        ? 'bg-[#25579e] text-white font-bold border-sky-400 shadow-sm'
+                        : 'bg-[#232d3b]/80 border-slate-700/80 text-slate-200 hover:bg-[#2c3849] hover:border-slate-500 hover:text-white'
                     }`}
                   >
                     <span className="flex items-center gap-2.5">
-                      <Key className="w-4 h-4 text-slate-400" />
+                      <Key className="w-4 h-4 text-rose-400" />
                       <span>Seguridad y Respaldos</span>
                     </span>
                     <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
@@ -5765,10 +7201,10 @@ function doPost(e) {
                   <button
                     type="button"
                     onClick={() => setActiveTab('diagnostico_sistema')}
-                    className={`w-full px-4 py-2.5 text-xs flex items-center justify-between transition-colors cursor-pointer ${
+                    className={`w-full px-3 py-2.5 rounded-xl border text-xs flex items-center justify-between transition-all cursor-pointer ${
                       activeTab === 'diagnostico_sistema'
-                        ? 'bg-[#52627a] text-white font-bold border-l-4 border-sky-400'
-                        : 'text-slate-300 hover:bg-[#273140] hover:text-white'
+                        ? 'bg-[#25579e] text-white font-bold border-sky-400 shadow-sm'
+                        : 'bg-[#232d3b]/80 border-slate-700/80 text-slate-200 hover:bg-[#2c3849] hover:border-slate-500 hover:text-white'
                     }`}
                   >
                     <span className="flex items-center gap-2.5">
@@ -5776,7 +7212,7 @@ function doPost(e) {
                       <span>Diagnóstico de Sistema</span>
                     </span>
                     <div className="flex items-center gap-1">
-                      <span className="px-2 py-0.5 rounded bg-sky-600 text-white font-mono text-[10px] font-bold">
+                      <span className="px-2 py-0.5 rounded-md bg-sky-600 text-white font-mono text-[10px] font-bold">
                         API
                       </span>
                       <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
@@ -6037,111 +7473,154 @@ function doPost(e) {
                     </div>
                   </div>
                 </div>
+
+                {/* BARRA DE CONFIGURACIÓN RÁPIDA DE PARÁMETROS DE EVALUACIÓN (PRESETS EN 1 CLIC) */}
+                {renderQuickAssessmentPresetsSection()}
+
                 {(() => {
                   const dashboardCards = [
                     {
                       id: 'card_estudiantes',
-                      title: 'Estudiantes',
-                      subtitle: `Nómina y códigos (${students.length})`,
+                      category: '1 · Nómina y Acceso',
+                      title: 'Cuenta Estudiante y Nómina',
+                      subtitle: `Gestión de cuentas, códigos de acceso y supervisión (${students.length} matriculados)`,
+                      metric: `${students.length} Estudiantes`,
                       icon: Users,
                       iconColor: 'text-sky-600',
+                      badgeBg: 'bg-sky-50 text-sky-800 border-sky-200',
                       accentBadge: '+',
                       onClick: () => setActiveTab('estudiantes')
                     },
                     {
                       id: 'card_clases',
+                      category: '2 · Aula y Evaluación',
                       title: 'Calificaciones y Asistencias',
-                      subtitle: `Clases C1–C${activeCourseMeta.cantidadModulos} · Asistencia (${classroomCentralMetrics.avgAttendancePct}%) y notas`,
+                      subtitle: `Clases C1–C${activeCourseMeta.cantidadModulos} · Registro de asistencia (${classroomCentralMetrics.avgAttendancePct}%) y notas`,
+                      metric: `Asist: ${classroomCentralMetrics.avgAttendancePct}%`,
                       icon: GraduationCap,
                       iconColor: 'text-indigo-600',
+                      badgeBg: 'bg-indigo-50 text-indigo-800 border-indigo-200',
                       onClick: () => setActiveTab('calificaciones')
                     },
                     {
                       id: 'card_resumen_academico',
+                      category: '3 · Consolidado',
                       title: 'Resumen Académico',
-                      subtitle: `Promedios C1–C6 (${classroomCentralMetrics.groupClassAvg.toFixed(2)}) y competencias`,
+                      subtitle: `Promedios acumulados C1–C6 (${classroomCentralMetrics.groupClassAvg.toFixed(2)}) y competencias`,
+                      metric: `Prom: ${classroomCentralMetrics.groupClassAvg.toFixed(2)}`,
                       icon: BarChart3,
                       iconColor: 'text-indigo-700',
+                      badgeBg: 'bg-indigo-50 text-indigo-800 border-indigo-200',
                       onClick: () => setActiveTab('resumen_academico')
                     },
                     {
                       id: 'card_examenes',
-                      title: 'Gestor Exámenes',
-                      subtitle: `Estado de Exámenes (${activeCourseMeta.cantidadExamenes}/${activeCourseMeta.cantidadExamenes}) · ${attempts.length} entregas`,
+                      category: '4 · Evaluaciones',
+                      title: 'Gestor de Exámenes',
+                      subtitle: `Estado de Exámenes (${activeCourseMeta.cantidadExamenes}/${activeCourseMeta.cantidadExamenes}) · ${attempts.length} entregas oficiales`,
+                      metric: `${attempts.length} Entregas`,
                       icon: FileSpreadsheet,
                       iconColor: 'text-emerald-600',
+                      badgeBg: 'bg-emerald-50 text-emerald-800 border-emerald-200',
                       onClick: () => setActiveTab('gestor_examenes')
                     },
                     {
                       id: 'card_retos',
-                      title: 'Mini Retos',
-                      subtitle: `${activeCourseMeta.cantidadRetos} retos · ${classroomCentralMetrics.totalBadgesUnlocked} insignias`,
+                      category: '5 · Gamificación',
+                      title: 'Mini Retos e Insignias',
+                      subtitle: `${activeCourseMeta.cantidadRetos} retos configurados · ${classroomCentralMetrics.totalBadgesUnlocked} insignias ganadas`,
+                      metric: `${classroomCentralMetrics.totalBadgesUnlocked} Insignias`,
                       icon: Trophy,
                       iconColor: 'text-amber-500',
+                      badgeBg: 'bg-amber-50 text-amber-900 border-amber-200',
                       onClick: () => setActiveTab('mini_retos')
                     },
                     {
                       id: 'card_monitor_vivo',
-                      title: 'Monitor Vivo',
-                      subtitle: `Aula en vivo (${liveSessions.length}), llamado asistencia y riesgo (${classroomCentralMetrics.integralRiskStudents.length})`,
+                      category: '6 · Tiempo Real',
+                      title: 'Monitor en Vivo',
+                      subtitle: `Aula en vivo (${liveSessions.length}), llamado de asistencia y alertas (${classroomCentralMetrics.integralRiskStudents.length})`,
+                      metric: `${liveSessions.length} En línea`,
                       icon: Monitor,
                       iconColor: 'text-teal-600',
+                      badgeBg: 'bg-teal-50 text-teal-800 border-teal-200',
                       onClick: () => setActiveTab('monitor_vivo')
                     },
                     {
                       id: 'card_resumen_asistencia',
+                      category: '7 · Asistencia',
                       title: 'Resumen de Asistencia',
-                      subtitle: `Gráfico de inasistencias (${classroomCentralMetrics.avgAttendancePct}% asist.)`,
+                      subtitle: `Mapa de calor y gráfico de inasistencias (${classroomCentralMetrics.avgAttendancePct}% asistencia)`,
+                      metric: `${classroomCentralMetrics.avgAttendancePct}% Asist.`,
                       icon: BarChart3,
                       iconColor: 'text-emerald-600',
+                      badgeBg: 'bg-emerald-50 text-emerald-800 border-emerald-200',
                       onClick: () => setActiveTab('resumen_asistencia')
                     },
                     {
                       id: 'card_seguridad_convivencia',
-                      title: 'Seguridad y Convivencia',
-                      subtitle: 'Infracciones anti-trampa e historial',
+                      category: '8 · Auditoría en Vivo',
+                      title: 'Dashboard de Auditoría y Convivencia',
+                      subtitle: 'Cumplimiento de tiempos, alertas de inactividad, eventos anti-trampa y bitácora cifrada',
+                      metric: `${classroomCentralMetrics.suspendedCount} Bloqueados · ${encryptedAuditLogs.length} Logs`,
                       icon: ShieldAlert,
                       iconColor: 'text-rose-600',
+                      badgeBg: 'bg-rose-50 text-rose-800 border-rose-200',
                       onClick: () => setActiveTab('seguridad_convivencia')
                     },
                     {
                       id: 'card_seguridad_pin',
-                      title: 'Seguridad y PIN',
-                      subtitle: `PIN ${config.pinAulaDia || 'AULA26'} · Anti-trampa`,
+                      category: '9 · Control Acceso',
+                      title: 'Seguridad y PIN de Aula',
+                      subtitle: `PIN actual: ${config.pinAulaDia || 'AULA26'} · Parámetros anti-trampa`,
+                      metric: `PIN: ${config.pinAulaDia || 'AULA26'}`,
                       icon: Lock,
                       iconColor: 'text-rose-600',
+                      badgeBg: 'bg-rose-50 text-rose-800 border-rose-200',
                       onClick: () => toggleDrawer('acceso_pin')
                     },
                     {
                       id: 'card_abpro',
-                      title: 'Cortes y ABPro',
-                      subtitle: 'Sábana 3 cortes y rúbrica',
+                      category: '10 · Proyecto',
+                      title: 'Cortes y Proyecto ABPro',
+                      subtitle: 'Sábana oficial de 3 cortes académicos y rúbrica aplicada',
+                      metric: '3 Cortes',
                       icon: Layers,
                       iconColor: 'text-violet-600',
+                      badgeBg: 'bg-violet-50 text-violet-800 border-violet-200',
                       onClick: () => setActiveTab('consolidado_abpro')
                     },
                     {
                       id: 'card_estadisticas',
-                      title: 'Estadísticas',
-                      subtitle: 'Gráficos de desempeño',
+                      category: '11 · Analítica',
+                      title: 'Estadísticas de Grupo',
+                      subtitle: 'Gráficos comparativos de desempeño y distribución de notas',
+                      metric: 'Recharts',
                       icon: BarChart3,
                       iconColor: 'text-emerald-600',
+                      badgeBg: 'bg-emerald-50 text-emerald-800 border-emerald-200',
                       onClick: () => setActiveTab('estadisticas_grupo')
                     },
                     {
                       id: 'card_psicometria',
-                      title: 'Psicometría',
-                      subtitle: 'Taxonomía Bloom y RAPs',
+                      category: '12 · Competencias',
+                      title: 'Psicometría Bloom',
+                      subtitle: 'Análisis por Taxonomía de Bloom, dificultad y RAPs',
+                      metric: 'Taxonomía',
                       icon: Shuffle,
                       iconColor: 'text-cyan-600',
+                      badgeBg: 'bg-cyan-50 text-cyan-800 border-cyan-200',
                       onClick: () => setActiveTab('diagnostico')
                     },
                     {
                       id: 'card_respaldo',
+                      category: '13 · Infraestructura',
                       title: 'Diagnóstico y Nube',
-                      subtitle: 'Caché, latencia API y respaldos',
+                      subtitle: 'Sincronización de servidor, latencia API y respaldos JSON',
+                      metric: '● Online',
                       icon: Database,
                       iconColor: 'text-slate-700',
+                      badgeBg: 'bg-slate-100 text-slate-800 border-slate-200',
                       onClick: () => setActiveTab('diagnostico_sistema')
                     }
                   ];
@@ -6151,12 +7630,13 @@ function doPost(e) {
                     ? dashboardCards.filter(
                         (c) =>
                           c.title.toLowerCase().includes(q) ||
-                          c.subtitle.toLowerCase().includes(q)
+                          c.subtitle.toLowerCase().includes(q) ||
+                          c.category.toLowerCase().includes(q)
                       )
                     : dashboardCards;
 
                   return (
-                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
                       {visibleCards.map((card) => {
                         const CardIcon = card.icon;
                         return (
@@ -6164,23 +7644,39 @@ function doPost(e) {
                             key={card.id}
                             type="button"
                             onClick={card.onClick}
-                            className="bg-white hover:bg-sky-50/40 border border-slate-200/90 hover:border-sky-300 rounded-xl p-5 shadow-sm hover:shadow-md transition-all flex flex-col items-center text-center justify-center gap-2.5 group cursor-pointer min-h-[148px]"
+                            className="bg-white hover:bg-sky-50/30 border border-slate-200/90 hover:border-sky-300 rounded-2xl p-4 sm:p-5 shadow-xs hover:shadow-md transition-all flex flex-col justify-between gap-3 text-left group cursor-pointer"
                           >
-                            <div className="relative w-12 h-12 rounded-2xl bg-slate-50 group-hover:bg-white border border-slate-200/80 flex items-center justify-center transition-transform group-hover:scale-105">
-                              <CardIcon className={`w-6 h-6 ${card.iconColor}`} />
-                              {card.accentBadge && (
-                                <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-rose-500 text-white text-[10px] font-bold flex items-center justify-center">
-                                  {card.accentBadge}
-                                </span>
-                              )}
+                            <div className="flex items-center justify-between gap-2">
+                              <span
+                                className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-[10px] font-mono font-bold uppercase border ${card.badgeBg}`}
+                              >
+                                <span>{card.category}</span>
+                              </span>
+                              <div className="relative w-10 h-10 rounded-xl bg-slate-50 group-hover:bg-white border border-slate-200/80 flex items-center justify-center transition-transform group-hover:scale-105 shrink-0">
+                                <CardIcon className={`w-5 h-5 ${card.iconColor}`} />
+                                {card.accentBadge && (
+                                  <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-rose-500 text-white text-[10px] font-bold flex items-center justify-center">
+                                    {card.accentBadge}
+                                  </span>
+                                )}
+                              </div>
                             </div>
-                            <div className="space-y-0.5">
-                              <div className="text-sm font-bold text-slate-800 group-hover:text-[#25579e]">
+
+                            <div className="space-y-1">
+                              <div className="text-sm sm:text-base font-bold text-slate-900 group-hover:text-[#25579e] leading-snug">
                                 {card.title}
                               </div>
-                              <div className="text-[11px] text-slate-400 leading-tight">
+                              <p className="text-xs text-slate-500 leading-relaxed">
                                 {card.subtitle}
-                              </div>
+                              </p>
+                            </div>
+
+                            <div className="pt-2.5 border-t border-slate-100 flex items-center justify-between text-[11px] font-mono font-bold text-slate-700">
+                              <span>{card.metric}</span>
+                              <span className="text-[#25579e] group-hover:translate-x-0.5 transition-transform inline-flex items-center gap-1 font-sans">
+                                <span>Abrir</span>
+                                <ArrowRight className="w-3.5 h-3.5" />
+                              </span>
                             </div>
                           </button>
                         );
@@ -6408,7 +7904,7 @@ function doPost(e) {
                     </div>
                   </th>
                   <th className="py-2.5 px-2 w-[180px]">
-                    <span>Código de Acceso (Entrega Rápida)</span>
+                    <span>Cuenta Estudiante (Código)</span>
                   </th>
                   <th className="py-2.5 px-1.5 text-center w-[70px]">Intentos</th>
                   <th className="py-2.5 px-2 text-center w-[112px]">
@@ -6466,16 +7962,18 @@ function doPost(e) {
                           <button
                             type="button"
                             onClick={() => {
-                              navigator.clipboard?.writeText(st.codigoAcceso);
+                              navigator.clipboard?.writeText(
+                                `Estudiante: ${st.nombre} | ID: ${st.id} | Código: ${st.codigoAcceso}${st.correo ? ` | Correo: ${st.correo}` : ''}${st.whatsapp ? ` | WhatsApp: ${st.whatsapp}` : ''}`
+                              );
                               setStudentUpdateBanner(
-                                `✓ Código de acceso de ${st.nombre} (${st.codigoAcceso}) copiado al portapapeles.`
+                                `✓ Datos de Cuenta Estudiante (${st.nombre} · Código: ${st.codigoAcceso}) copiados al portapapeles.`
                               );
                             }}
                             className="px-2 py-0.5 rounded bg-sky-600 hover:bg-sky-700 text-white text-[10px] font-sans font-bold inline-flex items-center gap-1 cursor-pointer transition-colors"
-                            title={`Copiar código de acceso de ${st.nombre}`}
+                            title={`Copiar datos de Cuenta Estudiante de ${st.nombre}`}
                           >
                             <Copy className="w-2.5 h-2.5" />
-                            <span>Copiar</span>
+                            <span>Cuenta Estudiante</span>
                           </button>
                         </div>
                       </td>
@@ -8007,6 +9505,7 @@ function doPost(e) {
           abproEvaluations={abproEvaluations}
           config={config}
           academicDataset={effectiveAcademicDataset}
+          questions={questions}
         />
       )}
 
@@ -8844,15 +10343,18 @@ function doPost(e) {
 
       {/* ================= TAB: GESTOR DOCENTE DE EXÁMENES OFICIALES & AUDITORÍA DE ESTADO ================= */}
       {activeTab === 'gestor_examenes' && (
-        <TeacherExamsStatusManager
-          students={students}
-          onUpdateStudents={onUpdateStudents}
-          attempts={attempts}
-          onUpdateAttempts={onUpdateAttempts}
-          questions={questions}
-          config={config}
-          onUpdateConfig={onUpdateConfig}
-        />
+        <div className="space-y-4">
+          {renderQuickAssessmentPresetsSection('Gestor de Exámenes Oficiales')}
+          <TeacherExamsStatusManager
+            students={students}
+            onUpdateStudents={onUpdateStudents}
+            attempts={attempts}
+            onUpdateAttempts={onUpdateAttempts}
+            questions={questions}
+            config={config}
+            onUpdateConfig={onUpdateConfig}
+          />
+        </div>
       )}
 
       {/* ================= TAB: GESTOR DOCENTE DE MINI RETOS & INSIGNIAS (GAMIFICACIÓN SEMÁNTICA IA) ================= */}
@@ -11299,6 +12801,347 @@ function doPost(e) {
                 </div>
               </div>
 
+              {/* NUEVO DASHBOARD DE AUDITORÍA EN TIEMPO REAL: TIEMPOS DE EVALUACIÓN, INACTIVIDAD Y LOG ANTI-TRAMPA + COLA CIFRADA */}
+              {(() => {
+                const nowMs = Date.now();
+                const configuredModuleSec = Math.max(60, (config.tiempoExamenModuloMin || 50) * 60);
+                const configuredIntegralSec = Math.max(60, (config.tiempoExamenIntegralMin || 80) * 60);
+
+                // 1. Cumplimiento de tiempos en entregas finalizadas y sesiones en curso
+                const completedWithDuration = attempts.filter(
+                  (a) => typeof a.duracionSegundos === 'number' && a.duracionSegundos > 0
+                );
+                const withinTimeCount = completedWithDuration.filter((a) => {
+                  const limitSec =
+                    a.modalidad === 'integral' ? configuredIntegralSec : configuredModuleSec;
+                  return (a.duracionSegundos || 0) <= limitSec * 1.02;
+                }).length;
+                const timeComplianceRatePct =
+                  completedWithDuration.length > 0
+                    ? Math.round((withinTimeCount / completedWithDuration.length) * 100)
+                    : 100;
+                const avgCompletionMinutes =
+                  completedWithDuration.length > 0
+                    ? (
+                        completedWithDuration.reduce((acc, a) => acc + (a.duracionSegundos || 0), 0) /
+                        completedWithDuration.length /
+                        60
+                      ).toFixed(1)
+                    : '0.0';
+
+                // 2. Sesiones en vivo: Tiempos e Inactividad
+                const liveAuditRows = liveSessions.map((sess) => {
+                  const totalSec =
+                    sess.modalidad?.toLowerCase().includes('integral')
+                      ? configuredIntegralSec
+                      : configuredModuleSec;
+                  const remSec = Math.max(0, sess.remainingSeconds ?? totalSec);
+                  const elapsedSec = Math.max(0, totalSec - remSec);
+                  const elapsedPct = Math.min(100, Math.round((elapsedSec / totalSec) * 100));
+                  const lastBeatMs = sess.lastUpdatedMs || nowMs;
+                  const idleSeconds = Math.max(0, Math.round((nowMs - lastBeatMs) / 1000));
+                  const idleMinutes = Math.floor(idleSeconds / 60);
+                  const inactivityState: 'ACTIVO' | 'ALERTA_PREVENTIVA' | 'SESION_EN_RIESGO' =
+                    idleSeconds >= 900 || !sess.windowFocused
+                      ? 'SESION_EN_RIESGO'
+                      : idleSeconds >= 120
+                      ? 'ALERTA_PREVENTIVA'
+                      : 'ACTIVO';
+                  return {
+                    ...sess,
+                    totalSec,
+                    remSec,
+                    elapsedSec,
+                    elapsedPct,
+                    idleSeconds,
+                    idleMinutes,
+                    inactivityState
+                  };
+                });
+
+                const riskInactivitySessionsCount = liveAuditRows.filter(
+                  (r) => r.inactivityState !== 'ACTIVO'
+                ).length;
+
+                // 3. Log consolidado de eventos anti-trampa en tiempo real
+                const allAntiCheatEvents = students
+                  .flatMap((st) =>
+                    (st.historialLlamadosAtencion || []).map((ev) => ({
+                      ...ev,
+                      studentId: st.id,
+                      studentName: st.nombre
+                    }))
+                  )
+                  .sort((a, b) => (b.timestampMs || 0) - (a.timestampMs || 0));
+
+                const pendingEncryptedCount = encryptedAuditLogs.filter(
+                  (e) => !e.syncedToServer
+                ).length;
+
+                return (
+                  <div className="bg-white border-2 border-slate-900/15 rounded-2xl p-5 shadow-xs space-y-5">
+                    <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-slate-200 pb-4">
+                      <div className="space-y-1">
+                        <div className="flex flex-wrap items-center gap-2 text-xs font-mono text-slate-600">
+                          <span className="font-bold text-slate-900">
+                            Dashboard de Auditoría en Tiempo Real
+                          </span>
+                          <span aria-hidden="true">·</span>
+                          <span>
+                            Carga Diferida por Demanda:{' '}
+                            <strong className="text-emerald-700">
+                              {isCourseDataHydratedOnDemand ? 'Hidratada en Curso Activo' : 'En Espera'}
+                            </strong>
+                          </span>
+                          <span aria-hidden="true">·</span>
+                          <span>
+                            Cola Cifrada Local:{' '}
+                            <strong className="text-indigo-700">
+                              {encryptedAuditLogs.length} evento(s) ({pendingEncryptedCount} pendientes de envío)
+                            </strong>
+                          </span>
+                        </div>
+                        <h3 className="text-base sm:text-lg font-extrabold text-slate-900">
+                          Control de Tiempos de Evaluación, Alertas de Inactividad y Bitácora Cifrada Anti-Trampa
+                        </h3>
+                      </div>
+
+                      {onForceFlushEncryptedAuditLogs && (
+                        <button
+                          type="button"
+                          onClick={() => void onForceFlushEncryptedAuditLogs()}
+                          className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer self-start lg:self-auto"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" />
+                          <span>Sincronizar Cola Cifrada ({pendingEncryptedCount})</span>
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Sub-panel A y B: Cumplimiento de Tiempos + Alertas de Inactividad */}
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                      {/* Panel A: Cumplimiento de Tiempos de Evaluación */}
+                      <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <div>
+                            <div className="text-xs font-bold text-slate-900">
+                              1. Cumplimiento de Tiempos de Evaluación
+                            </div>
+                            <p className="text-[11px] text-slate-500">
+                              Límites actuales: Módulo {config.tiempoExamenModuloMin} min · Integral{' '}
+                              {config.tiempoExamenIntegralMin} min
+                            </p>
+                          </div>
+                          <div className="text-right font-mono">
+                            <div className="text-lg font-extrabold text-emerald-700 tabular-nums">
+                              {timeComplianceRatePct}%
+                            </div>
+                            <div className="text-[10px] text-slate-500">
+                              Prom: {avgCompletionMinutes} min
+                            </div>
+                          </div>
+                        </div>
+
+                        {liveAuditRows.length === 0 ? (
+                          <div className="p-3 rounded-lg bg-white border border-slate-200 text-xs text-slate-500 text-center">
+                            Sin exámenes en curso en este instante ({completedWithDuration.length} entregas históricas auditadas).
+                          </div>
+                        ) : (
+                          <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                            {liveAuditRows.map((row) => {
+                              const remMin = Math.floor(row.remSec / 60);
+                              const remS = row.remSec % 60;
+                              const isLowTime = row.remSec <= 300;
+                              return (
+                                <div
+                                  key={`time-${row.studentId}`}
+                                  className="p-2.5 rounded-lg bg-white border border-slate-200 space-y-1.5 text-xs"
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="font-bold text-slate-900 truncate">
+                                      {row.studentName}
+                                    </span>
+                                    <span
+                                      className={`font-mono font-bold tabular-nums ${
+                                        isLowTime ? 'text-rose-600' : 'text-slate-700'
+                                      }`}
+                                    >
+                                      Restan {remMin}:{String(remS).padStart(2, '0')} (
+                                      {row.elapsedPct}%)
+                                    </span>
+                                  </div>
+                                  <div className="w-full h-1.5 bg-slate-200 rounded-full overflow-hidden">
+                                    <div
+                                      className={`h-full transition-all ${
+                                        isLowTime ? 'bg-rose-600' : 'bg-sky-600'
+                                      }`}
+                                      style={{ width: `${row.elapsedPct}%` }}
+                                    />
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Panel B: Monitor de Alertas de Inactividad de Estudiantes */}
+                      <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <div>
+                            <div className="text-xs font-bold text-slate-900">
+                              2. Alertas de Inactividad en Aula (Umbral 15m / Cierre 20m)
+                            </div>
+                            <p className="text-[11px] text-slate-500">
+                              Detección en vivo de pérdida de foco o ausencia de interacción del estudiante
+                            </p>
+                          </div>
+                          <div className="text-right font-mono">
+                            <div
+                              className={`text-lg font-extrabold tabular-nums ${
+                                riskInactivitySessionsCount > 0
+                                  ? 'text-amber-600'
+                                  : 'text-emerald-700'
+                              }`}
+                            >
+                              {riskInactivitySessionsCount} en alerta
+                            </div>
+                            <div className="text-[10px] text-slate-500">
+                              {liveAuditRows.length} sesión(es) activas
+                            </div>
+                          </div>
+                        </div>
+
+                        {liveAuditRows.length === 0 ? (
+                          <div className="p-3 rounded-lg bg-white border border-slate-200 text-xs text-slate-500 text-center">
+                            No hay sesiones estudiantiles con inactividad o riesgo en este momento.
+                          </div>
+                        ) : (
+                          <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                            {liveAuditRows.map((row) => (
+                              <div
+                                key={`idle-${row.studentId}`}
+                                className={`p-2.5 rounded-lg border flex items-center justify-between gap-2 text-xs ${
+                                  row.inactivityState === 'SESION_EN_RIESGO'
+                                    ? 'bg-rose-50 border-rose-300 text-rose-950'
+                                    : row.inactivityState === 'ALERTA_PREVENTIVA'
+                                    ? 'bg-amber-50 border-amber-300 text-amber-950'
+                                    : 'bg-white border-slate-200 text-slate-800'
+                                }`}
+                              >
+                                <div className="min-w-0">
+                                  <div className="font-bold truncate">{row.studentName}</div>
+                                  <div className="text-[11px] font-mono text-slate-600">
+                                    {row.inactivityState === 'SESION_EN_RIESGO'
+                                      ? `Sesión en riesgo · Sin foco o inactivo (${row.idleSeconds}s)`
+                                      : row.inactivityState === 'ALERTA_PREVENTIVA'
+                                      ? `Inactividad preventiva: ${row.idleMinutes}m ${row.idleSeconds % 60}s`
+                                      : `Activo · Pulso hace ${row.idleSeconds}s · P${row.currentQuestion}/${row.totalQuestions}`}
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => onReleaseLiveSession(row.studentId)}
+                                  className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-[11px] font-bold shrink-0 cursor-pointer"
+                                >
+                                  Cerrar sesión
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Sub-panel C: Log de Eventos Anti-Trampa en Vivo + Registro Cifrado Local (App.tsx) */}
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                      {/* Log de Eventos Anti-Trampa */}
+                      <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-bold text-slate-900">
+                            3. Log en Tiempo Real de Eventos Anti-Trampa ({allAntiCheatEvents.length})
+                          </span>
+                          <span className="text-[11px] font-mono text-rose-700 font-semibold">
+                            Tiempo Real
+                          </span>
+                        </div>
+                        {allAntiCheatEvents.length === 0 ? (
+                          <div className="p-4 rounded-lg bg-white border border-slate-200 text-xs text-slate-500 text-center">
+                            Sin eventos anti-trampa registrados en el curso actual.
+                          </div>
+                        ) : (
+                          <div className="max-h-56 overflow-y-auto space-y-2 pr-1">
+                            {allAntiCheatEvents.slice(0, 25).map((ev) => (
+                              <div
+                                key={ev.id}
+                                className="p-2.5 rounded-lg bg-white border border-slate-200 text-xs space-y-1"
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="font-bold text-slate-900">
+                                    {ev.studentName} ({ev.studentId})
+                                  </span>
+                                  <span className="font-mono text-[10px] text-slate-500">
+                                    {ev.fecha}
+                                  </span>
+                                </div>
+                                <div className="text-[11px] font-mono font-semibold text-rose-700">
+                                  {ev.etiquetaDeteccion || ev.tipoDeteccion} · {ev.accionTomada}
+                                </div>
+                                <p className="text-[11px] text-slate-600">{ev.descripcion}</p>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Bitácora Cifrada Localmente (App.tsx Audit Log) */}
+                      <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-bold text-slate-900">
+                            4. Bitácora de Eventos Críticos Cifrada Localmente ({encryptedAuditLogs.length})
+                          </span>
+                          <span className="text-[11px] font-mono text-indigo-700 font-semibold">
+                            AES-Stream + SHA256
+                          </span>
+                        </div>
+                        {encryptedAuditLogs.length === 0 ? (
+                          <div className="p-4 rounded-lg bg-white border border-slate-200 text-xs text-slate-500 text-center">
+                            Los cambios en calificaciones, parámetros de examen y eventos anti-trampa se cifran localmente y aparecen aquí automáticamente.
+                          </div>
+                        ) : (
+                          <div className="max-h-56 overflow-y-auto space-y-2 pr-1">
+                            {encryptedAuditLogs.slice(0, 25).map((item) => (
+                              <div
+                                key={item.id}
+                                className="p-2.5 rounded-lg bg-white border border-slate-200 text-xs space-y-1"
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="font-mono font-bold text-indigo-900 text-[11px]">
+                                    [{item.category}] {item.action}
+                                  </span>
+                                  <span
+                                    className={`font-mono text-[10px] font-bold ${
+                                      item.syncedToServer ? 'text-emerald-700' : 'text-amber-700'
+                                    }`}
+                                  >
+                                    {item.syncedToServer ? 'Sincronizado' : 'Cola Local Cifrada'}
+                                  </span>
+                                </div>
+                                <p className="text-[11px] text-slate-700">{item.details}</p>
+                                <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] font-mono text-slate-400 pt-0.5">
+                                  <span>{item.integrityHash}</span>
+                                  <span>Cifrado: {item.cipherPreview}</span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* Ranking y Desglose de Estudiantes con Más Infracciones */}
               <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-4">
                 <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3 border-b border-slate-100 pb-3">
@@ -11733,6 +13576,149 @@ function doPost(e) {
                         </div>
                       );
                     })}
+                  </div>
+                )}
+              </div>
+
+              {/* Control de Congelación / Cierre Oficial de Cortes Académicos (Gradebook Lock) */}
+              <div className="bg-white border-2 border-amber-200 rounded-2xl p-5 shadow-xs space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
+                  <div>
+                    <div className="inline-flex items-center gap-1.5 text-[11px] font-mono font-extrabold uppercase text-amber-900 bg-amber-50 border border-amber-200 px-2.5 py-0.5 rounded-md mb-1">
+                      <Lock className="w-3.5 h-3.5" />
+                      <span>Control Institucional de Planillas · Congelación de Cortes</span>
+                    </div>
+                    <h3 className="text-sm sm:text-base font-extrabold text-slate-900">
+                      Cierre Oficial de Cortes Académicos (Protección contra Modificación Accidental)
+                    </h3>
+                    <p className="text-xs text-slate-500">
+                      Al cerrar oficialmente un corte, el evento queda registrado en la Bitácora de Auditoría Institucional con marca de tiempo y docente responsable.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  {[
+                    { key: 'corte1' as const, label: 'Corte 1 (30%) · Clases C1–C2', subtitle: 'Evaluaciones y asistencia inicial' },
+                    { key: 'corte2' as const, label: 'Corte 2 (30%) · Clases C3–C4', subtitle: 'Evaluaciones y retos intermedios' },
+                    { key: 'corte3' as const, label: 'Corte 3 + ABPro (40%) · C5–C6', subtitle: 'Proyecto integrador y cierre final' }
+                  ].map((cut) => {
+                    const isLocked = Boolean(lockedAcademicCuts[cut.key]);
+                    return (
+                      <div
+                        key={cut.key}
+                        className={`p-4 rounded-xl border-2 flex flex-col justify-between gap-3 transition-all ${
+                          isLocked
+                            ? 'bg-emerald-50/70 border-emerald-400'
+                            : 'bg-slate-50 border-slate-200'
+                        }`}
+                      >
+                        <div className="space-y-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-extrabold text-slate-900">{cut.label}</span>
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
+                                isLocked
+                                  ? 'bg-emerald-700 text-white'
+                                  : 'bg-slate-200 text-slate-700'
+                              }`}
+                            >
+                              {isLocked ? '🔒 CERRADO OFICIAL' : '🔓 ABIERTO EDICIÓN'}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-600">{cut.subtitle}</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleToggleAcademicCutLock(cut.key, cut.label)}
+                          className={`w-full py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${
+                            isLocked
+                              ? 'bg-white hover:bg-amber-50 border border-amber-300 text-amber-900'
+                              : 'bg-slate-900 hover:bg-slate-800 text-white'
+                          }`}
+                        >
+                          {isLocked ? (
+                            <>
+                              <Unlock className="w-3.5 h-3.5" />
+                              <span>Reabrir Corte (Auditar)</span>
+                            </>
+                          ) : (
+                            <>
+                              <Lock className="w-3.5 h-3.5" />
+                              <span>Oficializar y Cerrar Corte</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Bitácora de Auditoría Institucional en Servidor (/api/audit-logs) */}
+              <div className="bg-white border-2 border-indigo-200 rounded-2xl p-5 shadow-xs space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
+                  <div>
+                    <div className="inline-flex items-center gap-1.5 text-[11px] font-mono font-extrabold uppercase text-indigo-800 bg-indigo-50 border border-indigo-200 px-2.5 py-0.5 rounded-md mb-1">
+                      <Database className="w-3.5 h-3.5" />
+                      <span>Trazabilidad Forense · Auditoría Institucional en Servidor</span>
+                    </div>
+                    <h3 className="text-sm sm:text-base font-extrabold text-slate-900">
+                      Bitácora de Auditoría Institucional ({institutionalAuditLogs.length} eventos recientes)
+                    </h3>
+                    <p className="text-xs text-slate-500">
+                      Registro inmutable en servidor (<code>/api/audit-logs</code>) de desbloqueos anti-trampa, cambios de parámetros, entregas de exámenes y sincronizaciones de nómina.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void fetchInstitutionalAuditLogs()}
+                    disabled={isLoadingAuditLogs}
+                    className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-extrabold inline-flex items-center gap-1.5 cursor-pointer self-start sm:self-auto"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isLoadingAuditLogs ? 'animate-spin' : ''}`} />
+                    <span>{isLoadingAuditLogs ? 'Consultando...' : 'Actualizar Bitácora'}</span>
+                  </button>
+                </div>
+
+                {institutionalAuditLogs.length === 0 ? (
+                  <div className="p-6 text-center bg-slate-50 border border-dashed border-slate-300 rounded-xl text-xs text-slate-500">
+                    No se encontraron registros recientes o cargando desde el servidor central...
+                  </div>
+                ) : (
+                  <div className="max-h-72 overflow-y-auto border border-slate-200 rounded-xl">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead className="bg-slate-50 border-b border-slate-200 sticky top-0 z-10">
+                        <tr>
+                          <th className="py-2 px-3 font-bold text-slate-700">Fecha / Hora</th>
+                          <th className="py-2 px-3 font-bold text-slate-700">Actor / Rol</th>
+                          <th className="py-2 px-3 font-bold text-slate-700">Acción Auditada</th>
+                          <th className="py-2 px-3 font-bold text-slate-700">Detalle Técnico</th>
+                          <th className="py-2 px-3 font-bold text-slate-700 text-right">Rev.</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {institutionalAuditLogs.slice(0, 40).map((log) => (
+                          <tr key={log.id} className="hover:bg-slate-50/80">
+                            <td className="py-2 px-3 font-mono text-[11px] text-slate-600 whitespace-nowrap">
+                              {new Date(log.timestampIso).toLocaleString('es-CO')}
+                            </td>
+                            <td className="py-2 px-3 font-mono font-bold text-indigo-900">
+                              {log.actor}
+                            </td>
+                            <td className="py-2 px-3">
+                              <span className="px-2 py-0.5 rounded bg-slate-100 border border-slate-300 font-mono text-[10px] font-bold text-slate-800">
+                                {log.action}
+                              </span>
+                            </td>
+                            <td className="py-2 px-3 text-slate-700">{log.detail}</td>
+                            <td className="py-2 px-3 font-mono text-[11px] text-right text-slate-500">
+                              #{log.revision}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 )}
               </div>
@@ -12253,9 +14239,248 @@ function doPost(e) {
                           )}
                         </div>
 
+                        <div className="space-y-3 pt-3 border-t border-slate-200">
+                          {(() => {
+                            const allFormalTickets: AcademicReviewTicket[] = students.flatMap((st) =>
+                              (Array.isArray(st.solicitudesRevision) ? st.solicitudesRevision : []).map(
+                                (t) => ({
+                                  ...t,
+                                  studentId: t.studentId || st.id,
+                                  studentName: t.studentName || st.nombre
+                                })
+                              )
+                            );
+                            const pendingTicketsCount = allFormalTickets.filter(
+                              (t) => t.estado === 'PENDIENTE'
+                            ).length;
+                            const displayedTickets = allFormalTickets
+                              .filter((t) =>
+                                ticketInboxFilter === 'PENDIENTE' ? t.estado === 'PENDIENTE' : true
+                              )
+                              .sort((a, b) => (b.timestampMs || 0) - (a.timestampMs || 0));
+
+                            return (
+                              <div className="space-y-3">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <div>
+                                    <div className="font-mono text-[11px] font-extrabold uppercase text-amber-900">
+                                      🎫 Bandeja Centralizada de Solicitudes de Revisión de Nota y Excusas ({pendingTicketsCount} pendientes)
+                                    </div>
+                                    <p className="text-[11px] text-slate-600">
+                                      Apruebe o rechace con comentario oficial y actualice la nota o asistencia en un solo clic (con registro automático en el Audit Log).
+                                    </p>
+                                  </div>
+                                  <div className="flex items-center gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => setTicketInboxFilter('PENDIENTE')}
+                                      className={`px-2.5 py-1 rounded-lg text-[11px] font-bold cursor-pointer ${
+                                        ticketInboxFilter === 'PENDIENTE'
+                                          ? 'bg-amber-500 text-slate-950'
+                                          : 'bg-slate-100 text-slate-700'
+                                      }`}
+                                    >
+                                      Pendientes ({pendingTicketsCount})
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setTicketInboxFilter('TODAS')}
+                                      className={`px-2.5 py-1 rounded-lg text-[11px] font-bold cursor-pointer ${
+                                        ticketInboxFilter === 'TODAS'
+                                          ? 'bg-slate-900 text-white'
+                                          : 'bg-slate-100 text-slate-700'
+                                      }`}
+                                    >
+                                      Historial ({allFormalTickets.length})
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {displayedTickets.length === 0 ? (
+                                  <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-600 text-xs">
+                                    No hay tickets formales de revisión de nota o excusas en estado {ticketInboxFilter.toLowerCase()}.
+                                  </div>
+                                ) : (
+                                  <div className="space-y-3">
+                                    {displayedTickets.map((tck) => {
+                                      const defaultGrade = String(
+                                        tck.notaSolicitada ?? tck.notaActual ?? 4.0
+                                      );
+                                      const currentGradeDraft =
+                                        ticketGradeDrafts[tck.id] ?? defaultGrade;
+                                      const currentCommentDraft =
+                                        ticketCommentDrafts[tck.id] ??
+                                        tck.comentarioDocente ??
+                                        '';
+
+                                      return (
+                                        <div
+                                          key={tck.id}
+                                          className={`p-4 rounded-2xl border space-y-2.5 text-xs ${
+                                            tck.estado === 'APROBADA'
+                                              ? 'border-emerald-200 bg-emerald-50/40'
+                                              : tck.estado === 'RECHAZADA'
+                                              ? 'border-rose-200 bg-rose-50/40'
+                                              : 'border-amber-300 bg-amber-50/50'
+                                          }`}
+                                        >
+                                          <div className="flex flex-wrap items-start justify-between gap-2">
+                                            <div>
+                                              <div className="flex flex-wrap items-center gap-1.5">
+                                                <span className="px-2 py-0.5 rounded bg-slate-900 text-white font-mono text-[10px] font-bold">
+                                                  #{tck.id}
+                                                </span>
+                                                <span className="font-extrabold text-slate-900 text-sm">
+                                                  {tck.studentName} ({tck.studentId})
+                                                </span>
+                                                <span className="px-2 py-0.5 rounded bg-white border border-slate-300 font-mono text-[10px] font-bold text-slate-800">
+                                                  {tck.targetLabel || tck.referenciaLabel}
+                                                </span>
+                                              </div>
+                                              {tck.preguntaReferencia && (
+                                                <div className="text-[11px] font-mono font-bold text-amber-900 mt-0.5">
+                                                  Referencia específica: {tck.preguntaReferencia}
+                                                </div>
+                                              )}
+                                            </div>
+                                            <span
+                                              className={`px-2.5 py-0.5 rounded-full font-mono text-[10px] font-extrabold uppercase ${
+                                                tck.estado === 'APROBADA'
+                                                  ? 'bg-emerald-600 text-white'
+                                                  : tck.estado === 'RECHAZADA'
+                                                  ? 'bg-rose-600 text-white'
+                                                  : 'bg-amber-500 text-slate-950'
+                                              }`}
+                                            >
+                                              {tck.estado}
+                                            </span>
+                                          </div>
+
+                                          <p className="text-slate-800 bg-white/90 p-2.5 rounded-xl border border-slate-200/80">
+                                            <strong>Justificación del estudiante:</strong> “{tck.motivoEstudiante}”
+                                          </p>
+
+                                          <div className="flex flex-wrap items-center gap-3 text-[11px] font-mono text-slate-600">
+                                            {typeof tck.notaActual === 'number' && (
+                                              <span>Nota actual: <strong>{tck.notaActual.toFixed(1)}/5.0</strong></span>
+                                            )}
+                                            {typeof tck.notaSolicitada === 'number' && (
+                                              <span>Nota solicitada: <strong>{tck.notaSolicitada.toFixed(1)}/5.0</strong></span>
+                                            )}
+                                            {(tck.soporteUrl || tck.enlaceEvidencia) && (
+                                              <a
+                                                href={tck.soporteUrl || tck.enlaceEvidencia}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="text-sky-700 font-bold underline"
+                                              >
+                                                Abrir Evidencia / Excusa Adjunta ↗
+                                              </a>
+                                            )}
+                                          </div>
+
+                                          {tck.estado === 'PENDIENTE' ? (
+                                            <div className="space-y-2 pt-1 border-t border-amber-200/80">
+                                              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                                {tck.tipo !== 'EXCUSA_INASISTENCIA' && (
+                                                  <div>
+                                                    <label className="block text-[10px] font-bold uppercase text-slate-700 mb-1">
+                                                      Nueva Nota Oficial (0.0 - 5.0):
+                                                    </label>
+                                                    <input
+                                                      type="number"
+                                                      step="0.1"
+                                                      min="0"
+                                                      max="5"
+                                                      value={currentGradeDraft}
+                                                      onChange={(e) =>
+                                                        setTicketGradeDrafts((prev) => ({
+                                                          ...prev,
+                                                          [tck.id]: e.target.value
+                                                        }))
+                                                      }
+                                                      className="w-full min-h-[42px] px-3 py-1.5 rounded-xl border border-slate-300 bg-white font-mono font-bold text-slate-900"
+                                                    />
+                                                  </div>
+                                                )}
+                                                <div
+                                                  className={
+                                                    tck.tipo !== 'EXCUSA_INASISTENCIA'
+                                                      ? 'sm:col-span-2'
+                                                      : 'sm:col-span-3'
+                                                  }
+                                                >
+                                                  <label className="block text-[10px] font-bold uppercase text-slate-700 mb-1">
+                                                    Comentario Oficial del Docente:
+                                                  </label>
+                                                  <input
+                                                    type="text"
+                                                    value={currentCommentDraft}
+                                                    onChange={(e) =>
+                                                      setTicketCommentDrafts((prev) => ({
+                                                        ...prev,
+                                                        [tck.id]: e.target.value
+                                                      }))
+                                                    }
+                                                    placeholder="Escriba respuesta oficial para el estudiante (queda trazada en el ticket y Audit Log)..."
+                                                    className="w-full min-h-[42px] px-3 py-1.5 rounded-xl border border-slate-300 bg-white text-slate-900"
+                                                  />
+                                                </div>
+                                              </div>
+
+                                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                                <button
+                                                  type="button"
+                                                  onClick={() =>
+                                                    handleResolveAcademicReviewTicket(
+                                                      tck.studentId,
+                                                      tck,
+                                                      'APROBADA'
+                                                    )
+                                                  }
+                                                  className="min-h-[44px] px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs cursor-pointer shadow-2xs"
+                                                >
+                                                  ✓ Aprobar y Actualizar Nota/Asistencia en 1 Clic
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  onClick={() =>
+                                                    handleResolveAcademicReviewTicket(
+                                                      tck.studentId,
+                                                      tck,
+                                                      'RECHAZADA'
+                                                    )
+                                                  }
+                                                  className="min-h-[44px] px-4 py-2 rounded-xl bg-rose-100 hover:bg-rose-200 text-rose-900 font-bold text-xs cursor-pointer"
+                                                >
+                                                  ✕ Rechazar con Comentario Oficial
+                                                </button>
+                                              </div>
+                                            </div>
+                                          ) : (
+                                            <div className="p-2.5 rounded-xl bg-white border border-slate-200 text-[11px] text-slate-700">
+                                              <strong>Resolución Docente ({tck.fechaResolucion || 'Registrada'}):</strong>{' '}
+                                              {tck.comentarioDocente}
+                                              {tck.ajusteAplicadoDetalle && (
+                                                <span className="block font-mono text-emerald-800 font-bold mt-0.5">
+                                                  {tck.ajusteAplicadoDetalle}
+                                                </span>
+                                              )}
+                                            </div>
+                                          )}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })()}
+                        </div>
+
                         <div className="space-y-2 pt-2 border-t border-slate-200">
                           <div className="font-mono text-[11px] font-extrabold uppercase text-indigo-900">
-                            📋 Solicitudes de Justificación de Inasistencia ({pendingExcuseItems.length})
+                            📋 Solicitudes Directas de Justificación de Inasistencia ({pendingExcuseItems.length})
                           </div>
                           {pendingExcuseItems.length === 0 ? (
                             <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-slate-600">

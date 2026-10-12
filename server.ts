@@ -537,6 +537,256 @@ app.use('/api/state', async (req, res, next) => {
     });
   });
 
+  // 1B. GET /api/state/live-ping — Lightweight classroom heartbeat (<1.5KB) to avoid downloading full state on every poll
+  app.get('/api/state/live-ping', (_req, res) => {
+    const nowMs = Date.now();
+    const beforeCount = centralDb.liveSessions.length;
+    centralDb.liveSessions = centralDb.liveSessions.filter(
+      (s) => s && typeof s.ultimaActualizacionMs === 'number' && nowMs - s.ultimaActualizacionMs < 120000
+    );
+    if (centralDb.liveSessions.length !== beforeCount) {
+      centralDb.revision += 1;
+      centralDb.lastModifiedIso = new Date().toISOString();
+    }
+    const activeRollCalls = (centralDb.academicDataset?.classSessions || [])
+      .filter((cs: any) => cs && cs.llamadoAsistenciaActivo)
+      .map((cs: any) => cs.id);
+
+    return res.json({
+      ok: true,
+      revision: centralDb.revision,
+      questionsRevision: centralDb.questionsRevision,
+      lastModifiedIso: centralDb.lastModifiedIso,
+      liveSessions: centralDb.liveSessions,
+      activeExamsCount: Object.keys(centralDb.activeExamsByStudent || {}).length,
+      activeRollCalls,
+      attemptsCount: centralDb.attempts.length,
+      studentsCount: centralDb.students.length
+    });
+  });
+
+  // 1C. GET & POST /api/audit-logs — Institutional Audit Trail & Role Security Verification
+  app.get('/api/audit-logs', (_req, res) => {
+    try {
+      let logs: any[] = [];
+      if (fs.existsSync(AUDIT_LOG_PATH)) {
+        logs = JSON.parse(fs.readFileSync(AUDIT_LOG_PATH, 'utf-8')) || [];
+      }
+      return res.json({
+        ok: true,
+        revision: centralDb.revision,
+        logs: Array.isArray(logs) ? logs.slice(0, 100) : []
+      });
+    } catch {
+      return res.json({ ok: true, revision: centralDb.revision, logs: [] });
+    }
+  });
+
+  // In-memory brute-force protection & classroom code help queue
+  const authRateLimitMap = new Map<string, { failedCount: number; lockedUntilMs: number }>();
+  const classroomCodeHelpRequests: Array<{
+    id: string;
+    studentId: string;
+    studentName: string;
+    documento?: string;
+    accessCode?: string;
+    requestedAtIso: string;
+    courseName?: string;
+  }> = [];
+
+  function appendAuditLogEntry(entry: {
+    section: string;
+    description: string;
+    actorId?: string;
+    actorRole?: string;
+    courseId?: string;
+  }) {
+    try {
+      let existingLogs: any[] = [];
+      if (fs.existsSync(AUDIT_LOG_PATH)) {
+        existingLogs = JSON.parse(fs.readFileSync(AUDIT_LOG_PATH, 'utf-8')) || [];
+      }
+      const fullEntry = {
+        section: String(entry.section),
+        description: String(entry.description),
+        actorId: entry.actorId ? String(entry.actorId) : undefined,
+        actorRole: entry.actorRole ? String(entry.actorRole) : undefined,
+        courseId: entry.courseId ? String(entry.courseId) : centralDb.config?.activeCourseId || undefined,
+        revision: centralDb.revision,
+        saved_at: new Date().toISOString()
+      };
+      const nextLogs = [fullEntry, ...existingLogs.slice(0, 199)];
+      ensureDataDir();
+      fs.writeFileSync(AUDIT_LOG_PATH, JSON.stringify(nextLogs, null, 2), 'utf-8');
+      return { fullEntry, count: nextLogs.length };
+    } catch {
+      return null;
+    }
+  }
+
+  app.post('/api/audit-logs', (req, res) => {
+    try {
+      const { section = 'AuditoriaInstitucional', description = 'Evento registrado', actorId, actorRole, courseId } = req.body || {};
+      const result = appendAuditLogEntry({ section, description, actorId, actorRole, courseId });
+      return res.json({ ok: true, entry: result?.fullEntry, logsCount: result?.count || 0 });
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, error: err?.message || 'Error al registrar auditoría.' });
+    }
+  });
+
+  // Solicitudes de asistencia de código en aula desde el login del estudiante
+  app.get('/api/auth/code-help-requests', (_req, res) => {
+    return res.json({
+      ok: true,
+      requests: classroomCodeHelpRequests.slice(0, 50)
+    });
+  });
+
+  app.post('/api/auth/request-code-help', (req, res) => {
+    try {
+      const { studentId } = req.body || {};
+      const cleanId = String(studentId || '').trim().replace(/[\s.-]/g, '').toUpperCase();
+      if (!cleanId) {
+        return res.status(400).json({ ok: false, error: 'Ingrese su ID o documento de estudiante para notificar al docente.' });
+      }
+      const matchedStudent = centralDb.students.find(
+        (s) =>
+          String(s.id || '').trim().replace(/[\s.-]/g, '').toUpperCase() === cleanId ||
+          String(s.documento || '').trim().replace(/[\s.-]/g, '').toUpperCase() === cleanId
+      );
+      const studentName = matchedStudent?.nombre || `Estudiante (${cleanId})`;
+      const existingIdx = classroomCodeHelpRequests.findIndex((r) => r.studentId === cleanId);
+      const reqItem = {
+        id: `help_${Date.now()}_${cleanId}`,
+        studentId: matchedStudent?.id || cleanId,
+        studentName,
+        documento: matchedStudent?.documento || cleanId,
+        accessCode: matchedStudent?.codigoAcceso || undefined,
+        requestedAtIso: new Date().toISOString(),
+        courseName: centralDb.config?.activeCourseMeta?.nombreCurso || 'Curso Activo'
+      };
+      if (existingIdx >= 0) {
+        classroomCodeHelpRequests[existingIdx] = reqItem;
+      } else {
+        classroomCodeHelpRequests.unshift(reqItem);
+      }
+      appendAuditLogEntry({
+        section: 'SolicitudCodigoAula',
+        description: `Estudiante ${studentName} (${cleanId}) solicitó asistencia de código de acceso en sala.`,
+        actorId: cleanId,
+        actorRole: 'estudiante'
+      });
+      return res.json({
+        ok: true,
+        found: Boolean(matchedStudent),
+        studentName,
+        message: `Solicitud enviada al Panel del Docente en sala para ${studentName}.`
+      });
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, error: err?.message || 'Error al procesar solicitud.' });
+    }
+  });
+
+  app.delete('/api/auth/code-help-requests/:studentId', (req, res) => {
+    const cleanId = String(req.params.studentId || '').trim().replace(/[\s.-]/g, '').toUpperCase();
+    const idx = classroomCodeHelpRequests.findIndex(
+      (r) => String(r.studentId || '').trim().replace(/[\s.-]/g, '').toUpperCase() === cleanId || r.id === req.params.studentId
+    );
+    if (idx >= 0) {
+      classroomCodeHelpRequests.splice(idx, 1);
+    }
+    return res.json({ ok: true, requests: classroomCodeHelpRequests });
+  });
+
+  app.post('/api/auth/verify-role', (req, res) => {
+    try {
+      const { role, userId, password } = req.body || {};
+      const cleanId = String(userId || '').trim().replace(/[\s.-]/g, '').toUpperCase();
+      const cleanPass = String(password || '').trim();
+      const cfg = centralDb.config || DEFAULT_SERVER_CONFIG;
+
+      const rateKey = `${String(role || 'unknown')}:${cleanId || req.ip || 'anon'}`;
+      const nowMs = Date.now();
+      const rateState = authRateLimitMap.get(rateKey);
+      if (rateState && rateState.lockedUntilMs > nowMs) {
+        const remainingSec = Math.ceil((rateState.lockedUntilMs - nowMs) / 1000);
+        return res.status(429).json({
+          ok: false,
+          verified: false,
+          lockedRemainingSec: remainingSec,
+          error: `Demasiados intentos fallidos. Por seguridad institucional, espere ${remainingSec}s antes de reintentar.`
+        });
+      }
+
+      const registerAuthAttempt = (verified: boolean, targetRole: string, resolvedActorId: string) => {
+        if (verified) {
+          authRateLimitMap.delete(rateKey);
+          appendAuditLogEntry({
+            section: 'AccesoRolVerificado',
+            description: `Inicio de sesión verificado en rol ${targetRole.toUpperCase()} por ${resolvedActorId}.`,
+            actorId: resolvedActorId,
+            actorRole: targetRole
+          });
+        } else {
+          const prev = authRateLimitMap.get(rateKey) || { failedCount: 0, lockedUntilMs: 0 };
+          const nextFailed = prev.failedCount + 1;
+          const lockedUntilMs = nextFailed >= 5 ? nowMs + 60_000 : 0;
+          authRateLimitMap.set(rateKey, { failedCount: nextFailed, lockedUntilMs });
+          appendAuditLogEntry({
+            section: 'IntentoAccesoFallido',
+            description: `Intento fallido de autenticación (#${nextFailed}) en rol ${targetRole.toUpperCase()} con usuario "${cleanId || 'vacío'}".`,
+            actorId: cleanId || 'ANON',
+            actorRole: targetRole
+          });
+        }
+      };
+
+      if (role === 'editor') {
+        const expectedUser = String(cfg.editorUsuario || 'EDITOR2026').trim().toUpperCase();
+        const expectedPass = String(cfg.editorClave || 'EDITOR2026').trim();
+        const verified = cleanId === expectedUser && cleanPass === expectedPass;
+        registerAuthAttempt(verified, 'editor', cleanId);
+        const sessionToken = verified
+          ? Buffer.from(`editor:${cleanId}:${nowMs}`).toString('base64url')
+          : undefined;
+        return res.json({ ok: true, verified, role: 'editor', actorId: cleanId, sessionToken });
+      }
+
+      if (role === 'docente') {
+        const expectedTeacherId = String(cfg.idDocente || 'DOCENTE2026').trim().toUpperCase();
+        const isMasterMatch =
+          (cleanId === expectedTeacherId || cleanId === 'DOCENTE2026') &&
+          cleanPass === String(cfg.claveDocente || 'DOCENTE2026').trim();
+        const teachers = Array.isArray(cfg.registeredTeachers) ? cfg.registeredTeachers : [];
+        const matchedTeacher = teachers.find(
+          (t: any) =>
+            t &&
+            t.activo !== false &&
+            String(t.id || '').trim().replace(/[\s.-]/g, '').toUpperCase() === cleanId &&
+            String(t.claveAcceso || '').trim() === cleanPass
+        );
+        const verified = Boolean(isMasterMatch || matchedTeacher);
+        const resolvedActor = matchedTeacher ? matchedTeacher.id : cleanId;
+        registerAuthAttempt(verified, 'docente', resolvedActor);
+        const sessionToken = verified
+          ? Buffer.from(`docente:${resolvedActor}:${nowMs}`).toString('base64url')
+          : undefined;
+        return res.json({
+          ok: true,
+          verified,
+          role: 'docente',
+          actorId: resolvedActor,
+          teacherName: matchedTeacher?.nombre || cfg.activeCourseMeta?.docenteResponsable || cleanId,
+          sessionToken
+        });
+      }
+
+      return res.status(400).json({ ok: false, verified: false, error: 'Rol no soportado' });
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, verified: false, error: err?.message });
+    }
+  });
+
   // 2. PUT /api/state/questions — Replace or update Question Bank on the server
   app.put('/api/state/questions', (req, res) => {
     try {
@@ -613,14 +863,38 @@ app.use('/api/state', async (req, res, next) => {
     }
   });
 
-  // 4. PUT /api/state/students — Update full students roster (Teacher CRUD / Bulk actions)
+  // 4. PUT /api/state/students — Update full students roster (Teacher CRUD / Bulk actions) with Referential Integrity
   app.put('/api/state/students', (req, res) => {
     try {
       const { students } = req.body || {};
       if (!Array.isArray(students)) {
         return res.status(400).json({ error: 'Lista de estudiantes inválida.' });
       }
-      centralDb.students = students;
+      // Preserve historical progress, anti-cheat logs, and attempt counters for existing students
+      const prevById = new Map<string, StudentRecord>();
+      centralDb.students.forEach((s) => {
+        if (s && s.id) {
+          prevById.set(String(s.id).trim().toUpperCase(), s);
+        }
+      });
+      centralDb.students = students.map((incoming: StudentRecord) => {
+        const cleanKey = String(incoming?.id || '').trim().toUpperCase();
+        const prev = prevById.get(cleanKey);
+        if (!prev) return incoming;
+        return {
+          ...prev,
+          ...incoming,
+          progresoRetos: incoming.progresoRetos || prev.progresoRetos,
+          historialIntentosRetos:
+            Array.isArray(incoming.historialIntentosRetos) && incoming.historialIntentosRetos.length > 0
+              ? incoming.historialIntentosRetos
+              : prev.historialIntentosRetos,
+          historialLlamadosAtencion:
+            Array.isArray(incoming.historialLlamadosAtencion) && incoming.historialLlamadosAtencion.length > 0
+              ? incoming.historialLlamadosAtencion
+              : prev.historialLlamadosAtencion
+        };
+      });
       centralDb.studentsExplicitlyCleared = students.length === 0;
       centralDb.academicDataset = normalizeAndSyncAcademicDataset(
         centralDb.academicDataset,
@@ -629,7 +903,11 @@ app.use('/api/state', async (req, res, next) => {
       centralDb.migratedFromClient = true;
       centralDb.revision += 1;
       centralDb.lastModifiedIso = new Date().toISOString();
-      saveCentralDbToDisk(centralDb);
+      saveCentralDbToDisk(
+        centralDb,
+        'NominaEstudiantes',
+        `Actualización de nómina de estudiantes (${centralDb.students.length} registros)`
+      );
 
       return res.json({
         ok: true,
@@ -1079,9 +1357,16 @@ app.use('/api/state', async (req, res, next) => {
           (s) => s.studentId === session.studentId
         );
         if (existsIdx >= 0) {
-          centralDb.liveSessions[existsIdx] = session;
+          centralDb.liveSessions[existsIdx] = {
+            ...centralDb.liveSessions[existsIdx],
+            ...session,
+            ultimaActualizacionMs: session.ultimaActualizacionMs || Date.now()
+          };
         } else {
-          centralDb.liveSessions.unshift(session);
+          centralDb.liveSessions.unshift({
+            ...session,
+            ultimaActualizacionMs: session.ultimaActualizacionMs || Date.now()
+          });
         }
       }
       centralDb.revision += 1;

@@ -742,15 +742,93 @@ const RAP_TO_TEMA_MAP: Record<string, string> = {
   'RAP 5.3': 'RAP 5.3 · Adaptación a nuevas generaciones de consumidores: Millennials y Gen Z'
 };
 
-export function normalizeQuestion(raw: any, idx = 0): Question {
-  const rawModStr = String(raw?.modulo ?? raw?.mod ?? '1');
+function normalizeObjectKey(k: string): string {
+  return String(k || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]/g, '');
+}
+
+function getFlexibleField(raw: any, candidateKeys: string[]): string {
+  if (!raw || typeof raw !== 'object') return '';
+  for (const key of candidateKeys) {
+    if (raw[key] !== undefined && raw[key] !== null && String(raw[key]).trim() !== '') {
+      return String(raw[key]).trim();
+    }
+  }
+  const normalizedCandidates = new Set(candidateKeys.map(normalizeObjectKey));
+  for (const [k, v] of Object.entries(raw)) {
+    if (v === undefined || v === null || typeof v === 'object') continue;
+    const str = String(v).trim();
+    if (!str) continue;
+    if (normalizedCandidates.has(normalizeObjectKey(k))) {
+      return str;
+    }
+  }
+  return '';
+}
+
+export function isLikelyQuestionObject(raw: any): boolean {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+  const statement = getFlexibleField(raw, [
+    'enunciado',
+    'pregunta',
+    'planteamiento',
+    'reactivo',
+    'question',
+    'interrogante',
+    'textopregunta',
+    'enunciadopregunta'
+  ]);
+  const hasOpcionesObj =
+    raw.opciones && (Array.isArray(raw.opciones) || typeof raw.opciones === 'object');
+  const opA = getFlexibleField(raw, [
+    'opcionA',
+    'opcion_a',
+    'opcion a',
+    'opA',
+    'op_a',
+    'A',
+    'a',
+    'alternativaA',
+    'respuestaA',
+    'incisoA',
+    'literalA'
+  ]);
+  return statement.length >= 3 && (Boolean(hasOpcionesObj) || opA.length > 0);
+}
+
+export function normalizeQuestion(
+  raw: any,
+  idx = 0,
+  options?: { equalize?: boolean }
+): Question {
+  const rawModStr =
+    getFlexibleField(raw, ['modulo', 'mod', 'unidad', 'bloque', 'numeromodulo', 'nro_modulo']) ||
+    '1';
   const modDigit = parseInt(rawModStr.replace(/\D/g, ''), 10);
   const modulo: 1 | 2 | 3 | 4 | 5 =
     modDigit >= 1 && modDigit <= 5 ? (modDigit as 1 | 2 | 3 | 4 | 5) : (((idx % 5) + 1) as 1 | 2 | 3 | 4 | 5);
 
-  const rawEnunciado = String(raw?.enunciado || raw?.planteamiento || '').trim();
-  const rawPregunta = String(raw?.pregunta || raw?.question || '').trim();
-  const rawContexto = String(raw?.contexto || '').trim();
+  const rawEnunciado = getFlexibleField(raw, [
+    'enunciado',
+    'planteamiento',
+    'reactivo',
+    'enunciadopregunta',
+    'textopregunta'
+  ]);
+  const rawPregunta = getFlexibleField(raw, [
+    'pregunta',
+    'question',
+    'interrogante'
+  ]);
+  const rawContexto = getFlexibleField(raw, [
+    'contexto',
+    'caso',
+    'escenario',
+    'situacion'
+  ]);
 
   let enunciadoFinal = rawEnunciado;
   if (!enunciadoFinal) {
@@ -766,13 +844,43 @@ export function normalizeQuestion(raw: any, idx = 0): Question {
     enunciadoFinal = `${rawContexto} ${rawPregunta}`;
   }
 
-  const rawRap = String(raw?.rap || '').trim();
+  const rawRap = getFlexibleField(raw, [
+    'rap',
+    'resultadoaprendizaje',
+    'resultadodeaprendizaje',
+    'logro',
+    'indicador'
+  ]);
   const mappedTemaFromRap = RAP_TO_TEMA_MAP[rawRap.toUpperCase()] || '';
+  const rawTema = getFlexibleField(raw, [
+    'tema',
+    'tematica',
+    'subtema',
+    'categoria',
+    'topico',
+    'competencia'
+  ]);
+  const rawTipoPregunta = getFlexibleField(raw, [
+    'tipoPregunta',
+    'tipopregunta',
+    'tipodepregunta',
+    'tipo',
+    'modalidad'
+  ]);
   const temaFinal = String(
-    raw?.tema || mappedTemaFromRap || rawRap || raw?.tipoPregunta || `Competencia Módulo ${modulo}`
+    rawTema || mappedTemaFromRap || rawRap || rawTipoPregunta || `Competencia Módulo ${modulo}`
   ).trim();
 
-  const rawBloom = String(raw?.bloom || raw?.nivel || 'Aplicación').trim();
+  const rawBloom =
+    getFlexibleField(raw, [
+      'bloom',
+      'nivelbloom',
+      'niveldebloom',
+      'nivel',
+      'nivelcognitivo',
+      'taxonomia',
+      'dificultad'
+    ]) || 'Aplicación';
   const validBlooms: BloomLevel[] = [
     'Conocer',
     'Comprensión',
@@ -788,41 +896,112 @@ export function normalizeQuestion(raw: any, idx = 0): Question {
       ? 'Evaluación'
       : rawBloom.toLowerCase().includes('comp')
       ? 'Comprensión'
-      : rawBloom.toLowerCase().includes('con')
+      : rawBloom.toLowerCase().includes('con') || rawBloom.toLowerCase().includes('record')
       ? 'Conocer'
       : 'Aplicación');
 
-  // Normalize opciones whether object { A, B, C, D }, { a, b, c, d }, or array [a, b, c, d]
+  // Normalize opciones whether object { A, B, C, D }, { a, b, c, d }, array [a, b, c, d], or flat keys
   let opA = 'Opción A';
   let opB = 'Opción B';
   let opC = 'Opción C';
   let opD = 'Opción D';
 
   if (Array.isArray(raw?.opciones)) {
-    opA = String(raw.opciones[0] ?? 'Opción A');
-    opB = String(raw.opciones[1] ?? 'Opción B');
-    opC = String(raw.opciones[2] ?? 'Opción C');
-    opD = String(raw.opciones[3] ?? 'Opción D');
+    opA = String(raw.opciones[0] ?? 'Opción A').trim() || 'Opción A';
+    opB = String(raw.opciones[1] ?? 'Opción B').trim() || 'Opción B';
+    opC = String(raw.opciones[2] ?? 'Opción C').trim() || 'Opción C';
+    opD = String(raw.opciones[3] ?? 'Opción D').trim() || 'Opción D';
   } else if (raw?.opciones && typeof raw.opciones === 'object') {
-    opA = String(raw.opciones.A ?? raw.opciones.a ?? raw.opciones[0] ?? 'Opción A');
-    opB = String(raw.opciones.B ?? raw.opciones.b ?? raw.opciones[1] ?? 'Opción B');
-    opC = String(raw.opciones.C ?? raw.opciones.c ?? raw.opciones[2] ?? 'Opción C');
-    opD = String(raw.opciones.D ?? raw.opciones.d ?? raw.opciones[3] ?? 'Opción D');
+    opA = String(raw.opciones.A ?? raw.opciones.a ?? raw.opciones[0] ?? 'Opción A').trim() || 'Opción A';
+    opB = String(raw.opciones.B ?? raw.opciones.b ?? raw.opciones[1] ?? 'Opción B').trim() || 'Opción B';
+    opC = String(raw.opciones.C ?? raw.opciones.c ?? raw.opciones[2] ?? 'Opción C').trim() || 'Opción C';
+    opD = String(raw.opciones.D ?? raw.opciones.d ?? raw.opciones[3] ?? 'Opción D').trim() || 'Opción D';
   } else {
-    opA = String(raw?.opcionA ?? raw?.A ?? 'Opción A');
-    opB = String(raw?.opcionB ?? raw?.B ?? 'Opción B');
-    opC = String(raw?.opcionC ?? raw?.C ?? 'Opción C');
-    opD = String(raw?.opcionD ?? raw?.D ?? 'Opción D');
+    opA =
+      getFlexibleField(raw, [
+        'opcionA',
+        'opcion_a',
+        'opcion a',
+        'opA',
+        'op_a',
+        'A',
+        'a',
+        'alternativaA',
+        'respuestaA',
+        'incisoA',
+        'literalA'
+      ]) || 'Opción A';
+    opB =
+      getFlexibleField(raw, [
+        'opcionB',
+        'opcion_b',
+        'opcion b',
+        'opB',
+        'op_b',
+        'B',
+        'b',
+        'alternativaB',
+        'respuestaB',
+        'incisoB',
+        'literalB'
+      ]) || 'Opción B';
+    opC =
+      getFlexibleField(raw, [
+        'opcionC',
+        'opcion_c',
+        'opcion c',
+        'opC',
+        'op_c',
+        'C',
+        'c',
+        'alternativaC',
+        'respuestaC',
+        'incisoC',
+        'literalC'
+      ]) || 'Opción C';
+    opD =
+      getFlexibleField(raw, [
+        'opcionD',
+        'opcion_d',
+        'opcion d',
+        'opD',
+        'op_d',
+        'D',
+        'd',
+        'alternativaD',
+        'respuestaD',
+        'incisoD',
+        'literalD'
+      ]) || 'Opción D';
   }
 
-  const rawCorr = String(raw?.correcta ?? raw?.co ?? raw?.respuesta ?? 'A')
+  const rawCorr = (
+    getFlexibleField(raw, [
+      'correcta',
+      'respuestacorrecta',
+      'respuesta_correcta',
+      'opcioncorrecta',
+      'co',
+      'respuesta',
+      'clave',
+      'solucion',
+      'correct'
+    ]) || 'A'
+  )
     .trim()
     .toUpperCase();
+  const cleanCorrLetter = rawCorr
+    .replace(/^OPCI[OÓ]N\s*/i, '')
+    .replace(/^LITERAL\s*/i, '')
+    .replace(/^INCISO\s*/i, '')
+    .replace(/^RESPUESTA\s*/i, '')
+    .replace(/[^A-D0-4]/g, '');
+
   let correctaFinal: 'A' | 'B' | 'C' | 'D' = 'A';
-  if (rawCorr === 'A' || rawCorr === '0') correctaFinal = 'A';
-  else if (rawCorr === 'B' || rawCorr === '1') correctaFinal = 'B';
-  else if (rawCorr === 'C' || rawCorr === '2') correctaFinal = 'C';
-  else if (rawCorr === 'D' || rawCorr === '3') correctaFinal = 'D';
+  if (rawCorr === 'A' || rawCorr === '0' || cleanCorrLetter === 'A') correctaFinal = 'A';
+  else if (rawCorr === 'B' || rawCorr === '1' || cleanCorrLetter === 'B') correctaFinal = 'B';
+  else if (rawCorr === 'C' || rawCorr === '2' || cleanCorrLetter === 'C') correctaFinal = 'C';
+  else if (rawCorr === 'D' || rawCorr === '3' || cleanCorrLetter === 'D') correctaFinal = 'D';
   else {
     // Check if rawCorr matches the text of one of the options
     if (opB.toUpperCase() === rawCorr) correctaFinal = 'B';
@@ -830,22 +1009,37 @@ export function normalizeQuestion(raw: any, idx = 0): Question {
     else if (opD.toUpperCase() === rawCorr) correctaFinal = 'D';
   }
 
+  const rawId = getFlexibleField(raw, [
+    'id',
+    'idpregunta',
+    'id_pregunta',
+    'codigo',
+    'codigopregunta',
+    'cod',
+    'nro',
+    'numero'
+  ]);
+  const rawJustificacion = getFlexibleField(raw, [
+    'justificacion',
+    'justificacionpedagogica',
+    'justificacion_pedagogica',
+    'retroalimentacion',
+    'explicacion',
+    'sustento',
+    'feedback',
+    'j'
+  ]);
+
   const baseQuestion: Question = {
-    id: String(raw?.id || `MM-M${modulo}-${String(idx + 1).padStart(3, '0')}`),
+    id: String(rawId || `MM-M${modulo}-${String(idx + 1).padStart(3, '0')}`),
     modulo,
     tema: temaFinal,
     bloom: matchedBloom,
     enunciado: enunciadoFinal,
-    tipoPregunta: String(
-      raw?.tipoPregunta || 'Opción Múltiple'
-    ),
+    tipoPregunta: String(rawTipoPregunta || 'Opción Múltiple'),
     nivel: String(raw?.nivel || matchedBloom),
-    rap: String(
-      rawRap || `RAP ${modulo}.1`
-    ),
-    contexto: String(
-      rawContexto || `Caso comercial aplicado a MiPymes de La Dorada (Módulo ${modulo}).`
-    ),
+    rap: String(rawRap || `RAP ${modulo}.1`),
+    ...(rawContexto ? { contexto: rawContexto } : {}),
     pregunta: String(rawPregunta || enunciadoFinal),
     opciones: {
       A: opA,
@@ -855,12 +1049,15 @@ export function normalizeQuestion(raw: any, idx = 0): Question {
     },
     correcta: correctaFinal,
     justificacion: String(
-      raw?.justificacion ?? raw?.j ?? 'Respuesta verificada según el marco conceptual del módulo.'
+      rawJustificacion || 'Respuesta verificada según el marco conceptual del módulo.'
     ),
     casoGrafico: raw?.casoGrafico
   };
 
-  return equalizeQuestionPsychometrics(baseQuestion, idx);
+  if (options?.equalize) {
+    return equalizeQuestionPsychometrics(baseQuestion, idx);
+  }
+  return baseQuestion;
 }
 
 /**
@@ -1049,29 +1246,26 @@ export function extractRawQuestionsArray(input: any): any[] {
     if (parsed) return extractRawQuestionsArray(parsed);
     return [];
   }
-  if (Array.isArray(input)) return input;
+  if (Array.isArray(input)) {
+    return input.filter((item) => isLikelyQuestionObject(item));
+  }
   if (input && typeof input === 'object') {
-    if (Array.isArray(input.preguntas)) return input.preguntas;
-    if (Array.isArray(input.questions)) return input.questions;
-    if (Array.isArray(input.banco)) return input.banco;
-    if (Array.isArray(input.bancoPreguntas)) return input.bancoPreguntas;
-    if (Array.isArray(input.reactivos)) return input.reactivos;
-    if (Array.isArray(input.data)) return input.data;
-    if (Array.isArray(input.items)) return input.items;
+    if (Array.isArray(input.preguntas)) return input.preguntas.filter(isLikelyQuestionObject);
+    if (Array.isArray(input.questions)) return input.questions.filter(isLikelyQuestionObject);
+    if (Array.isArray(input.banco)) return input.banco.filter(isLikelyQuestionObject);
+    if (Array.isArray(input.bancoPreguntas)) return input.bancoPreguntas.filter(isLikelyQuestionObject);
+    if (Array.isArray(input.reactivos)) return input.reactivos.filter(isLikelyQuestionObject);
+    if (Array.isArray(input.data)) return input.data.filter(isLikelyQuestionObject);
+    if (Array.isArray(input.items)) return input.items.filter(isLikelyQuestionObject);
     // If it's a single question object directly
-    if (input.pregunta || input.enunciado || input.opciones) {
+    if (isLikelyQuestionObject(input)) {
       return [input];
     }
     // Search any array property inside the object that contains question-like objects
     for (const val of Object.values(input)) {
-      if (
-        Array.isArray(val) &&
-        val.length > 0 &&
-        val[0] &&
-        typeof val[0] === 'object' &&
-        ('pregunta' in val[0] || 'enunciado' in val[0] || 'opciones' in val[0])
-      ) {
-        return val;
+      if (Array.isArray(val) && val.length > 0) {
+        const validItems = val.filter(isLikelyQuestionObject);
+        if (validItems.length > 0) return validItems;
       }
     }
   }
@@ -1083,11 +1277,13 @@ export function normalizeQuestionList(listOrObj: any): Question[] {
   if (arr.length === 0) return [];
   return arr
     .filter((item) => item && typeof item === 'object')
-    .map((item, idx) => normalizeQuestion(item, idx));
+    .map((item, idx) => normalizeQuestion(item, idx, { equalize: false }));
 }
 
 function buildFullQuestionBank(): Question[] {
-  const normalizedPart1 = BANCO_PART_1.map((item, idx) => normalizeQuestion(item, idx));
+  const normalizedPart1 = BANCO_PART_1.map((item, idx) =>
+    normalizeQuestion(item, idx, { equalize: true })
+  );
   const bank: Question[] = [...normalizedPart1, ...CORE_QUESTIONS];
 
   // Complete up to 148 questions per module * 5 modules = 740 total unified questions
@@ -1150,7 +1346,7 @@ function buildFullQuestionBank(): Question[] {
     }
   }
 
-  return bank.map((q, idx) => normalizeQuestion(q, idx));
+  return bank.map((q, idx) => normalizeQuestion(q, idx, { equalize: true }));
 }
 
 export const INITIAL_QUESTIONS: Question[] = buildFullQuestionBank();

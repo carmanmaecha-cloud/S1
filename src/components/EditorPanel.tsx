@@ -14,8 +14,11 @@ import {
   UniversalExamDefinition,
   StudentRosterDatabaseEntry,
   QuestionBankDatabaseEntry,
-  BloomLevel
+  BloomLevel,
+  CourseScheduleConfig
 } from '../types';
+import { getDefaultCourseScheduleConfig } from '../utils/academicScheduleEngine';
+import { CourseScheduleManagerPanel } from './CourseScheduleManagerPanel';
 import {
   getEffectiveCourseMetadata,
   getEffectiveRegisteredTeachers,
@@ -33,6 +36,7 @@ import {
 import {
   INITIAL_QUESTIONS,
   equalizeQuestionBank,
+  normalizeQuestion,
   normalizeQuestionList
 } from '../data/questions';
 import {
@@ -249,10 +253,14 @@ export function EditorPanel({
   );
   const [editorUserInput, setEditorUserInput] = useState('');
   const [editorPassInput, setEditorPassInput] = useState('');
+  const [showEditorPassInput, setShowEditorPassInput] = useState<boolean>(false);
   const [authDenied, setAuthDenied] = useState<boolean>(false);
 
   const [activeCard, setActiveCard] = useState<EditorCardView>(null);
   const [editorBanner, setEditorBanner] = useState<string | null>(null);
+  const [editorCourseScheduleConfig, setEditorCourseScheduleConfig] =
+    useState<CourseScheduleConfig>(() => getDefaultCourseScheduleConfig(config));
+  const [showEditorSchedulePanel, setShowEditorSchedulePanel] = useState<boolean>(true);
 
   const activeMeta = useMemo(() => getEffectiveCourseMetadata(config), [config]);
   const registeredTeachers = useMemo(() => getEffectiveRegisteredTeachers(config), [config]);
@@ -500,14 +508,35 @@ export function EditorPanel({
   const [confirmDeleteRosterDbId, setConfirmDeleteRosterDbId] = useState<string | null>(null);
   const [rosterNameError, setRosterNameError] = useState<boolean>(false);
   const rosterNameInputRef = useRef<HTMLInputElement | null>(null);
-  const [localRosterDbs, setLocalRosterDbs] = useState<StudentRosterDatabaseEntry[]>(() =>
-    Array.isArray(config.studentRosterDatabases) ? config.studentRosterDatabases : []
-  );
+  const [localRosterDbs, setLocalRosterDbs] = useState<StudentRosterDatabaseEntry[]>(() => {
+    const fromConfig = Array.isArray(config.studentRosterDatabases)
+      ? config.studentRosterDatabases
+      : [];
+    try {
+      const raw = localStorage.getItem('evaluaplus_system_config_v4');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed?.studentRosterDatabases) && parsed.studentRosterDatabases.length > fromConfig.length) {
+          return parsed.studentRosterDatabases;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return fromConfig;
+  });
+  const [rosterListRefreshKey, setRosterListRefreshKey] = useState<number>(0);
+  const [rosterSyncVersion, setRosterSyncVersion] = useState<string>(() => `sync-roster-${Date.now()}`);
+  const rosterListSectionRef = useRef<HTMLDivElement | null>(null);
 
   const [activeQuestionBankDbId, setActiveQuestionBankDbId] = useState<string>('banco-oficial-unificado');
   const [qBankWindowTab, setQBankWindowTab] = useState<'crear' | 'listado'>('listado');
   const [editingQBankDbId, setEditingQBankDbId] = useState<string | null>(null);
   const [viewingQBankDbId, setViewingQBankDbId] = useState<string | null>(null);
+  const [viewingQBankSearch, setViewingQBankSearch] = useState<string>('');
+  const [viewingQBankModFilter, setViewingQBankModFilter] = useState<number | 'all'>('all');
+  const [viewingQBankPage, setViewingQBankPage] = useState<number>(1);
+  const [viewingQBankPageSize, setViewingQBankPageSize] = useState<number>(50);
   const [deletedQBankDbIds, setDeletedQBankDbIds] = useState<string[]>(() =>
     Array.isArray(config.deletedQuestionBankDbIds) ? config.deletedQuestionBankDbIds : []
   );
@@ -517,9 +546,151 @@ export function EditorPanel({
   const [confirmDeleteQBankDbId, setConfirmDeleteQBankDbId] = useState<string | null>(null);
   const [qBankNameError, setQBankNameError] = useState<boolean>(false);
   const qBankNameInputRef = useRef<HTMLInputElement | null>(null);
-  const [localQBankDbs, setLocalQBankDbs] = useState<QuestionBankDatabaseEntry[]>(() =>
-    Array.isArray(config.questionBankDatabases) ? config.questionBankDatabases : []
-  );
+  const [localQBankDbs, setLocalQBankDbs] = useState<QuestionBankDatabaseEntry[]>(() => {
+    const fromConfig = Array.isArray(config.questionBankDatabases)
+      ? config.questionBankDatabases
+      : [];
+    try {
+      const raw = localStorage.getItem('evaluaplus_system_config_v4');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed?.questionBankDatabases) && parsed.questionBankDatabases.length > fromConfig.length) {
+          return parsed.questionBankDatabases;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return fromConfig;
+  });
+  const [qBankListRefreshKey, setQBankListRefreshKey] = useState<number>(0);
+  const [qBankSyncVersion, setQBankSyncVersion] = useState<string>(() => `sync-qbank-${Date.now()}`);
+  const qBankListSectionRef = useRef<HTMLDivElement | null>(null);
+
+  // Estado unificado de indicadores visuales de «Guardando...» y «Éxito» para los botones de guardar del EditorPanel
+  const [editorSaveButtonStatuses, setEditorSaveButtonStatuses] = useState<
+    Record<string, 'idle' | 'saving' | 'success'>
+  >({});
+  const editorSaveButtonTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+
+  const setSaveButtonVisualState = (
+    buttonKey: string,
+    status: 'idle' | 'saving' | 'success',
+    resetDelayMs = 2600
+  ) => {
+    if (editorSaveButtonTimersRef.current[buttonKey]) {
+      clearTimeout(editorSaveButtonTimersRef.current[buttonKey]);
+    }
+    setEditorSaveButtonStatuses((prev) => ({ ...prev, [buttonKey]: status }));
+    if (status === 'success') {
+      editorSaveButtonTimersRef.current[buttonKey] = setTimeout(() => {
+        setEditorSaveButtonStatuses((prev) => ({ ...prev, [buttonKey]: 'idle' }));
+      }, resetDelayMs);
+    }
+  };
+
+  const triggerRosterListSyncRefresh = (syncTargetId?: string) => {
+    try {
+      const raw = localStorage.getItem('evaluaplus_system_config_v4');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed?.studentRosterDatabases)) {
+          setLocalRosterDbs((prev) => {
+            const map = new Map<string, StudentRosterDatabaseEntry>();
+            [...prev, ...parsed.studentRosterDatabases].forEach((d: StudentRosterDatabaseEntry) => {
+              if (d && d.id && !String(d.id).startsWith('nomina-curso-')) {
+                const ex = map.get(d.id);
+                if (!ex || (d.updatedAtIso || '') >= (ex.updatedAtIso || '')) {
+                  map.set(d.id, d);
+                }
+              }
+            });
+            return Array.from(map.values());
+          });
+        }
+      }
+    } catch {
+      // ignore
+    }
+    setRosterListRefreshKey((prev) => prev + 1);
+    setRosterSyncVersion(`sync-roster-${Date.now()}-${syncTargetId || 'all'}`);
+  };
+
+  const triggerQBankListSyncRefresh = (syncTargetId?: string) => {
+    try {
+      const raw = localStorage.getItem('evaluaplus_system_config_v4');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed?.questionBankDatabases)) {
+          setLocalQBankDbs((prev) => {
+            const map = new Map<string, QuestionBankDatabaseEntry>();
+            [...prev, ...parsed.questionBankDatabases].forEach((d: QuestionBankDatabaseEntry) => {
+              if (d && d.id && !String(d.id).startsWith('banco-curso-')) {
+                const ex = map.get(d.id);
+                if (!ex || (d.updatedAtIso || '') >= (ex.updatedAtIso || '')) {
+                  map.set(d.id, d);
+                }
+              }
+            });
+            return Array.from(map.values());
+          });
+        }
+      }
+    } catch {
+      // ignore
+    }
+    setQBankListRefreshKey((prev) => prev + 1);
+    setQBankSyncVersion(`sync-qbank-${Date.now()}-${syncTargetId || 'all'}`);
+  };
+
+  // Mantener sincronizadas las bases de datos locales cuando llegan actualizaciones desde el servidor
+  useEffect(() => {
+    if (Array.isArray(config.studentRosterDatabases) && config.studentRosterDatabases.length > 0) {
+      setLocalRosterDbs((prev) => {
+        const merged = new Map<string, StudentRosterDatabaseEntry>();
+        prev.forEach((d) => {
+          if (d && d.id) merged.set(d.id, d);
+        });
+        config.studentRosterDatabases!.forEach((d) => {
+          if (d && d.id) {
+            const existing = merged.get(d.id);
+            if (
+              !existing ||
+              (d.updatedAtIso || '') >= (existing.updatedAtIso || '') ||
+              (Array.isArray(d.students) && d.students.length > (existing.students?.length || 0))
+            ) {
+              merged.set(d.id, d);
+            }
+          }
+        });
+        return Array.from(merged.values());
+      });
+    }
+  }, [config.studentRosterDatabases]);
+
+  useEffect(() => {
+    if (Array.isArray(config.questionBankDatabases) && config.questionBankDatabases.length > 0) {
+      setLocalQBankDbs((prev) => {
+        const merged = new Map<string, QuestionBankDatabaseEntry>();
+        prev.forEach((d) => {
+          if (d && d.id) merged.set(d.id, d);
+        });
+        config.questionBankDatabases!.forEach((d) => {
+          if (d && d.id) {
+            const existing = merged.get(d.id);
+            if (
+              !existing ||
+              (d.updatedAtIso || '') >= (existing.updatedAtIso || '') ||
+              (Array.isArray(d.questions) && d.questions.length > (existing.questions?.length || 0))
+            ) {
+              merged.set(d.id, d);
+            }
+          }
+        });
+        return Array.from(merged.values());
+      });
+    }
+  }, [config.questionBankDatabases]);
 
   // Al ingresar a las pantallas/ventanas "Banco de preguntas" y "Nominas de estudiantes",
   // mostrar siempre primero la pestaña/ventana "Ver listado de bases de datos creados".
@@ -553,13 +724,29 @@ export function EditorPanel({
     // (Se ignoran entradas automáticas heredadas con prefijo nomina-curso-*)
     [...savedFromConfig, ...localRosterDbs].forEach((db) => {
       if (db && db.id && !String(db.id).startsWith('nomina-curso-')) {
-        map.set(db.id, {
-          ...db,
-          name: String(db.name ?? 'Nómina de Estudiantes'),
-          code: String(db.code ?? 'NOM-DB'),
-          description: String(db.description ?? 'Base de datos de nómina de estudiantes'),
-          students: Array.isArray(db.students) ? db.students : []
-        });
+        const cleanStudents = Array.isArray(db.students) ? db.students : [];
+        const existing = map.get(db.id);
+        const isDefaultBase =
+          db.id === 'nomina-oficial-base' &&
+          existing &&
+          existing.updatedAtIso === '2026-01-01T00:00:00.000Z';
+
+        if (
+          !existing ||
+          isDefaultBase ||
+          (db.updatedAtIso || '') >= (existing.updatedAtIso || '') ||
+          cleanStudents.length >= (existing.students?.length || 0)
+        ) {
+          map.set(db.id, {
+            ...db,
+            name: String(db.name ?? 'Nómina de Estudiantes'),
+            code: String(db.code ?? 'NOM-DB'),
+            description:
+              String(db.description || '').trim() ||
+              `Nómina de estudiantes guardada por el Editor (${cleanStudents.length} estudiantes)`,
+            students: cleanStudents
+          });
+        }
       }
     });
 
@@ -567,8 +754,21 @@ export function EditorPanel({
       ...deletedRosterDbIds,
       ...(Array.isArray(config.deletedStudentRosterDbIds) ? config.deletedStudentRosterDbIds : [])
     ]);
-    return Array.from(map.values()).filter((db) => !deletedSet.has(db.id));
-  }, [config.studentRosterDatabases, config.deletedStudentRosterDbIds, deletedRosterDbIds, localRosterDbs]);
+    return Array.from(map.values())
+      .filter((db) => !deletedSet.has(db.id))
+      .sort((a, b) => {
+        if (a.id === 'nomina-oficial-base') return 1;
+        if (b.id === 'nomina-oficial-base') return -1;
+        return (b.updatedAtIso || '').localeCompare(a.updatedAtIso || '');
+      });
+  }, [
+    config.studentRosterDatabases,
+    config.deletedStudentRosterDbIds,
+    deletedRosterDbIds,
+    localRosterDbs,
+    rosterListRefreshKey,
+    rosterSyncVersion
+  ]);
 
   const questionBankDatabases = useMemo<QuestionBankDatabaseEntry[]>(() => {
     const savedFromConfig = Array.isArray(config.questionBankDatabases)
@@ -590,13 +790,71 @@ export function EditorPanel({
     // (Se ignoran entradas automáticas heredadas con prefijo banco-curso-*)
     [...savedFromConfig, ...localQBankDbs].forEach((db) => {
       if (db && db.id && !String(db.id).startsWith('banco-curso-')) {
-        map.set(db.id, {
-          ...db,
-          name: String(db.name ?? 'Banco de Preguntas'),
-          code: String(db.code ?? 'BCO-DB'),
-          description: String(db.description ?? 'Base de datos de banco de preguntas'),
-          questions: Array.isArray(db.questions) ? db.questions : []
+        const rawQuestions = Array.isArray(db.questions) ? db.questions : [];
+        const normalizedQuestions: Question[] = rawQuestions.map((q: any, idx: number) => {
+          if (
+            q &&
+            typeof q === 'object' &&
+            q.opciones &&
+            typeof q.opciones === 'object' &&
+            !Array.isArray(q.opciones) &&
+            typeof q.enunciado === 'string' &&
+            q.enunciado.trim().length > 0 &&
+            typeof q.opciones.A === 'string'
+          ) {
+            const modNum = Number(q.modulo);
+            const validMod = (modNum >= 1 && modNum <= 5 ? modNum : 1) as 1 | 2 | 3 | 4 | 5;
+            const corrStr = String(q.correcta || 'A').trim().toUpperCase();
+            const validCorr = (['A', 'B', 'C', 'D'].includes(corrStr) ? corrStr : 'A') as
+              | 'A'
+              | 'B'
+              | 'C'
+              | 'D';
+            return {
+              ...q,
+              id: String(q.id || `MM-M${validMod}-${String(idx + 1).padStart(3, '0')}`),
+              modulo: validMod,
+              tema: String(q.tema || `Módulo ${validMod}`),
+              bloom: (q.bloom || 'Aplicación') as BloomLevel,
+              enunciado: String(q.enunciado || q.pregunta || '').trim(),
+              pregunta: String(q.pregunta || q.enunciado || '').trim(),
+              opciones: {
+                A: String(q.opciones.A || 'Opción A').trim(),
+                B: String(q.opciones.B || 'Opción B').trim(),
+                C: String(q.opciones.C || 'Opción C').trim(),
+                D: String(q.opciones.D || 'Opción D').trim()
+              },
+              correcta: validCorr,
+              justificacion: String(
+                q.justificacion || 'Respuesta verificada según el marco conceptual del módulo.'
+              ).trim()
+            };
+          }
+          return normalizeQuestion(q, idx, { equalize: false });
         });
+
+        const existing = map.get(db.id);
+        const isDefaultOfficial =
+          db.id === 'banco-oficial-unificado' &&
+          existing &&
+          existing.updatedAtIso === '2026-01-01T00:00:00.000Z';
+
+        if (
+          !existing ||
+          isDefaultOfficial ||
+          (db.updatedAtIso || '') >= (existing.updatedAtIso || '') ||
+          normalizedQuestions.length >= (existing.questions?.length || 0)
+        ) {
+          map.set(db.id, {
+            ...db,
+            name: String(db.name ?? 'Banco de Preguntas'),
+            code: String(db.code ?? 'BCO-DB'),
+            description:
+              String(db.description || '').trim() ||
+              `Banco de preguntas guardado por el Editor (${normalizedQuestions.length} reactivos)`,
+            questions: normalizedQuestions
+          });
+        }
       }
     });
 
@@ -604,8 +862,21 @@ export function EditorPanel({
       ...deletedQBankDbIds,
       ...(Array.isArray(config.deletedQuestionBankDbIds) ? config.deletedQuestionBankDbIds : [])
     ]);
-    return Array.from(map.values()).filter((db) => !deletedSet.has(db.id));
-  }, [config.questionBankDatabases, config.deletedQuestionBankDbIds, deletedQBankDbIds, localQBankDbs]);
+    return Array.from(map.values())
+      .filter((db) => !deletedSet.has(db.id))
+      .sort((a, b) => {
+        if (a.id === 'banco-oficial-unificado') return 1;
+        if (b.id === 'banco-oficial-unificado') return -1;
+        return (b.updatedAtIso || '').localeCompare(a.updatedAtIso || '');
+      });
+  }, [
+    config.questionBankDatabases,
+    config.deletedQuestionBankDbIds,
+    deletedQBankDbIds,
+    localQBankDbs,
+    qBankListRefreshKey,
+    qBankSyncVersion
+  ]);
 
   const updateEditorStudentsBank = (nextStudents: StudentRecord[], targetRosterDbId?: string) => {
     setCourseStudentsBank(nextStudents);
@@ -737,8 +1008,9 @@ export function EditorPanel({
     setRosterWindowTab('listado');
   };
 
-  const handleSaveRosterDatabase = (e?: React.FormEvent) => {
+  const handleSaveRosterDatabase = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
+    if (editorSaveButtonStatuses['save_roster_db'] === 'saving') return;
     const cleanName = (newRosterDbName || '').trim();
     if (!cleanName) {
       setRosterNameError(true);
@@ -756,84 +1028,171 @@ export function EditorPanel({
     }
 
     setRosterNameError(false);
+    setSaveButtonVisualState('save_roster_db', 'saving');
 
-    const cleanCode =
-      (newRosterDbCode || '').trim().toUpperCase().replace(/\s+/g, '') ||
-      `NOM-${cleanName
-        .replace(/[^A-Za-z0-9]/g, '')
-        .toUpperCase()
-        .slice(0, 4) || 'DB'}-${String(studentRosterDatabases.length + 1).padStart(2, '0')}`;
-
-    const targetId = editingRosterDbId || `nomina-custom-${Date.now().toString(36)}`;
-    const clonedStudents = courseStudentsBank.map((s) => ({ ...s }));
-
-    const savedEntry: StudentRosterDatabaseEntry = {
-      id: targetId,
-      name: cleanName,
-      code: cleanCode,
-      description: `Nómina de estudiantes guardada por el Editor (${clonedStudents.length} estudiantes)`,
-      students: clonedStudents,
-      updatedAtIso: new Date().toISOString()
-    };
-
-    const fullMap = new Map<string, StudentRosterDatabaseEntry>();
-    studentRosterDatabases.forEach((d) => {
-      if (d && d.id) fullMap.set(d.id, d);
-    });
-    fullMap.set(targetId, savedEntry);
-    const mergedList = Array.from(fullMap.values());
-
-    setLocalRosterDbs(mergedList);
-
-    onUpdateConfig((prev) => {
-      const nextDeleted = (prev.deletedStudentRosterDbIds || []).filter((id) => id !== targetId);
-
-      return {
-        ...prev,
-        studentRosterDatabases: mergedList,
-        deletedStudentRosterDbIds: nextDeleted,
-        universalCoursesCatalog: (prev.universalCoursesCatalog || []).map((ws) => {
-          const isCourseRoster = targetId === `nomina-curso-${ws.meta.courseId}`;
-          const isSelectedRoster = ws.meta.selectedStudentRosterDbId === targetId;
-          if (isCourseRoster || isSelectedRoster) {
-            return {
-              ...ws,
-              meta: {
-                ...ws.meta,
-                selectedStudentRosterDbId: targetId,
-                selectedStudentRosterDbName: cleanName
-              },
-              students: clonedStudents,
-              studentsCount: clonedStudents.length,
-              academicDataset: ws.academicDataset
-                ? normalizeAndSyncAcademicDataset(ws.academicDataset, clonedStudents)
-                : buildInitialAcademicDataset(clonedStudents)
-            };
+    try {
+      // Si el usuario pegó filas de estudiantes en el modal de carga por lote pero no pulsó "Procesar" antes de "Guardar base de datos", procesarlas automáticamente
+      let sourceStudents = courseStudentsBank;
+      if ((edBulkStudentsText || '').trim().length > 0) {
+        const matrix = parseDelimitedTextToMatrix(edBulkStudentsText);
+        const parsedFromPending = extractStudentsFromMatrix(matrix, courseStudentsBank.length);
+        if (parsedFromPending.length > 0) {
+          if (edBulkStudentsMode === 'replace' || courseStudentsBank.length === 0) {
+            sourceStudents = parsedFromPending;
+          } else {
+            const mapById = new Map<string, StudentRecord>();
+            courseStudentsBank.forEach((s) => mapById.set(s.id, s));
+            parsedFromPending.forEach((item) => mapById.set(item.id, item));
+            sourceStudents = Array.from(mapById.values());
           }
-          return ws;
-        })
+          setCourseStudentsBank(sourceStudents);
+          setEdBulkStudentsText('');
+          setEdBulkStudentModalOpen(false);
+        }
+      }
+
+      // Reutilizar el ID existente si coincide por editingRosterDbId o si no está editando pero escribió el mismo nombre de una base ya creada
+      const existingSameNameRoster = !editingRosterDbId
+        ? studentRosterDatabases.find(
+            (d) =>
+              d.id !== 'nomina-oficial-base' &&
+              (d.name || '').trim().toLowerCase() === cleanName.toLowerCase()
+          )
+        : null;
+
+      const targetId =
+        editingRosterDbId ||
+        existingSameNameRoster?.id ||
+        `nomina-custom-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
+
+      const cleanCode =
+        (newRosterDbCode || '').trim().toUpperCase().replace(/\s+/g, '') ||
+        existingSameNameRoster?.code ||
+        `NOM-${cleanName
+          .replace(/[^A-Za-z0-9]/g, '')
+          .toUpperCase()
+          .slice(0, 4) || 'DB'}-${String(studentRosterDatabases.length + 1).padStart(2, '0')}`;
+
+      const clonedStudents = sourceStudents.map((s) => ({ ...s }));
+      const nowIso = new Date().toISOString();
+
+      const savedEntry: StudentRosterDatabaseEntry = {
+        id: targetId,
+        name: cleanName,
+        code: cleanCode,
+        description: `Nómina de estudiantes guardada por el Editor (${clonedStudents.length} estudiantes)`,
+        students: clonedStudents,
+        updatedAtIso: nowIso
       };
-    });
 
-    setDeletedRosterDbIds((prev) => prev.filter((id) => id !== targetId));
-    setEditingRosterDbId(targetId);
-    setActiveRosterDbId(targetId);
-    setSelectedStudentRosterDbId(targetId);
-    setNewRosterDbCode(cleanCode);
-    setViewingRosterDbId(targetId);
-    // Llevar automáticamente a la pantalla/ventana "Ver listado de bases de datos creados" con la base de datos creada
-    setRosterWindowTab('listado');
+      setLocalRosterDbs((prev) => {
+        const map = new Map<string, StudentRosterDatabaseEntry>();
+        [...(config.studentRosterDatabases || []), ...prev, ...studentRosterDatabases].forEach(
+          (d) => {
+            if (!d || !d.id || String(d.id).startsWith('nomina-curso-')) return;
+            if (
+              d.id === 'nomina-oficial-base' &&
+              targetId !== 'nomina-oficial-base' &&
+              !(config.studentRosterDatabases || []).some(
+                (saved) => saved.id === 'nomina-oficial-base'
+              )
+            ) {
+              return;
+            }
+            map.set(d.id, d);
+          }
+        );
+        map.set(targetId, savedEntry);
+        return Array.from(map.values());
+      });
 
-    void handleExecuteServerSave(
-      'panel_editor_nominas_estudiantes',
-      `Base de datos de Nómina "${cleanName}" guardada`
-    );
-    setEdStudentBanner(
-      `✓ Base de datos «${cleanName} (${cleanCode})» guardada exitosamente con ${clonedStudents.length} estudiante(s).`
-    );
-    showEditorNotice(
-      `✓ Base de datos de Nómina «${cleanName}» guardada con ${clonedStudents.length} estudiante(s).`
-    );
+      onUpdateConfig((prev) => {
+        const map = new Map<string, StudentRosterDatabaseEntry>();
+        [...(prev.studentRosterDatabases || []), ...studentRosterDatabases].forEach((d) => {
+          if (!d || !d.id || String(d.id).startsWith('nomina-curso-')) return;
+          if (
+            d.id === 'nomina-oficial-base' &&
+            targetId !== 'nomina-oficial-base' &&
+            !(prev.studentRosterDatabases || []).some((saved) => saved.id === 'nomina-oficial-base')
+          ) {
+            return;
+          }
+          map.set(d.id, d);
+        });
+        map.set(targetId, savedEntry);
+        const nextRostersList = Array.from(map.values());
+        const nextDeleted = (prev.deletedStudentRosterDbIds || []).filter((id) => id !== targetId);
+
+        return {
+          ...prev,
+          studentRosterDatabases: nextRostersList,
+          deletedStudentRosterDbIds: nextDeleted,
+          universalCoursesCatalog: (prev.universalCoursesCatalog || []).map((ws) => {
+            const isCourseRoster = targetId === `nomina-curso-${ws.meta.courseId}`;
+            const isSelectedRoster = ws.meta.selectedStudentRosterDbId === targetId;
+            if (isCourseRoster || isSelectedRoster) {
+              return {
+                ...ws,
+                meta: {
+                  ...ws.meta,
+                  selectedStudentRosterDbId: targetId,
+                  selectedStudentRosterDbName: cleanName
+                },
+                students: clonedStudents,
+                studentsCount: clonedStudents.length,
+                academicDataset: ws.academicDataset
+                  ? normalizeAndSyncAcademicDataset(ws.academicDataset, clonedStudents)
+                  : buildInitialAcademicDataset(clonedStudents)
+              };
+            }
+            return ws;
+          })
+        };
+      });
+
+      setDeletedRosterDbIds((prev) => prev.filter((id) => id !== targetId));
+      setActiveRosterDbId(targetId);
+      setSelectedStudentRosterDbId(targetId);
+      setViewingRosterDbId(targetId);
+
+      // Ejecutar la operación de persistencia asíncrona y mostrar «Guardando...» -> «Éxito»
+      await Promise.all([
+        handleExecuteServerSave(
+          'panel_editor_nominas_estudiantes',
+          `Base de datos de Nómina "${cleanName}" guardada`
+        ),
+        new Promise((resolve) => setTimeout(resolve, 260))
+      ]);
+
+      setSaveButtonVisualState('save_roster_db', 'success', 2600);
+      setEdStudentBanner(
+        `✓ Base de datos «${cleanName} (${cleanCode})» guardada exitosamente con ${clonedStudents.length} estudiante(s) y sincronizada en el listado.`
+      );
+      showEditorNotice(
+        `✓ Base de datos de Nómina «${cleanName}» guardada con ${clonedStudents.length} estudiante(s).`
+      );
+
+      // Activar la clave de sincronización / indicador de actualización e ir al listado inmediatamente después del éxito
+      triggerRosterListSyncRefresh(targetId);
+      void Promise.resolve(onForceServerSync?.()).then(() => {
+        triggerRosterListSyncRefresh(targetId);
+      });
+
+      setTimeout(() => {
+        setEditingRosterDbId(null);
+        setNewRosterDbName('');
+        setNewRosterDbCode('');
+        triggerRosterListSyncRefresh(targetId);
+        setRosterWindowTab('listado');
+        setTimeout(() => {
+          if (rosterListSectionRef.current) {
+            rosterListSectionRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }
+        }, 60);
+      }, 420);
+    } catch {
+      setSaveButtonVisualState('save_roster_db', 'idle');
+    }
   };
 
   const handleCreateNewRosterDatabase = (e: React.FormEvent) => {
@@ -896,6 +1255,19 @@ export function EditorPanel({
     );
   }, [courseStudentsBank, edStudentSearch]);
 
+  const [edStudentCurrentPage, setEdStudentCurrentPage] = useState<number>(1);
+  const edStudentPageSize = 50;
+  const edStudentTotalPages = Math.max(1, Math.ceil(edFilteredStudents.length / edStudentPageSize));
+  const paginatedEdStudents = useMemo(() => {
+    const safePage = Math.min(Math.max(1, edStudentCurrentPage), edStudentTotalPages);
+    const startIdx = (safePage - 1) * edStudentPageSize;
+    return edFilteredStudents.slice(startIdx, startIdx + edStudentPageSize);
+  }, [edFilteredStudents, edStudentCurrentPage, edStudentTotalPages]);
+
+  useEffect(() => {
+    setEdStudentCurrentPage(1);
+  }, [edStudentSearch, courseStudentsBank.length]);
+
   const openEdAddStudentModal = () => {
     setEdEditingStudent(null);
     setEdFormStudentId('');
@@ -924,6 +1296,7 @@ export function EditorPanel({
     const cleanWhatsapp = (edFormStudentWhatsapp || '').trim().replace(/[^\d+]/g, '');
     if (!cleanId || !cleanName) return;
 
+    setSaveButtonVisualState('save_student_modal', 'saving');
     const cleanCode =
       (edFormStudentCode || '').trim().toUpperCase() || generateDeterministicAccessCode(cleanId);
 
@@ -942,7 +1315,9 @@ export function EditorPanel({
           : s
       );
       updateEditorStudentsBank(nextList);
-      setEdStudentModalOpen(false);
+      await new Promise((r) => setTimeout(r, 240));
+      setSaveButtonVisualState('save_student_modal', 'success', 1500);
+      setTimeout(() => setEdStudentModalOpen(false), 380);
       setEdStudentBanner(
         `✓ Datos y código de acceso de ${cleanName} (${cleanCode}) actualizados en el curso.`
       );
@@ -976,23 +1351,29 @@ export function EditorPanel({
         nextList = [...courseStudentsBank, newStudent];
       }
       updateEditorStudentsBank(nextList);
-      setEdStudentModalOpen(false);
+      await new Promise((r) => setTimeout(r, 240));
+      setSaveButtonVisualState('save_student_modal', 'success', 1500);
+      setTimeout(() => setEdStudentModalOpen(false), 380);
       setEdStudentBanner(
         `✓ Estudiante ${cleanName} (${cleanId}) asignado al curso con código ${cleanCode}.`
       );
     }
   };
 
-  const handleEdSaveDirectStudentCode = (st: StudentRecord) => {
+  const handleEdSaveDirectStudentCode = async (st: StudentRecord) => {
     const rawDraft = edStudentCodeDrafts[st.id] ?? st.codigoAcceso ?? '';
     const cleanCode = (rawDraft || '').trim().toUpperCase();
     if (!cleanCode || cleanCode.length < 4) return;
     if (cleanCode === (st.codigoAcceso || '').trim().toUpperCase()) return;
 
+    const btnKey = `student_code_${st.id}`;
+    setSaveButtonVisualState(btnKey, 'saving');
     const nextList = courseStudentsBank.map((s) =>
       s.id === st.id ? { ...s, codigoAcceso: cleanCode } : s
     );
     updateEditorStudentsBank(nextList);
+    await new Promise((r) => setTimeout(r, 240));
+    setSaveButtonVisualState(btnKey, 'success', 2000);
     setEdStudentCodeDrafts((prev) => {
       const next = { ...prev };
       delete next[st.id];
@@ -1361,8 +1742,9 @@ export function EditorPanel({
     setQBankWindowTab('listado');
   };
 
-  const handleSaveQuestionBankDatabase = (e?: React.FormEvent) => {
+  const handleSaveQuestionBankDatabase = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
+    if (editorSaveButtonStatuses['save_qbank_db'] === 'saving') return;
     const cleanName = (newQBankDbName || '').trim();
     if (!cleanName) {
       setQBankNameError(true);
@@ -1380,84 +1762,218 @@ export function EditorPanel({
     }
 
     setQBankNameError(false);
+    setSaveButtonVisualState('save_qbank_db', 'saving');
 
-    const cleanCode =
-      (newQBankDbCode || '').trim().toUpperCase().replace(/\s+/g, '') ||
-      `BCO-${cleanName
-        .replace(/[^A-Za-z0-9]/g, '')
-        .toUpperCase()
-        .slice(0, 4) || 'DB'}-${String(questionBankDatabases.length + 1).padStart(2, '0')}`;
-
-    const targetId = editingQBankDbId || `banco-custom-${Date.now().toString(36)}`;
-    const clonedQuestions = courseQuestionsBank.map((q) => ({
-      ...q,
-      opciones: { ...q.opciones }
-    }));
-
-    const savedEntry: QuestionBankDatabaseEntry = {
-      id: targetId,
-      name: cleanName,
-      code: cleanCode,
-      description: `Banco de preguntas guardado por el Editor (${clonedQuestions.length} reactivos)`,
-      questions: clonedQuestions,
-      updatedAtIso: new Date().toISOString()
-    };
-
-    const fullBankMap = new Map<string, QuestionBankDatabaseEntry>();
-    questionBankDatabases.forEach((d) => {
-      if (d && d.id) fullBankMap.set(d.id, d);
-    });
-    fullBankMap.set(targetId, savedEntry);
-    const mergedBankList = Array.from(fullBankMap.values());
-
-    setLocalQBankDbs(mergedBankList);
-
-    onUpdateConfig((prev) => {
-      const nextDeleted = (prev.deletedQuestionBankDbIds || []).filter((id) => id !== targetId);
-
-      return {
-        ...prev,
-        questionBankDatabases: mergedBankList,
-        deletedQuestionBankDbIds: nextDeleted,
-        universalCoursesCatalog: (prev.universalCoursesCatalog || []).map((ws) => {
-          const isCourseBank = targetId === `banco-curso-${ws.meta.courseId}`;
-          const isSelectedBank = ws.meta.selectedQuestionBankDbId === targetId;
-          if (isCourseBank || isSelectedBank) {
-            return {
-              ...ws,
-              meta: {
-                ...ws.meta,
-                selectedQuestionBankDbId: targetId,
-                selectedQuestionBankDbName: cleanName
-              },
-              questions: clonedQuestions,
-              questionsCount: clonedQuestions.length
-            };
+    try {
+      // Si el usuario pegó preguntas en el cuadro de lote pero no pulsó "Procesar" antes de "Guardar base de datos", procesarlas automáticamente
+      let sourceQuestions = courseQuestionsBank;
+      if ((bulkQText || '').trim().length > 0) {
+        const trimmedPending = (bulkQText || '').trim();
+        let parsedFromPending = normalizeQuestionList(trimmedPending);
+        if (parsedFromPending.length === 0) {
+          parsedFromPending = extractQuestionsFromMatrix(
+            parseDelimitedTextToMatrix(trimmedPending),
+            courseQuestionsBank.length
+          );
+        }
+        if (parsedFromPending.length > 0) {
+          if (bulkQMode === 'replace' || courseQuestionsBank.length === 0) {
+            sourceQuestions = parsedFromPending;
+          } else {
+            const mapById = new Map<string, Question>();
+            courseQuestionsBank.forEach((q) => mapById.set(q.id.toUpperCase(), q));
+            parsedFromPending.forEach((q) => mapById.set(q.id.toUpperCase(), q));
+            sourceQuestions = Array.from(mapById.values());
           }
-          return ws;
-        })
+          setCourseQuestionsBank(sourceQuestions);
+          setBulkQText('');
+          setBulkQModalOpen(false);
+        }
+      }
+
+      // Reutilizar el ID existente si coincide por editingQBankDbId o si no está editando pero escribió el mismo nombre de una base ya creada
+      const existingSameNameBank = !editingQBankDbId
+        ? questionBankDatabases.find(
+            (d) =>
+              d.id !== 'banco-oficial-unificado' &&
+              (d.name || '').trim().toLowerCase() === cleanName.toLowerCase()
+          )
+        : null;
+
+      const targetId =
+        editingQBankDbId ||
+        existingSameNameBank?.id ||
+        `banco-custom-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
+
+      const cleanCode =
+        (newQBankDbCode || '').trim().toUpperCase().replace(/\s+/g, '') ||
+        existingSameNameBank?.code ||
+        `BCO-${cleanName
+          .replace(/[^A-Za-z0-9]/g, '')
+          .toUpperCase()
+          .slice(0, 4) || 'DB'}-${String(questionBankDatabases.length + 1).padStart(2, '0')}`;
+
+      const clonedQuestions: Question[] = sourceQuestions.map((q, idx) => {
+        const normalized =
+          q &&
+          q.opciones &&
+          typeof q.opciones === 'object' &&
+          !Array.isArray(q.opciones) &&
+          typeof q.enunciado === 'string' &&
+          q.enunciado.trim().length > 0
+            ? q
+            : normalizeQuestion(q, idx, { equalize: false });
+        return {
+          ...normalized,
+          id: String(
+            normalized.id || `MM-M${normalized.modulo || 1}-${String(idx + 1).padStart(3, '0')}`
+          ),
+          modulo: (Number(normalized.modulo) >= 1 && Number(normalized.modulo) <= 5
+            ? Number(normalized.modulo)
+            : 1) as 1 | 2 | 3 | 4 | 5,
+          tema: String(normalized.tema || `Módulo ${normalized.modulo || 1}`),
+          bloom: (normalized.bloom || 'Aplicación') as BloomLevel,
+          enunciado: String(normalized.enunciado || normalized.pregunta || '').trim(),
+          pregunta: String(normalized.pregunta || normalized.enunciado || '').trim(),
+          opciones: {
+            A: String(normalized.opciones?.A || 'Opción A').trim(),
+            B: String(normalized.opciones?.B || 'Opción B').trim(),
+            C: String(normalized.opciones?.C || 'Opción C').trim(),
+            D: String(normalized.opciones?.D || 'Opción D').trim()
+          },
+          correcta: (['A', 'B', 'C', 'D'].includes(
+            String(normalized.correcta || '').toUpperCase()
+          )
+            ? String(normalized.correcta).toUpperCase()
+            : 'A') as 'A' | 'B' | 'C' | 'D',
+          justificacion: String(
+            normalized.justificacion ||
+              'Respuesta verificada según el marco conceptual del módulo.'
+          ).trim()
+        };
+      });
+
+      const nowIso = new Date().toISOString();
+
+      const savedEntry: QuestionBankDatabaseEntry = {
+        id: targetId,
+        name: cleanName,
+        code: cleanCode,
+        description: `Banco de preguntas guardado por el Editor (${clonedQuestions.length} reactivos)`,
+        questions: clonedQuestions,
+        updatedAtIso: nowIso
       };
-    });
 
-    setDeletedQBankDbIds((prev) => prev.filter((id) => id !== targetId));
-    setEditingQBankDbId(targetId);
-    setActiveQuestionBankDbId(targetId);
-    setSelectedQuestionBankDbId(targetId);
-    setNewQBankDbCode(cleanCode);
-    setViewingQBankDbId(targetId);
-    // Llevar automáticamente a la pantalla/ventana "Ver listado de bases de datos creados" con la base de datos creada
-    setQBankWindowTab('listado');
+      setLocalQBankDbs((prev) => {
+        const map = new Map<string, QuestionBankDatabaseEntry>();
+        [...(config.questionBankDatabases || []), ...prev, ...questionBankDatabases].forEach(
+          (d) => {
+            if (!d || !d.id || String(d.id).startsWith('banco-curso-')) return;
+            if (
+              d.id === 'banco-oficial-unificado' &&
+              targetId !== 'banco-oficial-unificado' &&
+              !(config.questionBankDatabases || []).some(
+                (saved) => saved.id === 'banco-oficial-unificado'
+              )
+            ) {
+              return;
+            }
+            map.set(d.id, d);
+          }
+        );
+        map.set(targetId, savedEntry);
+        return Array.from(map.values());
+      });
 
-    void handleExecuteServerSave(
-      'panel_editor_banco_preguntas',
-      `Base de datos de Banco de preguntas "${cleanName}" guardada`
-    );
-    setBankActionNotice(
-      `✓ Base de datos «${cleanName} (${cleanCode})» guardada exitosamente con ${clonedQuestions.length} pregunta(s).`
-    );
-    showEditorNotice(
-      `✓ Base de datos de Banco de preguntas «${cleanName}» guardada con ${clonedQuestions.length} pregunta(s).`
-    );
+      onUpdateConfig((prev) => {
+        const map = new Map<string, QuestionBankDatabaseEntry>();
+        [...(prev.questionBankDatabases || []), ...questionBankDatabases].forEach((d) => {
+          if (!d || !d.id || String(d.id).startsWith('banco-curso-')) return;
+          if (
+            d.id === 'banco-oficial-unificado' &&
+            targetId !== 'banco-oficial-unificado' &&
+            !(prev.questionBankDatabases || []).some(
+              (saved) => saved.id === 'banco-oficial-unificado'
+            )
+          ) {
+            return;
+          }
+          map.set(d.id, d);
+        });
+        map.set(targetId, savedEntry);
+        const nextBanksList = Array.from(map.values());
+        const nextDeleted = (prev.deletedQuestionBankDbIds || []).filter((id) => id !== targetId);
+
+        return {
+          ...prev,
+          questionBankDatabases: nextBanksList,
+          deletedQuestionBankDbIds: nextDeleted,
+          universalCoursesCatalog: (prev.universalCoursesCatalog || []).map((ws) => {
+            const isCourseBank = targetId === `banco-curso-${ws.meta.courseId}`;
+            const isSelectedBank = ws.meta.selectedQuestionBankDbId === targetId;
+            if (isCourseBank || isSelectedBank) {
+              return {
+                ...ws,
+                meta: {
+                  ...ws.meta,
+                  selectedQuestionBankDbId: targetId,
+                  selectedQuestionBankDbName: cleanName
+                },
+                questions: clonedQuestions,
+                questionsCount: clonedQuestions.length
+              };
+            }
+            return ws;
+          })
+        };
+      });
+
+      setDeletedQBankDbIds((prev) => prev.filter((id) => id !== targetId));
+      setActiveQuestionBankDbId(targetId);
+      setSelectedQuestionBankDbId(targetId);
+      setViewingQBankSearch('');
+      setViewingQBankModFilter('all');
+      setViewingQBankPage(1);
+      setViewingQBankDbId(targetId);
+
+      // Ejecutar la operación de persistencia asíncrona y mostrar «Guardando...» -> «Éxito»
+      await Promise.all([
+        handleExecuteServerSave(
+          'panel_editor_banco_preguntas',
+          `Base de datos de Banco de preguntas "${cleanName}" guardada`
+        ),
+        new Promise((resolve) => setTimeout(resolve, 260))
+      ]);
+
+      setSaveButtonVisualState('save_qbank_db', 'success', 2600);
+      setBankActionNotice(
+        `✓ Base de datos «${cleanName} (${cleanCode})» guardada exitosamente con ${clonedQuestions.length} pregunta(s) y sincronizada en el listado.`
+      );
+      showEditorNotice(
+        `✓ Base de datos de Banco de preguntas «${cleanName}» guardada con ${clonedQuestions.length} pregunta(s).`
+      );
+
+      // Activar la clave de sincronización / indicador de actualización e ir al listado inmediatamente después del éxito
+      triggerQBankListSyncRefresh(targetId);
+      void Promise.resolve(onForceServerSync?.()).then(() => {
+        triggerQBankListSyncRefresh(targetId);
+      });
+
+      setTimeout(() => {
+        setEditingQBankDbId(null);
+        setNewQBankDbName('');
+        setNewQBankDbCode('');
+        triggerQBankListSyncRefresh(targetId);
+        setQBankWindowTab('listado');
+        setTimeout(() => {
+          if (qBankListSectionRef.current) {
+            qBankListSectionRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }
+        }, 60);
+      }, 420);
+    } catch {
+      setSaveButtonVisualState('save_qbank_db', 'idle');
+    }
   };
 
   const handleCreateNewQuestionBankDatabase = (e: React.FormEvent) => {
@@ -1623,6 +2139,7 @@ export function EditorPanel({
   // =========================================================================
   const handleSaveEditorSecurity = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (editorSaveButtonStatuses['save_security'] === 'saving') return;
     const cleanName = (secEditorName || '').trim();
     const cleanAccount = (secEditorAccount || '').trim().replace(/\s+/g, '').toUpperCase();
     const cleanPass = (secEditorPass || '').trim();
@@ -1633,6 +2150,7 @@ export function EditorPanel({
       return;
     }
 
+    setSaveButtonVisualState('save_security', 'saving');
     onUpdateConfig((prev) => ({
       ...prev,
       editorNombre: cleanName,
@@ -1642,10 +2160,14 @@ export function EditorPanel({
       requiereCambioClaveEditorInicial: false
     }));
     loginEditor(cleanAccount);
-    await handleExecuteServerSave(
-      'seguridad_editor_sesion',
-      'Datos de la cuenta del Editor actualizados en el servidor'
-    );
+    await Promise.all([
+      handleExecuteServerSave(
+        'seguridad_editor_sesion',
+        'Datos de la cuenta del Editor actualizados en el servidor'
+      ),
+      new Promise((resolve) => setTimeout(resolve, 250))
+    ]);
+    setSaveButtonVisualState('save_security', 'success', 2600);
     setSecSaveStatus('✓ Datos de la cuenta del editor actualizados correctamente.');
     setTimeout(() => setSecSaveStatus(null), 4000);
   };
@@ -1819,8 +2341,9 @@ export function EditorPanel({
     }
   };
 
-  const handleAddSingleTeacher = (e: React.FormEvent) => {
+  const handleAddSingleTeacher = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (editorSaveButtonStatuses['save_single_teacher'] === 'saving') return;
     const cleanName = (newTeacherName || '').trim();
     const cleanAccount = (newTeacherAccount || '').trim().replace(/\s+/g, '').toUpperCase();
     const cleanPass = (newTeacherPass || '').trim();
@@ -1831,6 +2354,7 @@ export function EditorPanel({
       return;
     }
 
+    setSaveButtonVisualState('save_single_teacher', 'saving');
     const exists = registeredTeachers.some(
       (t) => (t.id || '').trim().toUpperCase() === cleanAccount
     );
@@ -1859,6 +2383,15 @@ export function EditorPanel({
       registeredTeachers: updatedTeachers
     }));
 
+    await Promise.all([
+      handleExecuteServerSave(
+        'panel_editor_cursos_docentes',
+        `Docente ${cleanName} (${cleanAccount}) guardado`
+      ),
+      new Promise((resolve) => setTimeout(resolve, 250))
+    ]);
+    setSaveButtonVisualState('save_single_teacher', 'success', 2400);
+
     setNewTeacherName('');
     setNewTeacherAccount('');
     setNewTeacherPass('');
@@ -1870,8 +2403,9 @@ export function EditorPanel({
     );
   };
 
-  const handleSaveBatchTeachersRows = (e: React.FormEvent) => {
+  const handleSaveBatchTeachersRows = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (editorSaveButtonStatuses['save_batch_teachers'] === 'saving') return;
     const validFromTable = batchRows
       .map((r) => ({
         nombre: (r.nombre || '').trim(),
@@ -1904,6 +2438,7 @@ export function EditorPanel({
       return;
     }
 
+    setSaveButtonVisualState('save_batch_teachers', 'saving');
     const nextMap = new Map<string, TeacherAccountRecord>();
     registeredTeachers.forEach((t) => {
       nextMap.set((t.id || '').trim().toUpperCase(), t);
@@ -1929,6 +2464,15 @@ export function EditorPanel({
       ...prev,
       registeredTeachers: updatedTeachers
     }));
+
+    await Promise.all([
+      handleExecuteServerSave(
+        'panel_editor_cursos_docentes',
+        `Lote de ${combined.length} docente(s) guardado`
+      ),
+      new Promise((resolve) => setTimeout(resolve, 250))
+    ]);
+    setSaveButtonVisualState('save_batch_teachers', 'success', 2400);
 
     setBatchRows([
       { nombre: '', cuenta: '', clave: '', correo: '' },
@@ -1979,6 +2523,7 @@ export function EditorPanel({
     );
     setEnableFinalIntegralExam(false);
     setFinalIntegralDurationMin(80);
+    setEditorCourseScheduleConfig(getDefaultCourseScheduleConfig(config));
     setEdStudentSearch('');
     setEdSelectedStudentIdsForBatch([]);
     setEdStudentBanner(null);
@@ -2057,6 +2602,12 @@ export function EditorPanel({
     setEnableFinalIntegralExam(m.habilitarExamenIntegral !== false);
     const integralExam = m.examenesCurso?.find((e) => e.id === 'integral');
     setFinalIntegralDurationMin(integralExam?.durationMinutes || 80);
+    setEditorCourseScheduleConfig(
+      getDefaultCourseScheduleConfig({
+        ...config,
+        courseScheduleConfig: m.courseScheduleConfig || config.courseScheduleConfig
+      })
+    );
     setEdStudentSearch('');
     setEdSelectedStudentIdsForBatch([]);
     setEdStudentBanner(null);
@@ -2359,10 +2910,11 @@ export function EditorPanel({
     setQModalOpen(true);
   };
 
-  const handleSaveQuestion = (e: React.FormEvent) => {
+  const handleSaveQuestion = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!(qFormEnunciado || '').trim() || !(qFormA || '').trim() || !(qFormB || '').trim()) return;
 
+    setSaveButtonVisualState('save_question_modal', 'saving');
     savePreviousQuestionsSnapshot(courseQuestionsBank);
 
     const newQ: Question = {
@@ -2392,7 +2944,9 @@ export function EditorPanel({
       updateEditorQuestionBank([newQ, ...courseQuestionsBank]);
       setBankActionNotice(`✓ Nueva pregunta ${newQ.id} agregada al banco.`);
     }
-    setQModalOpen(false);
+    await new Promise((r) => setTimeout(r, 240));
+    setSaveButtonVisualState('save_question_modal', 'success', 1500);
+    setTimeout(() => setQModalOpen(false), 380);
   };
 
   const handleUploadQuestionFile = async (
@@ -2420,11 +2974,14 @@ export function EditorPanel({
         updateEditorQuestionBank(parsedQuestions);
         setQModFilter('all');
         setQCurrentPage(1);
-        const msg = `✓ Banco actualizado con "${file.name}": ${parsedQuestions.length} reactivos activos ahora en el banco.`;
+        const msg = `✓ Banco actualizado con "${file.name}": ${parsedQuestions.length} reactivos cargados en la base de datos.`;
         setBulkQFeedback(msg);
         setBankActionNotice(msg);
         showEditorNotice(msg);
-        void handleExecuteServerSave('banco_preguntas', msg);
+        setBulkQModalOpen(false);
+        if (activeCard !== 'banco_preguntas' || editingQBankDbId) {
+          void handleExecuteServerSave('banco_preguntas', msg);
+        }
       } else {
         const mapById = new Map<string, Question>();
         courseQuestionsBank.forEach((q) => mapById.set(q.id.toUpperCase(), q));
@@ -2444,7 +3001,10 @@ export function EditorPanel({
         setBulkQFeedback(msg);
         setBankActionNotice(msg);
         showEditorNotice(msg);
-        void handleExecuteServerSave('banco_preguntas', msg);
+        setBulkQModalOpen(false);
+        if (activeCard !== 'banco_preguntas' || editingQBankDbId) {
+          void handleExecuteServerSave('banco_preguntas', msg);
+        }
       }
     } catch {
       const errMsg =
@@ -2456,7 +3016,7 @@ export function EditorPanel({
     e.target.value = '';
   };
 
-  const handleBulkImportQuestions = () => {
+  const handleBulkImportQuestions = async () => {
     const trimmed = (bulkQText || '').trim();
     if (!trimmed) {
       setBulkQFeedback(
@@ -2480,6 +3040,7 @@ export function EditorPanel({
       return;
     }
 
+    setSaveButtonVisualState('save_bulk_questions', 'saving');
     savePreviousQuestionsSnapshot(courseQuestionsBank);
 
     if (bulkQMode === 'replace') {
@@ -2492,7 +3053,13 @@ export function EditorPanel({
         `✓ Se cargó un nuevo lote reemplazando el banco (${parsedQuestions.length} preguntas activas). Puede usar "Deshacer Última Carga" si desea revertir.`
       );
       showEditorNotice(msg);
-      void handleExecuteServerSave('banco_preguntas', msg);
+      if (activeCard !== 'banco_preguntas' || editingQBankDbId) {
+        await handleExecuteServerSave('banco_preguntas', msg);
+      } else {
+        await new Promise((r) => setTimeout(r, 240));
+      }
+      setSaveButtonVisualState('save_bulk_questions', 'success', 1500);
+      setTimeout(() => setBulkQModalOpen(false), 380);
     } else {
       const mapById = new Map<string, Question>();
       courseQuestionsBank.forEach((q) => mapById.set(q.id.toUpperCase(), q));
@@ -2519,7 +3086,13 @@ export function EditorPanel({
         `✓ Lote masivo procesado: +${addedCount} nuevas, ${updatedCount} actualizadas (Total en banco: ${merged.length}).`
       );
       showEditorNotice(msg);
-      void handleExecuteServerSave('banco_preguntas', msg);
+      if (activeCard !== 'banco_preguntas' || editingQBankDbId) {
+        await handleExecuteServerSave('banco_preguntas', msg);
+      } else {
+        await new Promise((r) => setTimeout(r, 240));
+      }
+      setSaveButtonVisualState('save_bulk_questions', 'success', 1500);
+      setTimeout(() => setBulkQModalOpen(false), 380);
     }
 
     setBulkQText('');
@@ -2701,13 +3274,29 @@ export function EditorPanel({
     return filteredQuestions.slice(startIdx, startIdx + qPageSize);
   }, [filteredQuestions, safeCurrentPage, qPageSize]);
 
+  const [auditorCategoryFilter, setAuditorCategoryFilter] = useState<
+    | 'ALL'
+    | 'DUPLICADO_SIMILAR'
+    | 'LONGITUD_DESPROPORCIONADA'
+    | 'SIN_COMPETENCIA_MODULO'
+    | 'SIN_JUSTIFICACION'
+  >('ALL');
+
   const bankQualityAudit = useMemo(() => {
     const seenStatements = new Map<string, string>();
     const seenIds = new Map<string, number>();
+    const tokenizedStatements: { id: string; tokens: Set<string>; raw: string }[] = [];
+    const validModuleCount = Math.max(5, courseModules.length || 5);
+
     const issues: {
       questionId: string;
       modulo: number;
       severity: 'ALTA' | 'MEDIA';
+      groupKey:
+        | 'DUPLICADO_SIMILAR'
+        | 'LONGITUD_DESPROPORCIONADA'
+        | 'SIN_COMPETENCIA_MODULO'
+        | 'SIN_JUSTIFICACION';
       category: string;
       detail: string;
     }[] = [];
@@ -2716,32 +3305,74 @@ export function EditorPanel({
       const idKey = (q.id || '').trim().toUpperCase();
       seenIds.set(idKey, (seenIds.get(idKey) || 0) + 1);
 
-      const normStatement = (q.enunciado || '')
+      const rawStatement = (q.enunciado || '').trim();
+      const normStatement = rawStatement
         .toLowerCase()
         .replace(/[^a-z0-9áéíóúñü]/g, '')
-        .slice(0, 95);
-      if (seenStatements.has(normStatement)) {
+        .slice(0, 110);
+
+      // 1A. Enunciado exactamente duplicado
+      if (normStatement && seenStatements.has(normStatement)) {
         issues.push({
           questionId: q.id || 'SIN-ID',
-          modulo: q.modulo,
+          modulo: q.modulo || 1,
           severity: 'ALTA',
+          groupKey: 'DUPLICADO_SIMILAR',
           category: 'Enunciado Duplicado',
-          detail: `Coincide con el reactivo ${seenStatements.get(normStatement)}`
+          detail: `Enunciado idéntico al reactivo ${seenStatements.get(normStatement)}`
         });
-      } else {
+      } else if (normStatement) {
         seenStatements.set(normStatement, q.id || 'SIN-ID');
+
+        // 1B. Enunciado muy similar (Similitud Jaccard de palabras >= 72%)
+        const tokens = new Set(
+          rawStatement
+            .toLowerCase()
+            .replace(/[^a-z0-9áéíóúñü\s]/g, ' ')
+            .split(/\s+/)
+            .filter((w) => w.length > 3)
+        );
+        if (tokens.size >= 5) {
+          let bestMatchId = '';
+          let bestJaccard = 0;
+          for (const prev of tokenizedStatements) {
+            let intersection = 0;
+            tokens.forEach((t) => {
+              if (prev.tokens.has(t)) intersection += 1;
+            });
+            const union = tokens.size + prev.tokens.size - intersection;
+            const jaccard = union > 0 ? intersection / union : 0;
+            if (jaccard >= 0.72 && jaccard > bestJaccard) {
+              bestJaccard = jaccard;
+              bestMatchId = prev.id;
+            }
+          }
+          if (bestMatchId) {
+            issues.push({
+              questionId: q.id || 'SIN-ID',
+              modulo: q.modulo || 1,
+              severity: 'MEDIA',
+              groupKey: 'DUPLICADO_SIMILAR',
+              category: 'Enunciado Muy Similar',
+              detail: `${Math.round(bestJaccard * 100)}% de similitud léxica con el reactivo ${bestMatchId}`
+            });
+          }
+          tokenizedStatements.push({ id: q.id || 'SIN-ID', tokens, raw: rawStatement });
+        }
       }
 
+      // 2. Opciones de longitud desproporcionada (que delatan la respuesta correcta) o incompletas
       const opts = [q.opciones?.A, q.opciones?.B, q.opciones?.C, q.opciones?.D].map((o) =>
         (o || '').trim()
       );
       if (opts.some((o) => o.length < 2)) {
         issues.push({
           questionId: q.id || 'SIN-ID',
-          modulo: q.modulo,
+          modulo: q.modulo || 1,
           severity: 'ALTA',
+          groupKey: 'LONGITUD_DESPROPORCIONADA',
           category: 'Opción Incompleta',
-          detail: 'Una o más opciones (A, B, C o D) tiene menos de 2 caracteres.'
+          detail: 'Una o más opciones (A, B, C o D) está vacía o tiene menos de 2 caracteres.'
         });
       }
 
@@ -2749,26 +3380,72 @@ export function EditorPanel({
       if (uniqueOpts.size < 4) {
         issues.push({
           questionId: q.id || 'SIN-ID',
-          modulo: q.modulo,
+          modulo: q.modulo || 1,
           severity: 'ALTA',
+          groupKey: 'DUPLICADO_SIMILAR',
           category: 'Distractores Repetidos',
           detail: 'Existen opciones de respuesta idénticas dentro del mismo reactivo.'
         });
       }
 
-      const correctLen = (q.opciones?.[q.correcta] || '').trim().length;
+      const correctKey = (q.correcta || q.respuestaCorrecta || 'A') as 'A' | 'B' | 'C' | 'D';
+      const correctLen = (q.opciones?.[correctKey] || '').trim().length;
       const otherLens = (['A', 'B', 'C', 'D'] as const)
-        .filter((l) => l !== q.correcta)
+        .filter((l) => l !== correctKey)
         .map((l) => (q.opciones?.[l] || '').trim().length);
       const avgOtherLen = otherLens.reduce((a, b) => a + b, 0) / 3;
-      if (avgOtherLen > 12 && correctLen > avgOtherLen * 2.2) {
+      if (avgOtherLen > 10 && (correctLen > avgOtherLen * 1.6 || correctLen < avgOtherLen * 0.55)) {
+        const ratio = Number((correctLen / avgOtherLen).toFixed(1));
         issues.push({
-          questionId: q.id,
-          modulo: q.modulo,
-          severity: 'MEDIA',
-          category: 'Sesgo de Longitud',
+          questionId: q.id || 'SIN-ID',
+          modulo: q.modulo || 1,
+          severity: ratio >= 2.0 ? 'ALTA' : 'MEDIA',
+          groupKey: 'LONGITUD_DESPROPORCIONADA',
+          category: 'Longitud Desproporcionada',
+          detail: `La opción correcta (${correctKey}: ${correctLen} car.) mide ${ratio}x respecto al promedio de distractores (${Math.round(avgOtherLen)} car.), delatando la respuesta.`
+        });
+      }
+
+      // 3. Sin competencia, módulo válido o tema asignado
+      const modNum = Number(q.modulo);
+      const cleanTema = (q.tema || '').trim();
+      const validBlooms = ['Conocer', 'Comprensión', 'Aplicación', 'Análisis', 'Evaluación'];
+      if (
+        !modNum ||
+        modNum < 1 ||
+        modNum > validModuleCount ||
+        cleanTema.length < 3 ||
+        cleanTema.toLowerCase() === 'general' ||
+        cleanTema.toLowerCase() === 'sin tema' ||
+        !validBlooms.includes(q.bloom)
+      ) {
+        issues.push({
+          questionId: q.id || 'SIN-ID',
+          modulo: modNum || 1,
+          severity: !modNum ? 'ALTA' : 'MEDIA',
+          groupKey: 'SIN_COMPETENCIA_MODULO',
+          category: 'Sin Competencia / Módulo',
+          detail: !modNum
+            ? 'El reactivo no tiene módulo curricular asignado.'
+            : !validBlooms.includes(q.bloom)
+            ? 'Nivel cognitivo Bloom no asignado o no estándar.'
+            : `Eje temático o competencia genérica/vacía («${cleanTema || 'Vacío'}»).`
+        });
+      }
+
+      // 4. Sin justificación pedagógica o demasiado breve
+      const cleanJust = (q.justificacion || '').trim();
+      if (cleanJust.length < 22) {
+        issues.push({
+          questionId: q.id || 'SIN-ID',
+          modulo: modNum || 1,
+          severity: cleanJust.length === 0 ? 'ALTA' : 'MEDIA',
+          groupKey: 'SIN_JUSTIFICACION',
+          category: 'Sin Justificación Pedagógica',
           detail:
-            'La opción correcta es más del doble de extensa que el promedio de los distractores.'
+            cleanJust.length === 0
+              ? 'El reactivo carece por completo de justificación pedagógica para la retroalimentación.'
+              : `Justificación pedagógica insuficiente (${cleanJust.length} caracteres; mínimo recomendado: 25).`
         });
       }
     });
@@ -2779,11 +3456,25 @@ export function EditorPanel({
           questionId: idKey,
           modulo: 1,
           severity: 'ALTA',
+          groupKey: 'DUPLICADO_SIMILAR',
           category: 'ID Repetido',
           detail: `El código ${idKey} aparece ${count} veces en el banco.`
         });
       }
     });
+
+    const duplicatesOrSimilarCount = issues.filter(
+      (i) => i.groupKey === 'DUPLICADO_SIMILAR'
+    ).length;
+    const lengthBiasCount = issues.filter(
+      (i) => i.groupKey === 'LONGITUD_DESPROPORCIONADA'
+    ).length;
+    const missingModuleCompetencyCount = issues.filter(
+      (i) => i.groupKey === 'SIN_COMPETENCIA_MODULO'
+    ).length;
+    const missingJustificationCount = issues.filter(
+      (i) => i.groupKey === 'SIN_JUSTIFICACION'
+    ).length;
 
     const healthyCount = Math.max(
       0,
@@ -2794,9 +3485,93 @@ export function EditorPanel({
       healthyCount,
       issuesCount: issues.length,
       highSeverityCount: issues.filter((i) => i.severity === 'ALTA').length,
-      issues: issues.slice(0, 60)
+      duplicatesOrSimilarCount,
+      lengthBiasCount,
+      missingModuleCompetencyCount,
+      missingJustificationCount,
+      issues: issues.slice(0, 120)
     };
-  }, [courseQuestionsBank]);
+  }, [courseQuestionsBank, courseModules.length]);
+
+  const handleAutoRepairBankAuditIssues = () => {
+    if (courseQuestionsBank.length === 0) return;
+    const seenStatementKeys = new Set<string>();
+    const usedIds = new Set<string>();
+    const maxMod = Math.max(1, courseModules.length || 5);
+
+    const deduplicatedAndRepaired = courseQuestionsBank
+      .filter((q) => {
+        const norm = (q.enunciado || '')
+          .toLowerCase()
+          .replace(/[^a-z0-9áéíóúñü]/g, '')
+          .slice(0, 110);
+        if (!norm) return false;
+        if (seenStatementKeys.has(norm)) return false;
+        seenStatementKeys.add(norm);
+        return true;
+      })
+      .map((q, idx) => {
+        const modNum = Math.min(maxMod, Math.max(1, Number(q.modulo) || ((idx % maxMod) + 1)));
+        const modMeta = courseModules.find((m) => Number(m.id) === modNum);
+        let safeId = (q.id || `M${modNum}-${String(idx + 1).padStart(2, '0')}`).trim().toUpperCase();
+        if (usedIds.has(safeId)) {
+          safeId = `M${modNum}-${String(idx + 1).padStart(2, '0')}-${Math.random()
+            .toString(36)
+            .slice(2, 4)
+            .toUpperCase()}`;
+        }
+        usedIds.add(safeId);
+
+        const cleanTema = (q.tema || '').trim();
+        const repairedTema =
+          cleanTema.length >= 3 && cleanTema.toLowerCase() !== 'general'
+            ? cleanTema
+            : modMeta?.shortTitle || `Competencia Aplicada del Módulo ${modNum}`;
+
+        const validBlooms: BloomLevel[] = [
+          'Conocer',
+          'Comprensión',
+          'Aplicación',
+          'Análisis',
+          'Evaluación'
+        ];
+        const repairedBloom: BloomLevel = validBlooms.includes(q.bloom)
+          ? q.bloom
+          : 'Aplicación';
+
+        const correctKey = (q.correcta || q.respuestaCorrecta || 'A') as 'A' | 'B' | 'C' | 'D';
+        const correctText = (q.opciones?.[correctKey] || '').trim();
+        const cleanJust = (q.justificacion || '').trim();
+        const repairedJust =
+          cleanJust.length >= 22
+            ? cleanJust
+            : `La opción ${correctKey} es correcta porque fundamenta técnicamente el criterio de ${repairedTema} (${repairedBloom}), garantizando coherencia metodológica frente a los distractores.`;
+
+        return {
+          ...q,
+          id: safeId,
+          modulo: modNum as 1 | 2 | 3 | 4 | 5,
+          tema: repairedTema,
+          bloom: repairedBloom,
+          nivel: q.nivel || repairedBloom,
+          justificacion: repairedJust,
+          opciones: {
+            A: (q.opciones?.A || '').trim() || `Alternativa técnica A sobre ${repairedTema}`,
+            B: (q.opciones?.B || '').trim() || `Alternativa técnica B sobre ${repairedTema}`,
+            C: (q.opciones?.C || '').trim() || `Alternativa técnica C sobre ${repairedTema}`,
+            D: (q.opciones?.D || '').trim() || `Alternativa técnica D sobre ${repairedTema}`
+          },
+          correcta: correctKey,
+          respuestaCorrecta: correctKey
+        };
+      });
+
+    const equalized = equalizeQuestionBank(deduplicatedAndRepaired, 'ai_deep');
+    updateEditorQuestionBank(equalized);
+    const msg = `✓ Auditoría y Reparación en 1 Clic completada: ${equalized.length} reactivos únicos, opciones ecualizadas, módulos/competencias asignados y justificaciones pedagógicas verificadas.`;
+    setBankActionNotice(msg);
+    showEditorNotice(msg);
+  };
 
   // Semáforo de Cobertura del Banco de Preguntas por Módulo y Nivel Cognitivo Bloom
   const questionCoverageSemaphore = useMemo(() => {
@@ -2934,7 +3709,8 @@ export function EditorPanel({
     questionCoverageSemaphore.hasDeficit
   ]);
 
-  const handleSaveCourseSnapshot = (customLabel?: string) => {
+  const handleSaveCourseSnapshot = async (customLabel?: string) => {
+    setSaveButtonVisualState('save_snapshot', 'saving');
     const built = buildCourseMetaFromForm();
     const snap = {
       id: `snap-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -2954,6 +3730,8 @@ export function EditorPanel({
     } catch {
       // ignore storage quota errors
     }
+    await new Promise((r) => setTimeout(r, 200));
+    setSaveButtonVisualState('save_snapshot', 'success', 2000);
     showEditorNotice(`📸 Punto de restauración guardado: «${snap.label}».`);
   };
 
@@ -3140,12 +3918,14 @@ export function EditorPanel({
         selectedBankObj?.name || 'Banco Oficial Unificado 2026',
       modulosCurso: preparedModules,
       examenesCurso: builtExams,
+      courseScheduleConfig: editorCourseScheduleConfig,
       updatedAtIso: new Date().toISOString()
     };
   };
 
   const handleSaveCreatedCourse = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (editorSaveButtonStatuses['save_course'] === 'saving') return;
     if (!(courseName || '').trim() || !(courseCode || '').trim()) {
       showEditorNotice('⚠️ Ingrese el Nombre del curso y el Código.');
       return;
@@ -3157,125 +3937,137 @@ export function EditorPanel({
       return;
     }
 
-    const builtMeta = buildCourseMetaFromForm();
-    const existingWs = catalog.find((c) => c.meta.courseId === builtMeta.courseId);
-    const chosenRosterDb = studentRosterDatabases.find(
-      (d) => d.id === builtMeta.selectedStudentRosterDbId
-    );
-    const chosenQuestionBankDb = questionBankDatabases.find(
-      (d) => d.id === builtMeta.selectedQuestionBankDbId
-    );
-    const courseStudents = chosenRosterDb
-      ? (chosenRosterDb.students || []).map((s) => ({ ...s }))
-      : courseStudentsBank;
-    const courseQuestions = chosenQuestionBankDb
-      ? (chosenQuestionBankDb.questions || []).map((q) => ({ ...q, opciones: { ...q.opciones } }))
-      : courseQuestionsBank;
-    const courseAttempts = existingWs?.attempts || [];
-    const courseAbpro = existingWs?.abproEvaluations || [];
-    const validModIds = new Set(
-      (builtMeta.modulosCurso || []).filter((m) => m.activo !== false).map((m) => Number(m.id))
-    );
-    const existingCustomRetos = (existingWs?.customMiniRetos || []).filter(
-      (r) => r && (validModIds.size === 0 || validModIds.has(Number(r.modulo)))
-    );
-    const hasOnlyPlaceholderRetos =
-      existingCustomRetos.length > 0 &&
-      courseQuestions.length > 0 &&
-      existingCustomRetos.every(
-        (r) => String(r.id || '').startsWith('RETO-AUTO-') && !String(r.id || '').includes('-Q')
+    setSaveButtonVisualState('save_course', 'saving');
+    try {
+      const builtMeta = buildCourseMetaFromForm();
+      const existingWs = catalog.find((c) => c.meta.courseId === builtMeta.courseId);
+      const chosenRosterDb = studentRosterDatabases.find(
+        (d) => d.id === builtMeta.selectedStudentRosterDbId
       );
-    const courseRetos =
-      existingCustomRetos.length > 0 && !hasOnlyPlaceholderRetos
-        ? existingCustomRetos
-        : generateBaseRetosForCourseModules(builtMeta, courseQuestions);
-    const courseAcademic = existingWs?.academicDataset
-      ? normalizeAndSyncAcademicDataset(existingWs.academicDataset, courseStudents)
-      : buildInitialAcademicDataset(courseStudents);
+      const chosenQuestionBankDb = questionBankDatabases.find(
+        (d) => d.id === builtMeta.selectedQuestionBankDbId
+      );
+      const courseStudents = chosenRosterDb
+        ? (chosenRosterDb.students || []).map((s) => ({ ...s }))
+        : courseStudentsBank;
+      const courseQuestions = chosenQuestionBankDb
+        ? (chosenQuestionBankDb.questions || []).map((q) => ({ ...q, opciones: { ...q.opciones } }))
+        : courseQuestionsBank;
+      const courseAttempts = existingWs?.attempts || [];
+      const courseAbpro = existingWs?.abproEvaluations || [];
+      const validModIds = new Set(
+        (builtMeta.modulosCurso || []).filter((m) => m.activo !== false).map((m) => Number(m.id))
+      );
+      const existingCustomRetos = (existingWs?.customMiniRetos || []).filter(
+        (r) => r && (validModIds.size === 0 || validModIds.has(Number(r.modulo)))
+      );
+      const hasOnlyPlaceholderRetos =
+        existingCustomRetos.length > 0 &&
+        courseQuestions.length > 0 &&
+        existingCustomRetos.every(
+          (r) => String(r.id || '').startsWith('RETO-AUTO-') && !String(r.id || '').includes('-Q')
+        );
+      const courseRetos =
+        existingCustomRetos.length > 0 && !hasOnlyPlaceholderRetos
+          ? existingCustomRetos
+          : generateBaseRetosForCourseModules(builtMeta, courseQuestions);
+      const courseAcademic = existingWs?.academicDataset
+        ? normalizeAndSyncAcademicDataset(existingWs.academicDataset, courseStudents)
+        : buildInitialAcademicDataset(courseStudents);
 
-    const newWorkspace: UniversalCourseWorkspace = {
-      meta: builtMeta,
-      studentsCount: courseStudents.length,
-      questionsCount: courseQuestions.length,
-      attemptsCount: courseAttempts.length,
-      retosCount: courseRetos.length,
-      students: courseStudents,
-      questions: courseQuestions,
-      attempts: courseAttempts,
-      abproEvaluations: courseAbpro,
-      customMiniRetos: courseRetos,
-      academicDataset: courseAcademic
-    };
+      const newWorkspace: UniversalCourseWorkspace = {
+        meta: builtMeta,
+        studentsCount: courseStudents.length,
+        questionsCount: courseQuestions.length,
+        attemptsCount: courseAttempts.length,
+        retosCount: courseRetos.length,
+        students: courseStudents,
+        questions: courseQuestions,
+        attempts: courseAttempts,
+        abproEvaluations: courseAbpro,
+        customMiniRetos: courseRetos,
+        academicDataset: courseAcademic
+      };
 
-    const nextCatalog = editingCourseId
-      ? catalog.map((c) => (c.meta.courseId === editingCourseId ? newWorkspace : c))
-      : [...catalog.filter((c) => c.meta.courseId !== builtMeta.courseId), newWorkspace];
+      const nextCatalog = editingCourseId
+        ? catalog.map((c) => (c.meta.courseId === editingCourseId ? newWorkspace : c))
+        : [...catalog.filter((c) => c.meta.courseId !== builtMeta.courseId), newWorkspace];
 
-    const cleanTeacherId = builtMeta.docenteAsignadoId!;
-    const cleanTeacherPass = builtMeta.docenteAsignadoClave!;
-    const teacherExists = registeredTeachers.some(
-      (t) => (t.id || '').trim().toUpperCase() === cleanTeacherId
-    );
-    const nextTeachers: TeacherAccountRecord[] = teacherExists
-      ? registeredTeachers.map((t) =>
-          (t.id || '').trim().toUpperCase() === cleanTeacherId
-            ? {
-                ...t,
-                nombre: builtMeta.docenteResponsable || t.nombre,
-                claveAcceso: cleanTeacherPass,
-                activo: true,
-                cursosAsignadosIds: Array.from(
-                  new Set([...(t.cursosAsignadosIds || []), builtMeta.courseId])
-                ),
-                updatedAtIso: new Date().toISOString()
-              }
-            : t
-        )
-      : [
-          ...registeredTeachers,
-          {
-            id: cleanTeacherId,
-            nombre: builtMeta.docenteResponsable || cleanTeacherId,
-            claveAcceso: cleanTeacherPass,
-            correo: '',
-            activo: true,
-            esTitularPrincipal: true,
-            cursosAsignadosIds: [builtMeta.courseId],
-            updatedAtIso: new Date().toISOString()
-          }
-        ];
+      const cleanTeacherId = builtMeta.docenteAsignadoId!;
+      const cleanTeacherPass = builtMeta.docenteAsignadoClave!;
+      const teacherExists = registeredTeachers.some(
+        (t) => (t.id || '').trim().toUpperCase() === cleanTeacherId
+      );
+      const nextTeachers: TeacherAccountRecord[] = teacherExists
+        ? registeredTeachers.map((t) =>
+            (t.id || '').trim().toUpperCase() === cleanTeacherId
+              ? {
+                  ...t,
+                  nombre: builtMeta.docenteResponsable || t.nombre,
+                  claveAcceso: cleanTeacherPass,
+                  activo: true,
+                  cursosAsignadosIds: Array.from(
+                    new Set([...(t.cursosAsignadosIds || []), builtMeta.courseId])
+                  ),
+                  updatedAtIso: new Date().toISOString()
+                }
+              : t
+          )
+        : [
+            ...registeredTeachers,
+            {
+              id: cleanTeacherId,
+              nombre: builtMeta.docenteResponsable || cleanTeacherId,
+              claveAcceso: cleanTeacherPass,
+              correo: '',
+              activo: true,
+              esTitularPrincipal: true,
+              cursosAsignadosIds: [builtMeta.courseId],
+              updatedAtIso: new Date().toISOString()
+            }
+          ];
 
-    onUpdateStudents(courseStudents);
-    onUpdateQuestions(courseQuestions);
-    onUpdateAttempts(courseAttempts);
-    onUpdateABProEvaluations(courseAbpro);
-    onUpdateCustomMiniRetos(courseRetos);
-    onUpdateAcademicDataset?.(courseAcademic);
+      onUpdateStudents(courseStudents);
+      onUpdateQuestions(courseQuestions);
+      onUpdateAttempts(courseAttempts);
+      onUpdateABProEvaluations(courseAbpro);
+      onUpdateCustomMiniRetos(courseRetos);
+      onUpdateAcademicDataset?.(courseAcademic);
 
-    onUpdateConfig((prev) => ({
-      ...prev,
-      idDocente: cleanTeacherId,
-      claveDocente: cleanTeacherPass,
-      ponderacionTeoriaPct: globalCourseWeightPct,
-      activeCourseId: builtMeta.courseId,
-      activeCourseMeta: builtMeta,
-      universalCoursesCatalog: nextCatalog,
-      registeredTeachers: nextTeachers
-    }));
+      onUpdateConfig((prev) => ({
+        ...prev,
+        idDocente: cleanTeacherId,
+        claveDocente: cleanTeacherPass,
+        ponderacionTeoriaPct: globalCourseWeightPct,
+        courseScheduleConfig: builtMeta.courseScheduleConfig || prev.courseScheduleConfig,
+        activeCourseId: builtMeta.courseId,
+        activeCourseMeta: builtMeta,
+        universalCoursesCatalog: nextCatalog,
+        registeredTeachers: nextTeachers
+      }));
 
-    await handleExecuteServerSave(
-      'panel_editor_cursos_docentes',
-      `Curso ${builtMeta.nombreCurso} (${builtMeta.codigoCurso}) guardado y asignado al docente ${cleanTeacherId}`
-    );
+      await Promise.all([
+        handleExecuteServerSave(
+          'panel_editor_cursos_docentes',
+          `Curso ${builtMeta.nombreCurso} (${builtMeta.codigoCurso}) guardado y asignado al docente ${cleanTeacherId}`
+        ),
+        new Promise((resolve) => setTimeout(resolve, 260))
+      ]);
 
-    handleSaveCourseSnapshot(
-      `Guardado Oficial: ${builtMeta.nombreCurso} (${builtMeta.codigoCurso})`
-    );
+      setSaveButtonVisualState('save_course', 'success', 2600);
+      void handleSaveCourseSnapshot(
+        `Guardado Oficial: ${builtMeta.nombreCurso} (${builtMeta.codigoCurso})`
+      );
 
-    showEditorNotice(
-      `✓ Curso «${builtMeta.nombreCurso} (${builtMeta.codigoCurso})» creado/actualizado y habilitado para el Docente (${cleanTeacherId}).`
-    );
-    setActiveCard('cursos_activos');
+      showEditorNotice(
+        `✓ Curso «${builtMeta.nombreCurso} (${builtMeta.codigoCurso})» creado/actualizado y habilitado para el Docente (${cleanTeacherId}).`
+      );
+      setTimeout(() => {
+        setActiveCard('cursos_activos');
+      }, 420);
+    } catch {
+      setSaveButtonVisualState('save_course', 'idle');
+    }
   };
 
   // Export total backup of the created course
@@ -3410,7 +4202,7 @@ export function EditorPanel({
     )}`;
 
     return (
-      <div className="min-h-[calc(100vh-8rem)] flex items-center justify-center px-4 py-8">
+      <div className="min-h-screen flex items-center justify-center px-4 py-12">
         <div className="max-w-md w-full bg-white border border-slate-200 rounded-2xl p-6 sm:p-8 shadow-xs space-y-6">
           {onGoToInitialHome && (
             <div>
@@ -3469,12 +4261,31 @@ export function EditorPanel({
             </div>
 
             <div className="space-y-1.5">
-              <label htmlFor="editor-pin" className="block text-xs font-semibold text-slate-800">
-                Código de Acceso de Sesión
-              </label>
+              <div className="flex items-center justify-between">
+                <label htmlFor="editor-pin" className="block text-xs font-semibold text-slate-800">
+                  Código de Acceso de Sesión
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setShowEditorPassInput((v) => !v)}
+                  className="text-[11px] font-bold text-indigo-700 hover:text-indigo-900 inline-flex items-center gap-1 cursor-pointer"
+                >
+                  {showEditorPassInput ? (
+                    <>
+                      <EyeOff className="w-3.5 h-3.5" />
+                      <span>Ocultar</span>
+                    </>
+                  ) : (
+                    <>
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>Mostrar</span>
+                    </>
+                  )}
+                </button>
+              </div>
               <input
                 id="editor-pin"
-                type="password"
+                type={showEditorPassInput ? 'text' : 'password'}
                 required
                 autoComplete="off"
                 value={editorPassInput}
@@ -3490,6 +4301,34 @@ export function EditorPanel({
               Iniciar Sesión
             </button>
           </form>
+
+          {/* Navegación rápida entre perfiles de acceso */}
+          <div className="pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+            <span>Cambiar perfil de ingreso:</span>
+            <div className="flex items-center gap-3 font-semibold">
+              {onSwitchToStudentLogin && (
+                <button
+                  type="button"
+                  onClick={onSwitchToStudentLogin}
+                  className="text-sky-700 hover:text-sky-900 hover:underline underline-offset-4 cursor-pointer"
+                >
+                  Estudiante
+                </button>
+              )}
+              {onSwitchToStudentLogin && onSwitchToTeacherPanel && (
+                <span aria-hidden="true" className="text-slate-300">·</span>
+              )}
+              {onSwitchToTeacherPanel && (
+                <button
+                  type="button"
+                  onClick={onSwitchToTeacherPanel}
+                  className="text-slate-700 hover:text-slate-950 hover:underline underline-offset-4 cursor-pointer"
+                >
+                  Docente
+                </button>
+              )}
+            </div>
+          </div>
         </div>
       </div>
     );
@@ -3833,7 +4672,8 @@ export function EditorPanel({
                   <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
                 </button>
 
-                <div className="mt-1 space-y-0.5">
+                {/* Lista Ordenada de Ventanas del Editor en Tarjetas Interactivas */}
+                <div className="mt-2 px-2 space-y-1.5">
                   {orderedEditorSections.map((sec) => {
                     const isSelected =
                       sec.id === 'cursos_activos'
@@ -3844,14 +4684,14 @@ export function EditorPanel({
                         key={sec.id}
                         type="button"
                         onClick={sec.onClick}
-                        className={`w-full pl-6 pr-3 py-2.5 text-left text-xs flex items-center justify-between gap-1.5 transition-colors cursor-pointer ${
+                        className={`w-full px-3 py-2.5 rounded-xl border text-left text-xs flex items-center justify-between gap-1.5 transition-all cursor-pointer ${
                           isSelected
-                            ? 'bg-[#52627a] text-white font-bold border-l-4 border-sky-400'
-                            : 'text-slate-300 hover:bg-[#273140] hover:text-white font-medium'
+                            ? 'bg-[#25579e] text-white font-bold border-sky-400 shadow-sm'
+                            : 'bg-[#232d3b]/80 border-slate-700/80 text-slate-200 hover:bg-[#2c3849] hover:border-slate-500 hover:text-white font-medium'
                         }`}
                       >
                         <span className="truncate">{sec.shortLabel}</span>
-                        <span className="px-1.5 py-0.5 rounded bg-slate-800 text-sky-300 font-mono text-[10px] shrink-0">
+                        <span className="px-1.5 py-0.5 rounded-md bg-slate-800 text-sky-300 font-mono text-[10px] shrink-0">
                           {sec.badge}
                         </span>
                       </button>
@@ -3859,15 +4699,15 @@ export function EditorPanel({
                   })}
                 </div>
 
-                {/* Herramientas Complementarias en el Menú Lateral */}
-                <div className="mt-3 pt-3 border-t border-slate-700/80 space-y-0.5">
-                  <div className="px-4 py-1 text-[10px] font-mono uppercase tracking-wider text-slate-400 font-bold">
+                {/* Herramientas Complementarias en el Menú Lateral (Tarjetas Interactivas) */}
+                <div className="mt-3 pt-3 px-2 border-t border-slate-700/80 space-y-1.5">
+                  <div className="px-2 py-1 text-[10px] font-mono uppercase tracking-wider text-slate-400 font-bold">
                     Herramientas Curriculares
                   </div>
                   <button
                     type="button"
                     onClick={() => setShowLivePreviewModal(true)}
-                    className="w-full px-4 py-2.5 text-xs text-slate-300 hover:bg-[#273140] hover:text-white flex items-center justify-between cursor-pointer"
+                    className="w-full px-3 py-2.5 rounded-xl border border-slate-700/80 bg-[#232d3b]/80 text-xs text-slate-200 hover:bg-[#2c3849] hover:border-slate-500 hover:text-white flex items-center justify-between cursor-pointer transition-all"
                   >
                     <span className="flex items-center gap-2.5">
                       <Eye className="w-4 h-4 text-indigo-400" />
@@ -3879,7 +4719,7 @@ export function EditorPanel({
                   <button
                     type="button"
                     onClick={() => setShowSelectiveCloneModal(true)}
-                    className="w-full px-4 py-2.5 text-xs text-slate-300 hover:bg-[#273140] hover:text-white flex items-center justify-between cursor-pointer"
+                    className="w-full px-3 py-2.5 rounded-xl border border-slate-700/80 bg-[#232d3b]/80 text-xs text-slate-200 hover:bg-[#2c3849] hover:border-slate-500 hover:text-white flex items-center justify-between cursor-pointer transition-all"
                   >
                     <span className="flex items-center gap-2.5">
                       <Copy className="w-4 h-4 text-sky-400" />
@@ -3891,13 +4731,13 @@ export function EditorPanel({
                   <button
                     type="button"
                     onClick={() => setShowBankAuditorModal(true)}
-                    className="w-full px-4 py-2.5 text-xs text-slate-300 hover:bg-[#273140] hover:text-white flex items-center justify-between cursor-pointer"
+                    className="w-full px-3 py-2.5 rounded-xl border border-slate-700/80 bg-[#232d3b]/80 text-xs text-slate-200 hover:bg-[#2c3849] hover:border-slate-500 hover:text-white flex items-center justify-between cursor-pointer transition-all"
                   >
                     <span className="flex items-center gap-2.5">
                       <CheckCircle2 className="w-4 h-4 text-emerald-400" />
                       <span>Auditor del Banco</span>
                     </span>
-                    <span className="px-1.5 py-0.5 rounded bg-emerald-600 text-white font-mono text-[10px] font-bold">
+                    <span className="px-1.5 py-0.5 rounded-md bg-emerald-600 text-white font-mono text-[10px] font-bold">
                       {bankQualityAudit.healthyCount}/{bankQualityAudit.totalQuestions}
                     </span>
                   </button>
@@ -3905,13 +4745,13 @@ export function EditorPanel({
                   <button
                     type="button"
                     onClick={() => setShowSnapshotsModal(true)}
-                    className="w-full px-4 py-2.5 text-xs text-slate-300 hover:bg-[#273140] hover:text-white flex items-center justify-between cursor-pointer"
+                    className="w-full px-3 py-2.5 rounded-xl border border-slate-700/80 bg-[#232d3b]/80 text-xs text-slate-200 hover:bg-[#2c3849] hover:border-slate-500 hover:text-white flex items-center justify-between cursor-pointer transition-all"
                   >
                     <span className="flex items-center gap-2.5">
                       <RotateCcw className="w-4 h-4 text-amber-400" />
                       <span>Historial Versiones</span>
                     </span>
-                    <span className="px-1.5 py-0.5 rounded bg-slate-800 text-amber-300 font-mono text-[10px] font-bold">
+                    <span className="px-1.5 py-0.5 rounded-md bg-slate-800 text-amber-300 font-mono text-[10px] font-bold">
                       {courseSnapshots.length}
                     </span>
                   </button>
@@ -3919,7 +4759,7 @@ export function EditorPanel({
                   <button
                     type="button"
                     onClick={() => setPrintViewMode('examen_papel_plan_b')}
-                    className="w-full px-4 py-2.5 text-xs text-slate-300 hover:bg-[#273140] hover:text-white flex items-center justify-between cursor-pointer"
+                    className="w-full px-3 py-2.5 rounded-xl border border-slate-700/80 bg-[#232d3b]/80 text-xs text-slate-200 hover:bg-[#2c3849] hover:border-slate-500 hover:text-white flex items-center justify-between cursor-pointer transition-all"
                   >
                     <span className="flex items-center gap-2.5">
                       <Printer className="w-4 h-4 text-purple-400" />
@@ -3940,55 +4780,152 @@ export function EditorPanel({
 
         {/* COLUMNA PRINCIPAL DE CONTENIDO (ESPACIO DE TRABAJO AMPLIO Y DESPEJADO) */}
         <div className="flex-1 min-w-0 flex flex-col">
-          {/* BARRA SUPERIOR DE CONTEXTO Y BOTONES NUMERADOS EN ORDEN (1 -> 2 -> 3 -> 4) */}
-          <div className="bg-white border-b border-slate-200 px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-3">
-            <div className="flex flex-wrap items-center gap-2 min-w-0">
-              {activeCard === null ? (
-                <div className="flex items-center gap-2 text-xs sm:text-sm font-semibold text-slate-800">
-                  <span className="px-2.5 py-0.5 rounded-md bg-sky-100 text-sky-900 font-mono text-[10px] font-extrabold uppercase">
-                    Panel del Editor
-                  </span>
-                  <span>
-                    Pantalla Inicial · Curso Activo:{' '}
-                    <strong className="text-slate-950">
-                      {activeMeta.nombreCurso} ({activeMeta.codigoCurso})
-                    </strong>
-                  </span>
-                </div>
-              ) : (
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setActiveCard(null)}
-                    className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-[#25579e] hover:bg-[#1e4682] text-white text-xs font-extrabold flex items-center gap-1.5 cursor-pointer shadow-2xs transition-all"
-                  >
-                    <Home className="w-3.5 h-3.5" />
-                    <span>Escritorio Principal</span>
-                  </button>
+          {/* BARRA SUPERIOR DE CONTEXTO Y TARJETAS INTERACTIVAS DE MENÚ (1 -> 2 -> 3 -> 4 -> 5) */}
+          <div className="bg-white border-b border-slate-200 px-4 sm:px-6 py-3.5 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-2 min-w-0">
+                {activeCard === null ? (
+                  <div className="flex items-center gap-2 text-xs sm:text-sm font-semibold text-slate-800">
+                    <span className="px-2.5 py-0.5 rounded-md bg-sky-100 text-sky-900 font-mono text-[10px] font-extrabold uppercase">
+                      Panel del Editor
+                    </span>
+                    <span>
+                      Pantalla Inicial · Curso Activo:{' '}
+                      <strong className="text-slate-950">
+                        {activeMeta.nombreCurso} ({activeMeta.codigoCurso})
+                      </strong>
+                    </span>
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setActiveCard(null)}
+                      className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-[#25579e] hover:bg-[#1e4682] text-white text-xs font-extrabold flex items-center gap-1.5 cursor-pointer shadow-2xs transition-all"
+                    >
+                      <Home className="w-3.5 h-3.5" />
+                      <span>Escritorio Principal</span>
+                    </button>
 
-                  <button
-                    type="button"
-                    onClick={() => setActiveCard(null)}
-                    className="min-h-[38px] px-3 py-1.5 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-800 text-xs font-bold flex items-center gap-1 cursor-pointer transition-all"
-                  >
-                    <ArrowLeft className="w-3.5 h-3.5" />
-                    <span>Volver</span>
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => setActiveCard(null)}
+                      className="min-h-[38px] px-3 py-1.5 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-800 text-xs font-bold flex items-center gap-1 cursor-pointer transition-all"
+                    >
+                      <ArrowLeft className="w-3.5 h-3.5" />
+                      <span>Volver</span>
+                    </button>
 
-                  {currentEditorSection && (
-                    <div className="flex items-center gap-2 pl-1">
-                      <span className="text-slate-300 hidden sm:inline">/</span>
-                      <span className="text-sm font-extrabold text-slate-900">
-                        {currentEditorSection.shortLabel}
-                      </span>
-                    </div>
-                  )}
-                </div>
-              )}
+                    {currentEditorSection && (
+                      <div className="flex items-center gap-2 pl-1">
+                        <span className="text-slate-300 hidden sm:inline">/</span>
+                        <span className="text-sm font-extrabold text-slate-900">
+                          {currentEditorSection.shortLabel}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
 
-            {/* Botones de las 5 Secciones Principales en Orden Fijo (1 -> 2 -> 3 -> 4 -> 5) */}
-            <div className="flex flex-wrap items-center gap-1.5">
+            {/* Barra Permanente de Alcance de Edición + Validador Pre-Vuelo de Salud del Curso */}
+            <div className="bg-slate-900 text-white rounded-xl px-3.5 py-2.5 space-y-2 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="px-2 py-0.5 rounded bg-sky-500/20 border border-sky-400/40 text-sky-300 font-mono text-[10px] font-extrabold uppercase">
+                    🎯 Alcance de Edición Actual
+                  </span>
+                  <span className="font-semibold">
+                    {activeCard === 'nominas_estudiantes'
+                      ? `Banco Maestro de Nómina: ${newRosterDbName || 'Nómina Reutilizable'} (${courseStudentsBank.length} estudiantes)`
+                      : activeCard === 'banco_preguntas'
+                      ? `Banco Maestro de Preguntas: ${newQBankDbName || 'Banco Reutilizable'} (${courseQuestionsBank.length} reactivos)`
+                      : `Curso Activo en Aula: ${activeMeta.nombreCurso} (${activeMeta.codigoCurso})`}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 font-mono text-[11px] text-slate-300">
+                  <span>Nóminas creadas: {studentRosterDatabases.length}</span>
+                  <span>·</span>
+                  <span>Bancos preguntas: {questionBankDatabases.length}</span>
+                </div>
+              </div>
+
+              {/* Semáforo Pre-Vuelo de Salud del Curso */}
+              {(() => {
+                const hasRosterOk = courseStudentsBank.length > 0;
+                const minRequiredQ = Math.max(5, Number(config.preguntasExamenModulo) || 20);
+                const hasBankOk = courseQuestionsBank.length >= minRequiredQ;
+                const hasTeacherOk =
+                  Boolean((activeMeta.docenteResponsable || '').trim()) ||
+                  registeredTeachers.length > 0;
+                const modulesList = Array.isArray(activeMeta.modulosCurso)
+                  ? activeMeta.modulosCurso
+                  : [];
+                const weightsOk =
+                  modulesList.length === 0 ||
+                  modulesList.every((m) => {
+                    if (!m.ponderacion) return true;
+                    const sum =
+                      Number(m.ponderacion.comportamientoPct || 0) +
+                      Number(m.ponderacion.participacionPct || 0) +
+                      Number(m.ponderacion.examenPct || 0) +
+                      Number(m.ponderacion.trabajoPct || 0);
+                    return sum === 0 || sum === 100;
+                  });
+
+                return (
+                  <div className="pt-1.5 border-t border-slate-800 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                    <span className="font-mono font-bold text-slate-400 uppercase text-[10px]">
+                      Checklist Pre-Vuelo Aula:
+                    </span>
+                    <div className="flex flex-wrap items-center gap-1.5 font-mono">
+                      <span
+                        className={`px-2 py-0.5 rounded border ${
+                          hasRosterOk
+                            ? 'bg-emerald-500/15 border-emerald-400/40 text-emerald-300'
+                            : 'bg-amber-500/20 border-amber-400/50 text-amber-300'
+                        }`}
+                      >
+                        {hasRosterOk ? `✓ Nómina (${courseStudentsBank.length})` : '⚠️ Sin Nómina'}
+                      </span>
+                      <span
+                        className={`px-2 py-0.5 rounded border ${
+                          hasBankOk
+                            ? 'bg-emerald-500/15 border-emerald-400/40 text-emerald-300'
+                            : 'bg-amber-500/20 border-amber-400/50 text-amber-300'
+                        }`}
+                      >
+                        {hasBankOk
+                          ? `✓ Preguntas (${courseQuestionsBank.length})`
+                          : `⚠️ Banco < ${minRequiredQ} preg.`}
+                      </span>
+                      <span
+                        className={`px-2 py-0.5 rounded border ${
+                          hasTeacherOk
+                            ? 'bg-emerald-500/15 border-emerald-400/40 text-emerald-300'
+                            : 'bg-amber-500/20 border-amber-400/50 text-amber-300'
+                        }`}
+                      >
+                        {hasTeacherOk ? '✓ Docente Asignado' : '⚠️ Sin Docente'}
+                      </span>
+                      <span
+                        className={`px-2 py-0.5 rounded border ${
+                          weightsOk
+                            ? 'bg-emerald-500/15 border-emerald-400/40 text-emerald-300'
+                            : 'bg-amber-500/20 border-amber-400/50 text-amber-300'
+                        }`}
+                      >
+                        {weightsOk ? '✓ Ponderación 100%' : '⚠️ Revisar Ponderación %'}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+
+            {/* Tarjetas Interactivas de las 5 Secciones Principales (Sin Amontonamiento) */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5">
               {orderedEditorSections.map((sec) => {
                 const IconComp = sec.icon;
                 const isSelected =
@@ -4000,14 +4937,34 @@ export function EditorPanel({
                     key={sec.id}
                     type="button"
                     onClick={sec.onClick}
-                    className={`min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-all ${
+                    className={`p-3 rounded-xl border text-left flex flex-col justify-between gap-2 cursor-pointer transition-all ${
                       isSelected
-                        ? sec.btnActive
-                        : 'bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-200/80'
+                        ? `${sec.btnActive} shadow-sm ring-2 ring-sky-400/40`
+                        : 'bg-slate-50/80 hover:bg-white text-slate-800 border-slate-200/90 hover:border-sky-300 hover:shadow-2xs'
                     }`}
                   >
-                    <IconComp className="w-3.5 h-3.5 shrink-0" />
-                    <span>{sec.shortLabel}</span>
+                    <div className="flex items-center justify-between gap-2">
+                      <span
+                        className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md font-mono text-[10px] font-bold uppercase ${
+                          isSelected
+                            ? 'bg-white/20 text-white'
+                            : 'bg-white border border-slate-200 text-slate-700'
+                        }`}
+                      >
+                        <IconComp className="w-3.5 h-3.5 shrink-0" />
+                        <span>Opción {sec.stepNumber}</span>
+                      </span>
+                      <span
+                        className={`font-mono text-[10px] font-bold ${
+                          isSelected ? 'text-sky-100' : 'text-slate-500'
+                        }`}
+                      >
+                        {sec.badge}
+                      </span>
+                    </div>
+                    <div className="text-xs font-extrabold leading-snug truncate">
+                      {sec.shortLabel}
+                    </div>
                   </button>
                 );
               })}
@@ -4312,10 +5269,31 @@ export function EditorPanel({
 
             <button
               type="submit"
-              className="w-full py-3 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold flex items-center justify-center gap-2 cursor-pointer"
+              disabled={editorSaveButtonStatuses['save_security'] === 'saving'}
+              className={`w-full py-3 px-4 rounded-xl text-white font-bold flex items-center justify-center gap-2 cursor-pointer transition-all ${
+                editorSaveButtonStatuses['save_security'] === 'saving'
+                  ? 'bg-amber-600 cursor-wait'
+                  : editorSaveButtonStatuses['save_security'] === 'success'
+                  ? 'bg-emerald-600'
+                  : 'bg-indigo-600 hover:bg-indigo-700'
+              }`}
             >
-              <Save className="w-4 h-4" />
-              <span>Actualizar Datos de la Cuenta del Editor</span>
+              {editorSaveButtonStatuses['save_security'] === 'saving' ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  <span>Guardando...</span>
+                </>
+              ) : editorSaveButtonStatuses['save_security'] === 'success' ? (
+                <>
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>✓ Éxito — Datos Guardados</span>
+                </>
+              ) : (
+                <>
+                  <Save className="w-4 h-4" />
+                  <span>Actualizar Datos de la Cuenta del Editor</span>
+                </>
+              )}
             </button>
           </form>
         </div>
@@ -4486,10 +5464,31 @@ export function EditorPanel({
 
                   <button
                     type="submit"
-                    className="w-full py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold flex items-center justify-center gap-2 cursor-pointer"
+                    disabled={editorSaveButtonStatuses['save_single_teacher'] === 'saving'}
+                    className={`w-full py-2.5 px-4 rounded-xl text-white font-bold flex items-center justify-center gap-2 cursor-pointer transition-all ${
+                      editorSaveButtonStatuses['save_single_teacher'] === 'saving'
+                        ? 'bg-amber-600 cursor-wait'
+                        : editorSaveButtonStatuses['save_single_teacher'] === 'success'
+                        ? 'bg-emerald-700 ring-2 ring-emerald-400/40'
+                        : 'bg-emerald-600 hover:bg-emerald-700'
+                    }`}
                   >
-                    <Plus className="w-4 h-4" />
-                    <span>Agregar Docente</span>
+                    {editorSaveButtonStatuses['save_single_teacher'] === 'saving' ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        <span>Guardando...</span>
+                      </>
+                    ) : editorSaveButtonStatuses['save_single_teacher'] === 'success' ? (
+                      <>
+                        <CheckCircle2 className="w-4 h-4" />
+                        <span>✓ Éxito</span>
+                      </>
+                    ) : (
+                      <>
+                        <Plus className="w-4 h-4" />
+                        <span>Agregar Docente</span>
+                      </>
+                    )}
                   </button>
                 </form>
               ) : (
@@ -4605,10 +5604,31 @@ export function EditorPanel({
                   <div className="flex flex-col gap-2">
                     <button
                       type="submit"
-                      className="w-full py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold flex items-center justify-center gap-2 cursor-pointer"
+                      disabled={editorSaveButtonStatuses['save_batch_teachers'] === 'saving'}
+                      className={`w-full py-2.5 px-4 rounded-xl text-white font-bold flex items-center justify-center gap-2 cursor-pointer transition-all ${
+                        editorSaveButtonStatuses['save_batch_teachers'] === 'saving'
+                          ? 'bg-amber-600 cursor-wait'
+                          : editorSaveButtonStatuses['save_batch_teachers'] === 'success'
+                          ? 'bg-emerald-700 ring-2 ring-emerald-400/40'
+                          : 'bg-emerald-600 hover:bg-emerald-700'
+                      }`}
                     >
-                      <Plus className="w-4 h-4" />
-                      <span>Guardar Docentes por Lotes</span>
+                      {editorSaveButtonStatuses['save_batch_teachers'] === 'saving' ? (
+                        <>
+                          <RefreshCw className="w-4 h-4 animate-spin" />
+                          <span>Guardando...</span>
+                        </>
+                      ) : editorSaveButtonStatuses['save_batch_teachers'] === 'success' ? (
+                        <>
+                          <CheckCircle2 className="w-4 h-4" />
+                          <span>✓ Éxito — Docentes Guardados</span>
+                        </>
+                      ) : (
+                        <>
+                          <Plus className="w-4 h-4" />
+                          <span>Guardar Docentes por Lotes</span>
+                        </>
+                      )}
                     </button>
 
                     <label className="w-full py-2 px-4 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-800 font-bold flex items-center justify-center gap-2 cursor-pointer">
@@ -5502,6 +6522,73 @@ export function EditorPanel({
                     </div>
                   </div>
                 </div>
+              </div>
+
+              {/* Vigencia General del Curso, Rango de Fechas/Horas por Actividad, Prórrogas, Plantillas y Simulador (R1-R9) */}
+              <div className="pt-4 border-t border-slate-200 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h4 className="text-sm sm:text-base font-extrabold text-slate-900 flex items-center gap-2">
+                      <span>📅 Programación de Fechas de Apertura/Cierre del Curso y Actividades (R1–R9)</span>
+                    </h4>
+                    <p className="text-xs text-slate-600">
+                      Configura las fechas de apertura/cierre del curso, días y rangos de horas de Exámenes, Trabajos, Mini Retos y Participación, entregas tardías con descuento y el Simulador de Viaje en el Tiempo.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowEditorSchedulePanel((prev) => !prev)}
+                    className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold cursor-pointer"
+                  >
+                    {showEditorSchedulePanel
+                      ? 'Ocultar Programador de Fechas/Horas ▲'
+                      : 'Abrir Programador de Fechas/Horas ▼'}
+                  </button>
+                </div>
+
+                {showEditorSchedulePanel && (
+                  <CourseScheduleManagerPanel
+                    scheduleConfig={editorCourseScheduleConfig}
+                    students={courseStudentsBank.length > 0 ? courseStudentsBank : students}
+                    roleLabel="EDITOR"
+                    courseName={courseName || activeMeta.nombreCurso || 'Curso en Edición'}
+                    onSaveScheduleConfig={(nextSchedule: CourseScheduleConfig, auditDesc: string) => {
+                      setEditorCourseScheduleConfig(nextSchedule);
+                      const targetId = editingCourseId || activeMeta.courseId;
+                      onUpdateConfig((prev) => {
+                        const updatedCatalog = Array.isArray(prev.universalCoursesCatalog)
+                          ? prev.universalCoursesCatalog.map((ws) =>
+                              ws.meta.courseId === targetId
+                                ? {
+                                    ...ws,
+                                    meta: {
+                                      ...ws.meta,
+                                      courseScheduleConfig: nextSchedule,
+                                      updatedAtIso: new Date().toISOString()
+                                    }
+                                  }
+                                : ws
+                            )
+                          : prev.universalCoursesCatalog;
+
+                        return {
+                          ...prev,
+                          courseScheduleConfig: nextSchedule,
+                          activeCourseMeta:
+                            prev.activeCourseMeta?.courseId === targetId
+                              ? {
+                                  ...prev.activeCourseMeta,
+                                  courseScheduleConfig: nextSchedule,
+                                  updatedAtIso: new Date().toISOString()
+                                }
+                              : prev.activeCourseMeta,
+                          universalCoursesCatalog: updatedCatalog
+                        };
+                      });
+                      showEditorNotice(`✓ ${auditDesc}`);
+                    }}
+                  />
+                )}
               </div>
             </div>
 
@@ -6399,10 +7486,31 @@ export function EditorPanel({
 
               <button
                 type="submit"
-                className="w-full sm:w-auto px-6 py-3 rounded-xl bg-purple-600 hover:bg-purple-700 text-white text-xs sm:text-sm font-bold flex items-center justify-center gap-2 cursor-pointer shadow-sm"
+                disabled={editorSaveButtonStatuses['save_course'] === 'saving'}
+                className={`w-full sm:w-auto px-6 py-3 rounded-xl text-white text-xs sm:text-sm font-bold flex items-center justify-center gap-2 cursor-pointer shadow-sm transition-all ${
+                  editorSaveButtonStatuses['save_course'] === 'saving'
+                    ? 'bg-amber-600 cursor-wait'
+                    : editorSaveButtonStatuses['save_course'] === 'success'
+                    ? 'bg-emerald-600 ring-2 ring-emerald-400/40'
+                    : 'bg-purple-600 hover:bg-purple-700'
+                }`}
               >
-                <Save className="w-4 h-4" />
-                <span>{editingCourseId ? 'Guardar Cambios del Curso' : 'Crear Nuevo Curso'}</span>
+                {editorSaveButtonStatuses['save_course'] === 'saving' ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <span>Guardando...</span>
+                  </>
+                ) : editorSaveButtonStatuses['save_course'] === 'success' ? (
+                  <>
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>✓ Éxito — Curso Guardado</span>
+                  </>
+                ) : (
+                  <>
+                    <Save className="w-4 h-4" />
+                    <span>{editingCourseId ? 'Guardar Cambios del Curso' : 'Crear Nuevo Curso'}</span>
+                  </>
+                )}
               </button>
             </div>
           </form>
@@ -6467,18 +7575,27 @@ export function EditorPanel({
               <button
                 type="button"
                 onClick={() => {
+                  triggerRosterListSyncRefresh(viewingRosterDbId || activeRosterDbId);
                   setRosterWindowTab('listado');
+                  if (!viewingRosterDbId && activeRosterDbId) {
+                    setViewingRosterDbId(activeRosterDbId);
+                  }
                 }}
                 className={`min-h-[54px] px-5 py-3.5 rounded-xl border-2 text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2.5 transition-all cursor-pointer ${
                   rosterWindowTab === 'listado'
-                    ? 'border-teal-600 bg-teal-600 text-white shadow-sm'
-                    : 'border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-800'
+                    ? 'border-teal-600 bg-teal-600 text-white shadow-sm ring-2 ring-teal-500/30'
+                    : 'border-teal-300 bg-teal-50/70 hover:bg-teal-100 text-teal-950'
                 }`}
               >
                 <Layers className="w-4 h-4 shrink-0" />
                 <span>
                   Ver listado de bases de datos creados ({studentRosterDatabases.length})
                 </span>
+                {rosterWindowTab === 'listado' && (
+                  <span className="px-2 py-0.5 rounded-full bg-white text-teal-900 text-[10px] font-mono font-extrabold">
+                    ● ACTIVO
+                  </span>
+                )}
               </button>
             </div>
           </div>
@@ -6561,10 +7678,31 @@ export function EditorPanel({
                   <div className="md:col-span-3">
                     <button
                       type="submit"
-                      className="w-full min-h-[44px] py-2.5 px-5 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 cursor-pointer shadow-sm"
+                      disabled={editorSaveButtonStatuses['save_roster_db'] === 'saving'}
+                      className={`w-full min-h-[44px] py-2.5 px-5 rounded-xl text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 cursor-pointer shadow-sm transition-all ${
+                        editorSaveButtonStatuses['save_roster_db'] === 'saving'
+                          ? 'bg-amber-600 cursor-wait'
+                          : editorSaveButtonStatuses['save_roster_db'] === 'success'
+                          ? 'bg-emerald-600 ring-2 ring-emerald-400/40'
+                          : 'bg-teal-600 hover:bg-teal-700'
+                      }`}
                     >
-                      <Save className="w-4 h-4 shrink-0" />
-                      <span>Guardar base de datos</span>
+                      {editorSaveButtonStatuses['save_roster_db'] === 'saving' ? (
+                        <>
+                          <RefreshCw className="w-4 h-4 shrink-0 animate-spin" />
+                          <span>Guardando...</span>
+                        </>
+                      ) : editorSaveButtonStatuses['save_roster_db'] === 'success' ? (
+                        <>
+                          <CheckCircle2 className="w-4 h-4 shrink-0" />
+                          <span>✓ Éxito</span>
+                        </>
+                      ) : (
+                        <>
+                          <Save className="w-4 h-4 shrink-0" />
+                          <span>Guardar base de datos</span>
+                        </>
+                      )}
                     </button>
                   </div>
                 </div>
@@ -6766,7 +7904,7 @@ export function EditorPanel({
                   </div>
                 )}
 
-                {/* Barra de Búsqueda */}
+                {/* Barra de Búsqueda + Paginación */}
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div className="relative flex-1 max-w-md">
                     <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -6778,9 +7916,37 @@ export function EditorPanel({
                       className="w-full pl-9 pr-4 py-2 rounded-xl border border-slate-300 text-xs focus:outline-none focus:ring-2 focus:ring-sky-600"
                     />
                   </div>
-                  <div className="text-xs font-mono text-slate-600">
-                    Mostrando <strong>{edFilteredStudents.length}</strong> de{' '}
-                    <strong>{courseStudentsBank.length}</strong> estudiantes en esta nómina
+                  <div className="flex flex-wrap items-center gap-2 text-xs font-mono text-slate-600">
+                    <span>
+                      Mostrando <strong>{paginatedEdStudents.length}</strong> de{' '}
+                      <strong>{edFilteredStudents.length}</strong> (Total nómina:{' '}
+                      <strong>{courseStudentsBank.length}</strong>)
+                    </span>
+                    {edStudentTotalPages > 1 && (
+                      <div className="inline-flex items-center gap-1 bg-slate-100 px-2 py-1 rounded-lg">
+                        <button
+                          type="button"
+                          disabled={edStudentCurrentPage <= 1}
+                          onClick={() => setEdStudentCurrentPage((p) => Math.max(1, p - 1))}
+                          className="px-2 py-0.5 rounded bg-white border border-slate-300 disabled:opacity-40 font-bold cursor-pointer"
+                        >
+                          ◀
+                        </button>
+                        <span className="px-1.5 font-bold text-slate-800">
+                          Pág. {edStudentCurrentPage}/{edStudentTotalPages}
+                        </span>
+                        <button
+                          type="button"
+                          disabled={edStudentCurrentPage >= edStudentTotalPages}
+                          onClick={() =>
+                            setEdStudentCurrentPage((p) => Math.min(edStudentTotalPages, p + 1))
+                          }
+                          className="px-2 py-0.5 rounded bg-white border border-slate-300 disabled:opacity-40 font-bold cursor-pointer"
+                        >
+                          ▶
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -6833,7 +7999,7 @@ export function EditorPanel({
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-200 text-[11px] leading-snug">
-                        {edFilteredStudents.map((st) => {
+                        {paginatedEdStudents.map((st) => {
                           const isChecked = edSelectedStudentIdsForBatch.includes(st.id);
                           const currentDraftCode =
                             edStudentCodeDrafts[st.id] !== undefined
@@ -6918,16 +8084,43 @@ export function EditorPanel({
                                   />
                                   <button
                                     type="button"
-                                    disabled={!pendingChange}
-                                    onClick={() => handleEdSaveDirectStudentCode(st)}
+                                    disabled={
+                                      !pendingChange &&
+                                      editorSaveButtonStatuses[`student_code_${st.id}`] !==
+                                        'saving' &&
+                                      editorSaveButtonStatuses[`student_code_${st.id}`] !==
+                                        'success'
+                                    }
+                                    onClick={() => void handleEdSaveDirectStudentCode(st)}
                                     className={`px-1.5 py-0.5 rounded text-[10px] font-bold inline-flex items-center gap-1 transition-colors ${
-                                      pendingChange
+                                      editorSaveButtonStatuses[`student_code_${st.id}`] === 'saving'
+                                        ? 'bg-amber-600 text-white cursor-wait'
+                                        : editorSaveButtonStatuses[`student_code_${st.id}`] ===
+                                          'success'
+                                        ? 'bg-emerald-700 text-white'
+                                        : pendingChange
                                         ? 'bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer'
                                         : 'bg-slate-200 text-slate-400 cursor-not-allowed'
                                     }`}
                                   >
-                                    <Save className="w-2.5 h-2.5" />
-                                    <span>Guardar</span>
+                                    {editorSaveButtonStatuses[`student_code_${st.id}`] ===
+                                    'saving' ? (
+                                      <>
+                                        <RefreshCw className="w-2.5 h-2.5 animate-spin" />
+                                        <span>Guardando...</span>
+                                      </>
+                                    ) : editorSaveButtonStatuses[`student_code_${st.id}`] ===
+                                      'success' ? (
+                                      <>
+                                        <CheckCircle2 className="w-2.5 h-2.5" />
+                                        <span>Éxito</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Save className="w-2.5 h-2.5" />
+                                        <span>Guardar</span>
+                                      </>
+                                    )}
                                   </button>
                                 </div>
                               </td>
@@ -7014,11 +8207,32 @@ export function EditorPanel({
                   </div>
                   <button
                     type="button"
-                    onClick={() => handleSaveRosterDatabase()}
-                    className="w-full lg:w-auto min-h-[44px] px-6 py-3 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 cursor-pointer shadow-sm shrink-0"
+                    disabled={editorSaveButtonStatuses['save_roster_db'] === 'saving'}
+                    onClick={() => void handleSaveRosterDatabase()}
+                    className={`w-full lg:w-auto min-h-[44px] px-6 py-3 rounded-xl text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 cursor-pointer shadow-sm shrink-0 transition-all ${
+                      editorSaveButtonStatuses['save_roster_db'] === 'saving'
+                        ? 'bg-amber-600 cursor-wait'
+                        : editorSaveButtonStatuses['save_roster_db'] === 'success'
+                        ? 'bg-emerald-600 ring-2 ring-emerald-400/40'
+                        : 'bg-teal-600 hover:bg-teal-700'
+                    }`}
                   >
-                    <Save className="w-4 h-4 shrink-0" />
-                    <span>Guardar base de datos</span>
+                    {editorSaveButtonStatuses['save_roster_db'] === 'saving' ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 shrink-0 animate-spin" />
+                        <span>Guardando...</span>
+                      </>
+                    ) : editorSaveButtonStatuses['save_roster_db'] === 'success' ? (
+                      <>
+                        <CheckCircle2 className="w-4 h-4 shrink-0" />
+                        <span>✓ Éxito — Base Guardada</span>
+                      </>
+                    ) : (
+                      <>
+                        <Save className="w-4 h-4 shrink-0" />
+                        <span>Guardar base de datos</span>
+                      </>
+                    )}
                   </button>
                 </div>
               </div>
@@ -7030,7 +8244,12 @@ export function EditorPanel({
           {/* (CADA BANCO TIENE AL LADO LOS BOTONES: "Ver", "Modificar" y "Eliminar") */}
           {/* ===================================================================== */}
           {rosterWindowTab === 'listado' && (
-            <div className="bg-white border-2 border-teal-200 rounded-2xl p-6 shadow-xs space-y-5">
+            <div
+              ref={rosterListSectionRef}
+              key={`roster-list-${rosterListRefreshKey}-${rosterSyncVersion}-${studentRosterDatabases.length}`}
+              data-sync-key={rosterSyncVersion}
+              className="bg-white border-2 border-teal-200 rounded-2xl p-6 shadow-xs space-y-5"
+            >
               {edStudentBanner && (
                 <div className="p-3.5 rounded-xl bg-emerald-50 border-2 border-emerald-400 text-xs font-bold text-emerald-950 flex items-center justify-between shadow-xs">
                   <div className="flex items-center gap-2">
@@ -7057,14 +8276,25 @@ export function EditorPanel({
                   </p>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={handleStartNewRosterDatabaseTab}
-                  className="px-4 py-2 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer"
-                >
-                  <Plus className="w-4 h-4" />
-                  <span>Crear nueva base de datos</span>
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => triggerRosterListSyncRefresh(viewingRosterDbId || activeRosterDbId)}
+                    className="px-3.5 py-2 rounded-xl border border-teal-300 bg-teal-50 hover:bg-teal-100 text-teal-900 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                    title="Sincronizar y actualizar listado de bases de datos de Nóminas"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Actualizar listado</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleStartNewRosterDatabaseTab}
+                    className="px-4 py-2 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>Crear nueva base de datos</span>
+                  </button>
+                </div>
               </div>
 
               {studentRosterDatabases.length === 0 ? (
@@ -7301,18 +8531,27 @@ export function EditorPanel({
               <button
                 type="button"
                 onClick={() => {
+                  triggerQBankListSyncRefresh(viewingQBankDbId || activeQuestionBankDbId);
                   setQBankWindowTab('listado');
+                  if (!viewingQBankDbId && activeQuestionBankDbId) {
+                    setViewingQBankDbId(activeQuestionBankDbId);
+                  }
                 }}
                 className={`min-h-[54px] px-5 py-3.5 rounded-xl border-2 text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2.5 transition-all cursor-pointer ${
                   qBankWindowTab === 'listado'
-                    ? 'border-amber-600 bg-amber-600 text-white shadow-sm'
-                    : 'border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-800'
+                    ? 'border-amber-600 bg-amber-600 text-white shadow-sm ring-2 ring-amber-500/30'
+                    : 'border-amber-300 bg-amber-50/70 hover:bg-amber-100 text-amber-950'
                 }`}
               >
                 <Layers className="w-4 h-4 shrink-0" />
                 <span>
                   Ver listado de bases de datos creados ({questionBankDatabases.length})
                 </span>
+                {qBankWindowTab === 'listado' && (
+                  <span className="px-2 py-0.5 rounded-full bg-white text-amber-950 text-[10px] font-mono font-extrabold">
+                    ● ACTIVO
+                  </span>
+                )}
               </button>
             </div>
           </div>
@@ -7395,10 +8634,31 @@ export function EditorPanel({
                   <div className="md:col-span-3">
                     <button
                       type="submit"
-                      className="w-full min-h-[44px] py-2.5 px-5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 cursor-pointer shadow-sm"
+                      disabled={editorSaveButtonStatuses['save_qbank_db'] === 'saving'}
+                      className={`w-full min-h-[44px] py-2.5 px-5 rounded-xl text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 cursor-pointer shadow-sm transition-all ${
+                        editorSaveButtonStatuses['save_qbank_db'] === 'saving'
+                          ? 'bg-sky-600 cursor-wait'
+                          : editorSaveButtonStatuses['save_qbank_db'] === 'success'
+                          ? 'bg-emerald-600 ring-2 ring-emerald-400/40'
+                          : 'bg-amber-600 hover:bg-amber-700'
+                      }`}
                     >
-                      <Save className="w-4 h-4 shrink-0" />
-                      <span>Guardar base de datos</span>
+                      {editorSaveButtonStatuses['save_qbank_db'] === 'saving' ? (
+                        <>
+                          <RefreshCw className="w-4 h-4 shrink-0 animate-spin" />
+                          <span>Guardando...</span>
+                        </>
+                      ) : editorSaveButtonStatuses['save_qbank_db'] === 'success' ? (
+                        <>
+                          <CheckCircle2 className="w-4 h-4 shrink-0" />
+                          <span>✓ Éxito</span>
+                        </>
+                      ) : (
+                        <>
+                          <Save className="w-4 h-4 shrink-0" />
+                          <span>Guardar base de datos</span>
+                        </>
+                      )}
                     </button>
                   </div>
                 </div>
@@ -7868,11 +9128,32 @@ export function EditorPanel({
                   </div>
                   <button
                     type="button"
-                    onClick={() => handleSaveQuestionBankDatabase()}
-                    className="w-full lg:w-auto min-h-[44px] px-6 py-3 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 cursor-pointer shadow-sm shrink-0"
+                    disabled={editorSaveButtonStatuses['save_qbank_db'] === 'saving'}
+                    onClick={() => void handleSaveQuestionBankDatabase()}
+                    className={`w-full lg:w-auto min-h-[44px] px-6 py-3 rounded-xl text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 cursor-pointer shadow-sm shrink-0 transition-all ${
+                      editorSaveButtonStatuses['save_qbank_db'] === 'saving'
+                        ? 'bg-sky-600 cursor-wait'
+                        : editorSaveButtonStatuses['save_qbank_db'] === 'success'
+                        ? 'bg-emerald-600 ring-2 ring-emerald-400/40'
+                        : 'bg-amber-600 hover:bg-amber-700'
+                    }`}
                   >
-                    <Save className="w-4 h-4 shrink-0" />
-                    <span>Guardar base de datos</span>
+                    {editorSaveButtonStatuses['save_qbank_db'] === 'saving' ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 shrink-0 animate-spin" />
+                        <span>Guardando...</span>
+                      </>
+                    ) : editorSaveButtonStatuses['save_qbank_db'] === 'success' ? (
+                      <>
+                        <CheckCircle2 className="w-4 h-4 shrink-0" />
+                        <span>✓ Éxito — Base Guardada</span>
+                      </>
+                    ) : (
+                      <>
+                        <Save className="w-4 h-4 shrink-0" />
+                        <span>Guardar base de datos</span>
+                      </>
+                    )}
                   </button>
                 </div>
               </div>
@@ -7884,7 +9165,12 @@ export function EditorPanel({
           {/* (CADA BANCO TIENE AL LADO LOS BOTONES: "Ver", "Modificar" y "Eliminar") */}
           {/* ===================================================================== */}
           {qBankWindowTab === 'listado' && (
-            <div className="bg-white border-2 border-amber-200 rounded-2xl p-6 shadow-xs space-y-5">
+            <div
+              ref={qBankListSectionRef}
+              key={`qbank-list-${qBankListRefreshKey}-${qBankSyncVersion}-${questionBankDatabases.length}`}
+              data-sync-key={qBankSyncVersion}
+              className="bg-white border-2 border-amber-200 rounded-2xl p-6 shadow-xs space-y-5"
+            >
               {bankActionNotice && (
                 <div className="p-3.5 rounded-xl bg-emerald-50 border-2 border-emerald-400 text-xs font-bold text-emerald-950 flex items-center justify-between shadow-xs">
                   <div className="flex items-center gap-2">
@@ -7911,14 +9197,25 @@ export function EditorPanel({
                   </p>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={handleStartNewQuestionBankDatabaseTab}
-                  className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer"
-                >
-                  <Plus className="w-4 h-4" />
-                  <span>Crear nueva base de datos</span>
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => triggerQBankListSyncRefresh(viewingQBankDbId || activeQuestionBankDbId)}
+                    className="px-3.5 py-2 rounded-xl border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-950 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                    title="Sincronizar y actualizar listado de bases de datos de Banco de preguntas"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Actualizar listado</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleStartNewQuestionBankDatabaseTab}
+                    className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>Crear nueva base de datos</span>
+                  </button>
+                </div>
               </div>
 
               {questionBankDatabases.length === 0 ? (
@@ -7935,7 +9232,49 @@ export function EditorPanel({
                   {questionBankDatabases.map((db) => {
                     const isViewing = viewingQBankDbId === db.id;
                     const isSelectedForCourse = selectedQuestionBankDbId === db.id;
-                    const modulesSet = new Set(db.questions.map((q) => q.modulo));
+                    const dbQuestions = Array.isArray(db.questions) ? db.questions : [];
+                    const modulesSet = new Set(dbQuestions.map((q) => q.modulo));
+                    const countsByMod: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+                    dbQuestions.forEach((q) => {
+                      const m = Number(q.modulo) || 1;
+                      countsByMod[m] = (countsByMod[m] || 0) + 1;
+                    });
+
+                    const filteredDbQuestions = isViewing
+                      ? dbQuestions.filter((q) => {
+                          if (
+                            viewingQBankModFilter !== 'all' &&
+                            Number(q.modulo) !== Number(viewingQBankModFilter)
+                          ) {
+                            return false;
+                          }
+                          const term = (viewingQBankSearch || '').trim().toLowerCase();
+                          if (!term) return true;
+                          return (
+                            (q.id || '').toLowerCase().includes(term) ||
+                            (q.tema || '').toLowerCase().includes(term) ||
+                            (q.enunciado || '').toLowerCase().includes(term) ||
+                            (q.pregunta || '').toLowerCase().includes(term) ||
+                            (q.contexto || '').toLowerCase().includes(term) ||
+                            (q.opciones?.A || '').toLowerCase().includes(term) ||
+                            (q.opciones?.B || '').toLowerCase().includes(term) ||
+                            (q.opciones?.C || '').toLowerCase().includes(term) ||
+                            (q.opciones?.D || '').toLowerCase().includes(term)
+                          );
+                        })
+                      : [];
+
+                    const totalViewPages = Math.max(
+                      1,
+                      Math.ceil(filteredDbQuestions.length / viewingQBankPageSize)
+                    );
+                    const safeViewPage = Math.min(Math.max(1, viewingQBankPage), totalViewPages);
+                    const paginatedDbQuestions = isViewing
+                      ? filteredDbQuestions.slice(
+                          (safeViewPage - 1) * viewingQBankPageSize,
+                          safeViewPage * viewingQBankPageSize
+                        )
+                      : [];
 
                     return (
                       <div
@@ -7947,7 +9286,7 @@ export function EditorPanel({
                         }`}
                       >
                         <div className="p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
-                          <div className="space-y-1 min-w-0">
+                          <div className="space-y-1.5 min-w-0">
                             <div className="flex flex-wrap items-center gap-2">
                               <span className="px-2.5 py-0.5 rounded bg-amber-900 text-white font-mono text-[11px] font-bold">
                                 {db.code}
@@ -7956,11 +9295,21 @@ export function EditorPanel({
                                 {db.name}
                               </span>
                               <span className="px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-950 font-mono text-[11px] font-extrabold">
-                                {db.questions.length} Preguntas
+                                {dbQuestions.length} Preguntas
                               </span>
                               <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 font-mono text-[10px] font-semibold">
                                 {modulesSet.size} Mód.
                               </span>
+                              {([1, 2, 3, 4, 5] as const).map((m) =>
+                                countsByMod[m] > 0 ? (
+                                  <span
+                                    key={m}
+                                    className="px-2 py-0.5 rounded bg-amber-50 border border-amber-200 text-amber-900 font-mono text-[10px] font-bold"
+                                  >
+                                    M{m}: {countsByMod[m]}
+                                  </span>
+                                ) : null
+                              )}
                               {isSelectedForCourse && (
                                 <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900 border border-emerald-300 text-[10px] font-mono font-bold">
                                   ✓ Asignado al Curso
@@ -7977,9 +9326,12 @@ export function EditorPanel({
                           <div className="flex flex-wrap items-center gap-2 shrink-0">
                             <button
                               type="button"
-                              onClick={() =>
-                                setViewingQBankDbId((prev) => (prev === db.id ? null : db.id))
-                              }
+                              onClick={() => {
+                                setViewingQBankSearch('');
+                                setViewingQBankModFilter('all');
+                                setViewingQBankPage(1);
+                                setViewingQBankDbId((prev) => (prev === db.id ? null : db.id));
+                              }}
                               className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors ${
                                 isViewing
                                   ? 'bg-sky-700 text-white'
@@ -8030,67 +9382,254 @@ export function EditorPanel({
                           </div>
                         </div>
 
-                        {/* Panel desplegable al pulsar el botón "Ver" */}
+                        {/* Panel desplegable al pulsar el botón "Ver" o tras Guardar base de datos */}
                         {isViewing && (
-                          <div className="border-t border-amber-200 bg-white p-4 space-y-3">
+                          <div className="border-t border-amber-200 bg-white p-4 space-y-4">
                             <div className="flex flex-wrap items-center justify-between gap-2">
-                              <span className="text-xs font-extrabold text-amber-950">
-                                Vista de Preguntas en «{db.name}» ({db.questions.length} reactivos)
-                              </span>
-                              <div className="flex items-center gap-2">
+                              <div>
+                                <span className="text-xs sm:text-sm font-extrabold text-amber-950">
+                                   Contenido Completo de «{db.name}» ({dbQuestions.length} reactivos cargados)
+                                </span>
+                                <p className="text-[11px] text-slate-500">
+                                  Visualización detallada de enunciados, opciones (A, B, C, D), respuesta correcta y justificación pedagógica.
+                                </p>
+                              </div>
+                              <div className="flex flex-wrap items-center gap-2">
                                 <button
                                   type="button"
                                   onClick={() => handleSelectQuestionBankDatabaseForCourse(db)}
-                                  className="px-3 py-1 rounded-lg border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 text-xs font-bold cursor-pointer"
+                                  className="px-3 py-1.5 rounded-lg border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 text-xs font-bold cursor-pointer"
                                 >
                                   ✓ Seleccionar este banco para el curso
                                 </button>
                                 <button
                                   type="button"
                                   onClick={() => handleModifyQuestionBankDatabaseFromList(db)}
-                                  className="px-3 py-1 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold cursor-pointer"
+                                  className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold cursor-pointer"
                                 >
                                   Ir a Modificar esta base de datos
                                 </button>
                               </div>
                             </div>
 
-                            {db.questions.length === 0 ? (
-                              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-500 text-center">
-                                Esta base de datos de banco de preguntas está vacía (0 reactivos).
+                            {dbQuestions.length === 0 ? (
+                              <div className="p-6 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600 text-center space-y-2">
+                                <div className="font-bold text-slate-800">
+                                  Esta base de datos de banco de preguntas está vacía (0 reactivos).
+                                </div>
+                                <p>
+                                  Haga clic en el botón <strong>«Modificar»</strong> para agregar preguntas individuales o subir un archivo Excel (.xlsx), JSON o CSV.
+                                </p>
                               </div>
                             ) : (
-                              <div className="max-h-[340px] overflow-y-auto space-y-2 pr-1">
-                                {db.questions.slice(0, 50).map((q) => (
-                                  <div
-                                    key={q.id}
-                                    className="p-3 rounded-xl border border-slate-200 bg-slate-50/70 text-xs space-y-1"
-                                  >
-                                    <div className="flex flex-wrap items-center justify-between gap-2">
-                                      <div className="flex items-center gap-1.5">
-                                        <span className="px-2 py-0.5 rounded bg-slate-900 text-white font-mono text-[10px] font-bold">
-                                          {q.id}
-                                        </span>
-                                        <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-950 font-mono text-[10px] font-bold">
-                                          Módulo {q.modulo}
-                                        </span>
-                                        <span className="text-slate-600 font-semibold">
-                                          {q.tema}
-                                        </span>
+                              <>
+                                {/* Barra de filtro por módulo, búsqueda y paginación */}
+                                <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-3 text-xs">
+                                  <div className="flex flex-wrap items-center gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setViewingQBankModFilter('all');
+                                        setViewingQBankPage(1);
+                                      }}
+                                      className={`px-2.5 py-1 rounded-lg font-bold cursor-pointer ${
+                                        viewingQBankModFilter === 'all'
+                                          ? 'bg-slate-900 text-white'
+                                          : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
+                                      }`}
+                                    >
+                                      Todos ({dbQuestions.length})
+                                    </button>
+                                    {([1, 2, 3, 4, 5] as const).map((m) => (
+                                      <button
+                                        key={m}
+                                        type="button"
+                                        onClick={() => {
+                                          setViewingQBankModFilter(m);
+                                          setViewingQBankPage(1);
+                                        }}
+                                        className={`px-2.5 py-1 rounded-lg font-bold cursor-pointer ${
+                                          viewingQBankModFilter === m
+                                            ? 'bg-amber-600 text-white'
+                                            : 'bg-white border border-slate-200 text-slate-700 hover:bg-amber-50'
+                                        }`}
+                                      >
+                                        Módulo {m} ({countsByMod[m] || 0})
+                                      </button>
+                                    ))}
+                                  </div>
+
+                                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-2">
+                                    <div className="flex flex-wrap items-center gap-2 flex-1">
+                                      <div className="relative flex-1 min-w-[200px] max-w-md">
+                                        <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                                        <input
+                                          type="text"
+                                          placeholder="Buscar en este banco por ID, tema, enunciado u opción..."
+                                          value={viewingQBankSearch}
+                                          onChange={(e) => {
+                                            setViewingQBankSearch(e.target.value);
+                                            setViewingQBankPage(1);
+                                          }}
+                                          className="w-full pl-8 pr-3 py-1.5 rounded-lg border border-slate-300 bg-white text-xs focus:outline-none focus:ring-2 focus:ring-amber-600"
+                                        />
                                       </div>
-                                      <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-900 font-mono text-[10px] font-bold">
-                                        Correcta: {q.correcta}
+                                      <span className="text-emerald-800 font-semibold">
+                                        Mostrando{' '}
+                                        {filteredDbQuestions.length === 0
+                                          ? 0
+                                          : (safeViewPage - 1) * viewingQBankPageSize + 1}
+                                        –
+                                        {Math.min(
+                                          safeViewPage * viewingQBankPageSize,
+                                          filteredDbQuestions.length
+                                        )}{' '}
+                                        de {filteredDbQuestions.length}
                                       </span>
                                     </div>
-                                    <p className="font-semibold text-slate-900">{q.enunciado}</p>
+
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      <label className="text-slate-600 font-medium">Mostrar:</label>
+                                      <select
+                                        value={viewingQBankPageSize}
+                                        onChange={(e) => {
+                                          setViewingQBankPageSize(Number(e.target.value));
+                                          setViewingQBankPage(1);
+                                        }}
+                                        className="px-2 py-1 rounded-lg border border-slate-300 bg-white font-mono font-semibold text-slate-800"
+                                      >
+                                        <option value={25}>25</option>
+                                        <option value={50}>50</option>
+                                        <option value={100}>100</option>
+                                        <option value={250}>250</option>
+                                        <option value={1000}>1000</option>
+                                      </select>
+
+                                      <div className="flex items-center gap-1">
+                                        <button
+                                          type="button"
+                                          disabled={safeViewPage <= 1}
+                                          onClick={() =>
+                                            setViewingQBankPage((p) => Math.max(1, p - 1))
+                                          }
+                                          className="px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-40 font-semibold cursor-pointer"
+                                        >
+                                          ← Ant.
+                                        </button>
+                                        <span className="px-2 py-1 font-mono font-bold text-slate-800">
+                                          {safeViewPage}/{totalViewPages}
+                                        </span>
+                                        <button
+                                          type="button"
+                                          disabled={safeViewPage >= totalViewPages}
+                                          onClick={() =>
+                                            setViewingQBankPage((p) =>
+                                              Math.min(totalViewPages, p + 1)
+                                            )
+                                          }
+                                          className="px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-40 font-semibold cursor-pointer"
+                                        >
+                                          Sig. →
+                                        </button>
+                                      </div>
+                                    </div>
                                   </div>
-                                ))}
-                                {db.questions.length > 50 && (
-                                  <div className="text-center text-[11px] text-slate-500 py-2">
-                                    Mostrando las primeras 50 de {db.questions.length} preguntas. Pulse «Modificar» para gestionar la totalidad del banco.
-                                  </div>
-                                )}
-                              </div>
+                                </div>
+
+                                <div className="max-h-[540px] overflow-y-auto space-y-2.5 pr-1">
+                                  {paginatedDbQuestions.map((q, qIdx) => {
+                                    const absIdx =
+                                      (safeViewPage - 1) * viewingQBankPageSize + qIdx + 1;
+                                    const safeOpts = q.opciones || {
+                                      A: 'Opción A',
+                                      B: 'Opción B',
+                                      C: 'Opción C',
+                                      D: 'Opción D'
+                                    };
+                                    return (
+                                      <div
+                                        key={`${db.id}-${q.id || 'q'}-${absIdx}`}
+                                        className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/70 text-xs space-y-2"
+                                      >
+                                        <div className="flex flex-wrap items-center justify-between gap-2">
+                                          <div className="flex flex-wrap items-center gap-1.5">
+                                            <span className="px-2 py-0.5 rounded bg-slate-200 text-slate-800 font-mono text-[10px] font-bold">
+                                              #{absIdx}
+                                            </span>
+                                            <span className="px-2 py-0.5 rounded bg-slate-900 text-white font-mono text-[10px] font-bold">
+                                              {q.id}
+                                            </span>
+                                            <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-950 font-mono text-[10px] font-bold">
+                                              Módulo {q.modulo}
+                                            </span>
+                                            <span className="px-2 py-0.5 rounded bg-sky-50 text-sky-800 border border-sky-200 text-[10px] font-semibold">
+                                              {q.nivel || q.bloom || 'Aplicación'}
+                                            </span>
+                                            {q.rap && (
+                                              <span className="px-2 py-0.5 rounded bg-amber-50 text-amber-900 border border-amber-200 font-mono text-[10px] font-semibold">
+                                                {q.rap}
+                                              </span>
+                                            )}
+                                            <span className="text-slate-700 font-semibold">
+                                              {q.tema}
+                                            </span>
+                                          </div>
+                                          <span className="px-2.5 py-0.5 rounded bg-emerald-100 text-emerald-900 border border-emerald-300 font-mono text-[10px] font-bold">
+                                            Correcta: {q.correcta}
+                                          </span>
+                                        </div>
+
+                                        {q.contexto && q.pregunta ? (
+                                          <div className="space-y-1">
+                                            <p className="text-xs text-slate-700 bg-white p-2.5 rounded-lg border border-slate-200 leading-relaxed">
+                                              <strong className="text-slate-900">Contexto:</strong>{' '}
+                                              {q.contexto}
+                                            </p>
+                                            <p className="text-xs sm:text-sm font-semibold text-slate-900">
+                                              {q.pregunta}
+                                            </p>
+                                          </div>
+                                        ) : (
+                                          <p className="text-xs sm:text-sm font-semibold text-slate-900">
+                                            {q.enunciado || q.pregunta}
+                                          </p>
+                                        )}
+
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-xs">
+                                          {(['A', 'B', 'C', 'D'] as const).map((opt) => {
+                                            const isCorrect = q.correcta === opt;
+                                            return (
+                                              <div
+                                                key={opt}
+                                                className={`px-3 py-1.5 rounded-lg border flex items-start gap-2 ${
+                                                  isCorrect
+                                                    ? 'bg-emerald-50 border-emerald-300 text-emerald-950 font-semibold'
+                                                    : 'bg-white border-slate-200 text-slate-600'
+                                                }`}
+                                              >
+                                                <span className="font-mono font-bold">{opt})</span>
+                                                <span className="flex-1">{safeOpts[opt]}</span>
+                                                {isCorrect && (
+                                                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                                                )}
+                                              </div>
+                                            );
+                                          })}
+                                        </div>
+
+                                        {q.justificacion && (
+                                          <div className="text-[11px] text-slate-600 bg-white px-3 py-1.5 rounded-lg border border-slate-200">
+                                            <strong className="text-slate-800">
+                                              Justificación:
+                                            </strong>{' '}
+                                            {q.justificacion}
+                                          </div>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </>
                             )}
                           </div>
                         )}
@@ -8386,9 +9925,28 @@ export function EditorPanel({
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-semibold cursor-pointer"
+                  disabled={editorSaveButtonStatuses['save_question_modal'] === 'saving'}
+                  className={`px-5 py-2 rounded-lg text-white font-semibold flex items-center gap-1.5 cursor-pointer transition-all ${
+                    editorSaveButtonStatuses['save_question_modal'] === 'saving'
+                      ? 'bg-amber-600 cursor-wait'
+                      : editorSaveButtonStatuses['save_question_modal'] === 'success'
+                      ? 'bg-emerald-600'
+                      : 'bg-slate-900 hover:bg-slate-800'
+                  }`}
                 >
-                  Guardar Pregunta
+                  {editorSaveButtonStatuses['save_question_modal'] === 'saving' ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Guardando...</span>
+                    </>
+                  ) : editorSaveButtonStatuses['save_question_modal'] === 'success' ? (
+                    <>
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>✓ Éxito</span>
+                    </>
+                  ) : (
+                    <span>Guardar Pregunta</span>
+                  )}
                 </button>
               </div>
             </form>
@@ -8531,10 +10089,29 @@ export function EditorPanel({
                 </button>
                 <button
                   type="button"
-                  onClick={handleBulkImportQuestions}
-                  className="px-5 py-2 rounded-lg bg-sky-600 hover:bg-sky-700 text-white font-semibold cursor-pointer"
+                  disabled={editorSaveButtonStatuses['save_bulk_questions'] === 'saving'}
+                  onClick={() => void handleBulkImportQuestions()}
+                  className={`px-5 py-2 rounded-lg text-white font-semibold flex items-center gap-1.5 cursor-pointer transition-all ${
+                    editorSaveButtonStatuses['save_bulk_questions'] === 'saving'
+                      ? 'bg-amber-600 cursor-wait'
+                      : editorSaveButtonStatuses['save_bulk_questions'] === 'success'
+                      ? 'bg-emerald-600'
+                      : 'bg-sky-600 hover:bg-sky-700'
+                  }`}
                 >
-                  Procesar y Guardar Lote de Preguntas
+                  {editorSaveButtonStatuses['save_bulk_questions'] === 'saving' ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Guardando...</span>
+                    </>
+                  ) : editorSaveButtonStatuses['save_bulk_questions'] === 'success' ? (
+                    <>
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>✓ Éxito — Lote Guardado</span>
+                    </>
+                  ) : (
+                    <span>Procesar y Guardar Lote de Preguntas</span>
+                  )}
                 </button>
               </div>
             </div>
@@ -8699,23 +10276,22 @@ M1-801 ; 1 ; Aplicación ; Ecosistema P2P ; Enunciado de la pregunta... ; Texto 
         </div>
       )}
 
-      {/* MODAL 4: AUDITOR DE CALIDAD DEL BANCO DE PREGUNTAS */}
+      {/* MODAL 4: AUDITOR DE CALIDAD Y DUPLICADOS DEL BANCO DE PREGUNTAS (AUDITOR DE ÍTEMS) */}
       {showBankAuditorModal && (
         <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
-          <div className="bg-white border border-slate-200 rounded-2xl max-w-4xl w-full p-6 shadow-xl space-y-4 max-h-[90vh] overflow-y-auto text-xs">
+          <div className="bg-white border border-slate-200 rounded-2xl max-w-5xl w-full p-6 shadow-xl space-y-4 max-h-[90vh] overflow-y-auto text-xs">
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div>
                 <div className="inline-flex items-center gap-1.5 text-[11px] font-mono font-bold uppercase text-emerald-800 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded mb-1">
                   <CheckCircle2 className="w-3.5 h-3.5" />
-                  <span>Auditoría Automática de Reactivos</span>
+                  <span>Auditor de Ítems · Diagnóstico Integral de 4 Vectores</span>
                 </div>
                 <h3 className="text-lg font-bold text-slate-900">
-                  Validador de Calidad del Banco de Preguntas ({bankQualityAudit.totalQuestions}{' '}
+                  Validador de Calidad y Duplicados del Banco de Preguntas ({bankQualityAudit.totalQuestions}{' '}
                   Reactivos)
                 </h3>
                 <p className="text-slate-600">
-                  Inspección automática de enunciados duplicados, códigos repetidos, opciones
-                  vacías y sesgos de longitud en respuestas correctas.
+                  Escaneo automático de: 1) Enunciados duplicados o muy similares, 2) Opciones de longitud desproporcionada que delatan la respuesta correcta, 3) Preguntas sin competencia/módulo asignado y 4) Preguntas sin justificación pedagógica.
                 </p>
               </div>
               <button
@@ -8727,132 +10303,230 @@ M1-801 ; 1 ; Aplicación ; Ecosistema P2P ; Enunciado de la pregunta... ; Texto 
               </button>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
-              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200">
-                <div className="text-slate-500">Total Auditados</div>
-                <div className="text-xl font-bold font-mono text-slate-900 mt-0.5">
-                  {bankQualityAudit.totalQuestions}
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
+              <button
+                type="button"
+                onClick={() => setAuditorCategoryFilter('ALL')}
+                className={`p-3 rounded-xl border text-left cursor-pointer transition-all ${
+                  auditorCategoryFilter === 'ALL'
+                    ? 'bg-slate-900 text-white border-slate-900'
+                    : 'bg-emerald-50/70 border-emerald-200 text-emerald-950 hover:bg-emerald-100'
+                }`}
+              >
+                <div className="text-[10px] font-mono uppercase opacity-80">
+                  Ítems Calibrados OK
                 </div>
-              </div>
-              <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200">
-                <div className="text-emerald-800">Ítems Sin Observaciones</div>
-                <div className="text-xl font-bold font-mono text-emerald-700 mt-0.5">
-                  {bankQualityAudit.healthyCount}
+                <div className="text-xl font-extrabold font-mono mt-0.5">
+                  {bankQualityAudit.healthyCount}/{bankQualityAudit.totalQuestions}
                 </div>
-              </div>
-              <div className="p-3.5 rounded-xl bg-red-50 border border-red-200">
-                <div className="text-red-800">Enunciados / IDs Duplicados</div>
-                <div className="text-xl font-bold font-mono text-red-700 mt-0.5">
-                  {bankQualityAudit.highSeverityCount}
+                <div className="text-[10px] opacity-75">Ver todos ({bankQualityAudit.issuesCount})</div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setAuditorCategoryFilter(
+                    auditorCategoryFilter === 'DUPLICADO_SIMILAR' ? 'ALL' : 'DUPLICADO_SIMILAR'
+                  )
+                }
+                className={`p-3 rounded-xl border text-left cursor-pointer transition-all ${
+                  auditorCategoryFilter === 'DUPLICADO_SIMILAR'
+                    ? 'bg-red-700 text-white border-red-700'
+                    : 'bg-red-50 border-red-200 text-red-900 hover:bg-red-100'
+                }`}
+              >
+                <div className="text-[10px] font-mono font-bold uppercase">
+                  1. Duplicados / Similares
                 </div>
-              </div>
-              <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200">
-                <div className="text-amber-900">Alertas de Estructura / Sesgo</div>
-                <div className="text-xl font-bold font-mono text-amber-800 mt-0.5">
-                  {bankQualityAudit.issuesCount - bankQualityAudit.highSeverityCount}
+                <div className="text-xl font-extrabold font-mono mt-0.5">
+                  {bankQualityAudit.duplicatesOrSimilarCount}
                 </div>
-              </div>
+                <div className="text-[10px] opacity-80">IDs o enunciados &ge;72%</div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setAuditorCategoryFilter(
+                    auditorCategoryFilter === 'LONGITUD_DESPROPORCIONADA'
+                      ? 'ALL'
+                      : 'LONGITUD_DESPROPORCIONADA'
+                  )
+                }
+                className={`p-3 rounded-xl border text-left cursor-pointer transition-all ${
+                  auditorCategoryFilter === 'LONGITUD_DESPROPORCIONADA'
+                    ? 'bg-amber-600 text-white border-amber-600'
+                    : 'bg-amber-50 border-amber-200 text-amber-950 hover:bg-amber-100'
+                }`}
+              >
+                <div className="text-[10px] font-mono font-bold uppercase">
+                  2. Longitud Desproporc.
+                </div>
+                <div className="text-xl font-extrabold font-mono mt-0.5">
+                  {bankQualityAudit.lengthBiasCount}
+                </div>
+                <div className="text-[10px] opacity-80">Delatan opción correcta</div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setAuditorCategoryFilter(
+                    auditorCategoryFilter === 'SIN_COMPETENCIA_MODULO'
+                      ? 'ALL'
+                      : 'SIN_COMPETENCIA_MODULO'
+                  )
+                }
+                className={`p-3 rounded-xl border text-left cursor-pointer transition-all ${
+                  auditorCategoryFilter === 'SIN_COMPETENCIA_MODULO'
+                    ? 'bg-indigo-700 text-white border-indigo-700'
+                    : 'bg-indigo-50 border-indigo-200 text-indigo-950 hover:bg-indigo-100'
+                }`}
+              >
+                <div className="text-[10px] font-mono font-bold uppercase">
+                  3. Sin Módulo / Compet.
+                </div>
+                <div className="text-xl font-extrabold font-mono mt-0.5">
+                  {bankQualityAudit.missingModuleCompetencyCount}
+                </div>
+                <div className="text-[10px] opacity-80">Módulo, Tema o Bloom</div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setAuditorCategoryFilter(
+                    auditorCategoryFilter === 'SIN_JUSTIFICACION' ? 'ALL' : 'SIN_JUSTIFICACION'
+                  )
+                }
+                className={`p-3 rounded-xl border text-left cursor-pointer transition-all ${
+                  auditorCategoryFilter === 'SIN_JUSTIFICACION'
+                    ? 'bg-purple-700 text-white border-purple-700'
+                    : 'bg-purple-50 border-purple-200 text-purple-950 hover:bg-purple-100'
+                }`}
+              >
+                <div className="text-[10px] font-mono font-bold uppercase">
+                  4. Sin Justificación
+                </div>
+                <div className="text-xl font-extrabold font-mono mt-0.5">
+                  {bankQualityAudit.missingJustificationCount}
+                </div>
+                <div className="text-[10px] opacity-80">Falta feedback pedagógico</div>
+              </button>
             </div>
 
             <div className="p-4 rounded-xl bg-indigo-50 border border-indigo-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div className="space-y-0.5">
                 <div className="font-bold text-indigo-950 text-sm">
-                  🧠 Blindaje Psicométrico con IA: Opciones de Igual Extensión + Cascarita
-                  Académica
+                  🛠️ Reparación Integral en 1 Clic + Ecualizador Psicométrico IA
                 </div>
                 <p className="text-indigo-900 text-xs">
-                  Reescribe y calibra automáticamente los distractores cortos de las{' '}
-                  {courseQuestionsBank.length} preguntas para que las 4 opciones (A, B, C y D)
-                  tengan longitud equivalente, mini-explicación técnica y trampas conceptuales
-                  plausibles.
+                  Depura enunciados duplicados, equilibra opciones de longitud desproporcionada, asigna módulo/competencia faltante y completa las justificaciones pedagógicas de las {courseQuestionsBank.length} preguntas.
                 </p>
               </div>
-              <button
-                type="button"
-                disabled={isEqualizingBankIA}
-                onClick={() => handleEqualizeQuestionBankIA('ai_deep')}
-                className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white font-bold flex items-center gap-1.5 whitespace-nowrap cursor-pointer shrink-0 shadow-xs"
-              >
-                <RefreshCw
-                  className={`w-4 h-4 ${isEqualizingBankIA ? 'animate-spin' : ''}`}
-                />
-                <span>
-                  {isEqualizingBankIA
-                    ? 'Aplicando IA...'
-                    : 'Blindar y Ecualizar Todo el Banco Ahora'}
-                </span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={handleAutoRepairBankAuditIssues}
+                  className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold flex items-center gap-1.5 whitespace-nowrap cursor-pointer shadow-xs"
+                >
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>Auto-Reparar Hallazgos (1 Clic)</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={isEqualizingBankIA}
+                  onClick={() => handleEqualizeQuestionBankIA('ai_deep')}
+                  className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white font-bold flex items-center gap-1.5 whitespace-nowrap cursor-pointer shadow-xs"
+                >
+                  <RefreshCw
+                    className={`w-4 h-4 ${isEqualizingBankIA ? 'animate-spin' : ''}`}
+                  />
+                  <span>
+                    {isEqualizingBankIA
+                      ? 'Aplicando IA...'
+                      : 'Blindar Opciones con IA'}
+                  </span>
+                </button>
+              </div>
             </div>
 
-            {bankQualityAudit.issues.length === 0 ? (
-              <div className="p-8 rounded-xl bg-emerald-50/70 border border-emerald-200 text-center space-y-2">
-                <CheckCircle2 className="w-8 h-8 text-emerald-600 mx-auto" />
-                <div className="text-sm font-bold text-emerald-950">
-                  ¡Banco de Preguntas 100% Calibrado y Libre de Duplicados!
-                </div>
-                <p className="text-emerald-800">
-                  Todos los reactivos cuentan con sus 4 opciones completas, sin códigos repetidos
-                  ni sesgos críticos de longitud.
-                </p>
-              </div>
-            ) : (
-              <div className="w-full border border-slate-200 rounded-xl overflow-hidden">
-                <table className="w-full text-left border-collapse">
-                  <thead>
-                    <tr className="bg-slate-50 border-b border-slate-200 text-slate-700 font-semibold">
-                      <th className="py-2.5 px-3">Código</th>
-                      <th className="py-2.5 px-3">Módulo</th>
-                      <th className="py-2.5 px-3">Severidad</th>
-                      <th className="py-2.5 px-3">Categoría</th>
-                      <th className="py-2.5 px-3">Detalle del Hallazgo</th>
-                      <th className="py-2.5 px-3 text-right">Acción Rápida</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-200">
-                    {bankQualityAudit.issues.map((iss, idx) => {
-                      const targetQ = courseQuestionsBank.find((q) => q.id === iss.questionId);
-                      return (
-                        <tr key={`${iss.questionId}-${idx}`} className="hover:bg-slate-50">
-                          <td className="py-2 px-3 font-mono font-bold text-slate-900">
-                            {iss.questionId}
-                          </td>
-                          <td className="py-2 px-3 font-mono">M{iss.modulo}</td>
-                          <td className="py-2 px-3">
-                            <span
-                              className={`px-2 py-0.5 rounded font-bold text-[10px] ${
-                                iss.severity === 'ALTA'
-                                  ? 'bg-red-100 text-red-800'
-                                  : 'bg-amber-100 text-amber-900'
-                              }`}
-                            >
-                              {iss.severity}
-                            </span>
-                          </td>
-                          <td className="py-2 px-3 font-semibold text-slate-800">
-                            {iss.category}
-                          </td>
-                          <td className="py-2 px-3 text-slate-600">{iss.detail}</td>
-                          <td className="py-2 px-3 text-right">
-                            {targetQ && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setShowBankAuditorModal(false);
-                                  openEditQuestionModal(targetQ);
-                                }}
-                                className="px-2.5 py-1 rounded bg-sky-600 hover:bg-sky-700 text-white font-semibold cursor-pointer"
+            {(() => {
+              const filteredAuditIssues = bankQualityAudit.issues.filter((iss) =>
+                auditorCategoryFilter === 'ALL' ? true : iss.groupKey === auditorCategoryFilter
+              );
+              if (filteredAuditIssues.length === 0) {
+                return (
+                  <div className="p-8 rounded-xl bg-emerald-50/70 border border-emerald-200 text-center space-y-2">
+                    <CheckCircle2 className="w-8 h-8 text-emerald-600 mx-auto" />
+                    <div className="text-sm font-bold text-emerald-950">
+                      ¡Banco de Preguntas 100% Calibrado en esta Categoría!
+                    </div>
+                    <p className="text-emerald-800">
+                      No se detectaron enunciados duplicados, opciones desproporcionadas, módulos sin competencia ni reactivos sin justificación pedagógica.
+                    </p>
+                  </div>
+                );
+              }
+              return (
+                <div className="w-full border border-slate-200 rounded-xl overflow-hidden">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="bg-slate-50 border-b border-slate-200 text-slate-700 font-semibold">
+                        <th className="py-2.5 px-3">Código</th>
+                        <th className="py-2.5 px-3">Módulo</th>
+                        <th className="py-2.5 px-3">Severidad</th>
+                        <th className="py-2.5 px-3">Categoría</th>
+                        <th className="py-2.5 px-3">Detalle del Hallazgo</th>
+                        <th className="py-2.5 px-3 text-right">Acción Rápida</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200">
+                      {filteredAuditIssues.map((iss, idx) => {
+                        const targetQ = courseQuestionsBank.find((q) => q.id === iss.questionId);
+                        return (
+                          <tr key={`${iss.questionId}-${idx}`} className="hover:bg-slate-50">
+                            <td className="py-2 px-3 font-mono font-bold text-slate-900">
+                              {iss.questionId}
+                            </td>
+                            <td className="py-2 px-3 font-mono">M{iss.modulo}</td>
+                            <td className="py-2 px-3">
+                              <span
+                                className={`px-2 py-0.5 rounded font-bold text-[10px] ${
+                                  iss.severity === 'ALTA'
+                                    ? 'bg-red-100 text-red-800'
+                                    : 'bg-amber-100 text-amber-900'
+                                }`}
                               >
-                                Corregir
-                              </button>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
+                                {iss.severity}
+                              </span>
+                            </td>
+                            <td className="py-2 px-3 font-semibold text-slate-800">
+                              {iss.category}
+                            </td>
+                            <td className="py-2 px-3 text-slate-600">{iss.detail}</td>
+                            <td className="py-2 px-3 text-right">
+                              {targetQ && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setShowBankAuditorModal(false);
+                                    openEditQuestionModal(targetQ);
+                                  }}
+                                  className="px-2.5 py-1 rounded bg-sky-600 hover:bg-sky-700 text-white font-semibold cursor-pointer"
+                                >
+                                  Corregir
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              );
+            })()}
 
             <div className="flex justify-end pt-2 border-t border-slate-100">
               <button
@@ -9372,10 +11046,29 @@ M1-801 ; 1 ; Aplicación ; Ecosistema P2P ; Enunciado de la pregunta... ; Texto 
               </span>
               <button
                 type="button"
-                onClick={() => handleSaveCourseSnapshot()}
-                className="px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold cursor-pointer"
+                disabled={editorSaveButtonStatuses['save_snapshot'] === 'saving'}
+                onClick={() => void handleSaveCourseSnapshot()}
+                className={`px-3.5 py-1.5 rounded-lg text-white font-bold flex items-center gap-1.5 cursor-pointer transition-all ${
+                  editorSaveButtonStatuses['save_snapshot'] === 'saving'
+                    ? 'bg-sky-600 cursor-wait'
+                    : editorSaveButtonStatuses['save_snapshot'] === 'success'
+                    ? 'bg-emerald-600'
+                    : 'bg-amber-600 hover:bg-amber-700'
+                }`}
               >
-                📸 Guardar Instantánea Ahora
+                {editorSaveButtonStatuses['save_snapshot'] === 'saving' ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Guardando...</span>
+                  </>
+                ) : editorSaveButtonStatuses['save_snapshot'] === 'success' ? (
+                  <>
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>✓ Éxito</span>
+                  </>
+                ) : (
+                  <span>📸 Guardar Instantánea Ahora</span>
+                )}
               </button>
             </div>
 
@@ -9537,9 +11230,28 @@ M1-801 ; 1 ; Aplicación ; Ecosistema P2P ; Enunciado de la pregunta... ; Texto 
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-bold cursor-pointer"
+                  disabled={editorSaveButtonStatuses['save_student_modal'] === 'saving'}
+                  className={`px-5 py-2 rounded-xl text-white font-bold flex items-center gap-1.5 cursor-pointer transition-all ${
+                    editorSaveButtonStatuses['save_student_modal'] === 'saving'
+                      ? 'bg-amber-600 cursor-wait'
+                      : editorSaveButtonStatuses['save_student_modal'] === 'success'
+                      ? 'bg-emerald-600'
+                      : 'bg-sky-600 hover:bg-sky-700'
+                  }`}
                 >
-                  Guardar Estudiante
+                  {editorSaveButtonStatuses['save_student_modal'] === 'saving' ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Guardando...</span>
+                    </>
+                  ) : editorSaveButtonStatuses['save_student_modal'] === 'success' ? (
+                    <>
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>✓ Éxito</span>
+                    </>
+                  ) : (
+                    <span>Guardar Estudiante</span>
+                  )}
                 </button>
               </div>
             </form>

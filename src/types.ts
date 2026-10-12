@@ -284,6 +284,42 @@ export interface StudentServerAcademicSummary {
   totalLlamadosAntiTrampa: number;
 }
 
+export type AcademicReviewTicketType =
+  | 'RECALIFICACION_EXAMEN'
+  | 'REVISION_CORTE_NOTA'
+  | 'EXCUSA_INASISTENCIA';
+
+export type AcademicReviewTicketStatus = 'PENDIENTE' | 'APROBADA' | 'RECHAZADA';
+
+export interface AcademicReviewTicket {
+  id: string;
+  studentId: string;
+  studentName: string;
+  fechaCreacion: string;
+  createdAtIso: string;
+  timestampMs: number;
+  tipo: AcademicReviewTicketType;
+  referenciaId: string;
+  referenciaLabel: string;
+  targetId: string;
+  targetLabel: string;
+  preguntaReferencia?: string;
+  claseId?: 1 | 2 | 3 | 4 | 5 | 6;
+  bloqueExcusa?: 'A' | 'B' | 'AB';
+  notaActual?: number;
+  notaSolicitada?: number;
+  notaAprobada?: number;
+  motivoEstudiante: string;
+  enlaceEvidencia?: string;
+  soporteUrl?: string;
+  estado: AcademicReviewTicketStatus;
+  comentarioDocente?: string;
+  fechaResolucion?: string;
+  respondedAtIso?: string;
+  resueltoPor?: string;
+  ajusteAplicadoDetalle?: string;
+}
+
 export interface StudentRecord {
   id: string;
   nombre: string;
@@ -305,6 +341,7 @@ export interface StudentRecord {
   progresoRetos?: Partial<Record<1 | 2 | 3 | 4 | 5, StudentRetoModuleProgress>>;
   historialIntentosRetos?: MiniRetoAttemptRecord[];
   historialLlamadosAtencion?: AntiCheatLogEntry[];
+  solicitudesRevision?: AcademicReviewTicket[];
   resumenServidor?: StudentServerAcademicSummary;
 }
 
@@ -444,6 +481,10 @@ export interface SystemConfig {
   miniRetosHoraFin?: string; // ej. '22:00'
   umbralAprobacionMiniRetoPct?: number; // por defecto 60 (%)
   // =========================================================================
+  // MOTOR DE VIGENCIA DE CURSO Y PROGRAMACIÓN GRANULAR POR ACTIVIDAD (R1-R9)
+  // =========================================================================
+  courseScheduleConfig?: CourseScheduleConfig;
+  // =========================================================================
   // CONFIGURACIÓN UNIVERSAL MULTI-CURSO Y PANEL DE EDITORES (EDITOR2026)
   // =========================================================================
   activeCourseId?: string;
@@ -459,6 +500,66 @@ export interface SystemConfig {
   correoRecuperacionEditor?: string;
   requiereCambioClaveEditorInicial?: boolean;
   registeredTeachers?: TeacherAccountRecord[]; // Docentes registrados y sus cursos asignados por el Editor
+}
+
+export type AcademicActivityKey =
+  | 'CURSO_GENERAL'
+  | 'EXAMENES'
+  | 'TRABAJOS_TALLERES'
+  | 'MINI_RETOS'
+  | 'PARTICIPACION_ASISTENCIA';
+
+export type ActivityWindowOverrideMode =
+  | 'AUTO_CALENDAR'
+  | 'FORCE_OPEN'
+  | 'FORCE_CLOSED';
+
+export interface ActivityScheduleWindowConfig {
+  activityKey: AcademicActivityKey;
+  label: string;
+  subtitle?: string;
+  icon: string;
+  enabled: boolean; // Si true, evalúa rango de fechas, días y horas cuando overrideMode === 'AUTO_CALENDAR'
+  overrideMode: ActivityWindowOverrideMode;
+  openDate: string; // YYYY-MM-DD (ej. '2026-02-01')
+  closeDate: string; // YYYY-MM-DD (ej. '2026-11-30')
+  allowedDays: number[]; // 0=Dom, 1=Lun, 2=Mar, 3=Mié, 4=Jue, 5=Vie, 6=Sáb
+  startTime: string; // HH:mm (ej. '07:00')
+  endTime: string; // HH:mm (ej. '22:00')
+  // R3: Entregas Tardías con Penalización Automática ("Ventana de Gracia")
+  allowLateSubmission: boolean;
+  lateGraceHours: number; // Horas adicionales después del cierre de fecha o ventana horaria
+  latePenaltyPercent: number; // % de descuento automático sobre la calificación (ej. 15%)
+  maxGradeOnLate: number; // Nota máxima tope en entrega tardía (ej. 4.0)
+  // R1: Modo Consulta ("Solo Lectura") tras cierre
+  readOnlyAfterClose: boolean;
+  customClosedMessage?: string;
+}
+
+export interface StudentIndividualExtension {
+  id: string;
+  studentId: string;
+  studentName: string;
+  activityKey: AcademicActivityKey;
+  activityLabel: string;
+  expiresAtIso: string; // Fecha y hora límite ISO o YYYY-MM-DDTHH:mm
+  motivo: string;
+  sinPenalizacion: boolean; // Si exime la penalización por entrega tardía
+  grantedBy: string;
+  createdAtIso: string;
+  activa: boolean;
+}
+
+export interface CourseScheduleConfig {
+  courseOpenDate: string; // YYYY-MM-DD
+  courseOpenTime: string; // HH:mm
+  courseCloseDate: string; // YYYY-MM-DD
+  courseCloseTime: string; // HH:mm
+  courseStatusOverride: ActivityWindowOverrideMode;
+  readOnlyWhenClosed: boolean;
+  activityWindows: Record<AcademicActivityKey, ActivityScheduleWindowConfig>;
+  studentExtensions: StudentIndividualExtension[];
+  updatedAtIso: string;
 }
 
 export interface StudentRosterDatabaseEntry {
@@ -567,6 +668,7 @@ export interface UniversalCourseMetadata {
   selectedQuestionBankDbName?: string;
   modulosCurso: UniversalModuleDefinition[];
   examenesCurso: UniversalExamDefinition[];
+  courseScheduleConfig?: CourseScheduleConfig;
   updatedAtIso: string;
 }
 

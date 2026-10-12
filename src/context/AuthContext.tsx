@@ -33,11 +33,13 @@ export interface PersistedAuthSessionState {
   activeView: ActiveAppRoleView;
   studentSessionActive: boolean;
   verifiedStudentId: string | null;
+  studentSelectedCourseId?: string | null;
   studentDashboardTab: StudentDashboardTabType;
   selectedModality: ExamModality;
   studentExamPhase: 'login' | 'modality_select' | 'active_exam' | 'results';
   teacherSessionActive: boolean;
   teacherAuthenticatedId: string | null;
+  teacherSelectedCourseId?: string | null;
   teacherActiveTab: TeacherTabType;
   editorSessionActive?: boolean;
   editorAuthenticatedId?: string | null;
@@ -50,11 +52,13 @@ const DEFAULT_AUTH_STATE: PersistedAuthSessionState = {
   activeView: 'inicio',
   studentSessionActive: false,
   verifiedStudentId: null,
+  studentSelectedCourseId: null,
   studentDashboardTab: 'inicio',
   selectedModality: 'integral',
   studentExamPhase: 'login',
   teacherSessionActive: false,
   teacherAuthenticatedId: null,
+  teacherSelectedCourseId: null,
   teacherActiveTab: 'panel_central',
   editorSessionActive: false,
   editorAuthenticatedId: null,
@@ -131,11 +135,13 @@ interface AuthContextValue {
   setActiveView: (view: ActiveAppRoleView) => void;
   loginStudent: (studentId: string) => void;
   logoutStudent: () => void;
+  setStudentSelectedCourseId: (courseId: string | null) => void;
   setStudentDashboardTab: (tab: StudentDashboardTabType) => void;
   setSelectedModality: (modality: ExamModality) => void;
   setStudentExamPhase: (phase: 'login' | 'modality_select' | 'active_exam' | 'results') => void;
   loginTeacher: (teacherId: string) => void;
   logoutTeacher: () => void;
+  setTeacherSelectedCourseId: (courseId: string | null) => void;
   setTeacherActiveTab: (tab: TeacherTabType) => void;
   loginEditor: (editorId: string) => void;
   logoutEditor: () => void;
@@ -184,10 +190,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         activeView: 'estudiante',
         studentSessionActive: true,
         verifiedStudentId: studentId,
+        studentSelectedCourseId: null,
         studentDashboardTab: 'inicio',
         studentExamPhase: 'modality_select',
         teacherSessionActive: false,
         teacherAuthenticatedId: null,
+        teacherSelectedCourseId: null,
         editorSessionActive: false,
         editorAuthenticatedId: null,
         lastActivityIso: new Date().toISOString()
@@ -203,7 +211,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         ...prev,
         studentSessionActive: false,
         verifiedStudentId: null,
+        studentSelectedCourseId: null,
         studentExamPhase: 'login',
+        lastActivityIso: new Date().toISOString()
+      };
+      sessionStorageWrapper.write(next);
+      return next;
+    });
+  }, []);
+
+  const setStudentSelectedCourseId = useCallback((courseId: string | null) => {
+    setAuthState((prev) => {
+      const next: PersistedAuthSessionState = {
+        ...prev,
+        studentSelectedCourseId: courseId,
         lastActivityIso: new Date().toISOString()
       };
       sessionStorageWrapper.write(next);
@@ -249,6 +270,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         activeView: 'docente',
         teacherSessionActive: true,
         teacherAuthenticatedId: teacherId,
+        teacherSelectedCourseId: null,
         teacherActiveTab: 'panel_central',
         studentSessionActive: false,
         verifiedStudentId: null,
@@ -268,6 +290,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         ...prev,
         teacherSessionActive: false,
         teacherAuthenticatedId: null,
+        teacherSelectedCourseId: null,
+        lastActivityIso: new Date().toISOString()
+      };
+      sessionStorageWrapper.write(next);
+      return next;
+    });
+  }, []);
+
+  const setTeacherSelectedCourseId = useCallback((courseId: string | null) => {
+    setAuthState((prev) => {
+      const next: PersistedAuthSessionState = {
+        ...prev,
+        teacherSelectedCourseId: courseId,
         lastActivityIso: new Date().toISOString()
       };
       sessionStorageWrapper.write(next);
@@ -292,6 +327,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         editorAuthenticatedId: editorId,
         teacherSessionActive: false,
         teacherAuthenticatedId: null,
+        teacherSelectedCourseId: null,
         studentSessionActive: false,
         verifiedStudentId: null,
         studentExamPhase: 'login',
@@ -330,11 +366,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setActiveView,
         loginStudent,
         logoutStudent,
+        setStudentSelectedCourseId,
         setStudentDashboardTab,
         setSelectedModality,
         setStudentExamPhase,
         loginTeacher,
         logoutTeacher,
+        setTeacherSelectedCourseId,
         setTeacherActiveTab,
         loginEditor,
         logoutEditor,

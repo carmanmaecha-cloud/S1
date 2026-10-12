@@ -11,8 +11,17 @@ import {
   CustomMiniRetoTemplate,
   MiniRetoAttemptRecord,
   AntiCheatLogEntry,
-  AntiCheatDetectionType
+  AntiCheatDetectionType,
+  UniversalCourseWorkspace,
+  AcademicReviewTicket,
+  AcademicReviewTicketType,
+  AcademicActivityKey
 } from '../types';
+import {
+  getDefaultCourseScheduleConfig,
+  evaluateAllCourseActivities,
+  applyLateSubmissionPenalty
+} from '../utils/academicScheduleEngine';
 import { computePayloadChecksum, generateDeterministicAccessCode } from '../data/students';
 import {
   INITIAL_QUESTIONS,
@@ -22,6 +31,8 @@ import {
 import { getEffectiveMaxLlamadosAtencion } from '../utils/academicServerSummary';
 import {
   getEffectiveCourseMetadata,
+  getAssignedCourseWorkspacesForStudent,
+  findStudentAcrossAllCourses,
   DEFAULT_MODULE_GRADING_WEIGHTS,
   parseRawDocumentLinksToStructured
 } from '../utils/universalCourseEngine';
@@ -29,6 +40,17 @@ import {
   StudentPerformanceDashboard,
   ZeroTrialSimulatorModal
 } from './StudentPerformanceDashboard';
+import {
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ReferenceLine
+} from 'recharts';
 import { StudentMiniRetosZone } from './StudentMiniRetosZone';
 import { getEffectiveBadgesForCourse } from '../utils/miniRetosEngine';
 import { StudentPersonalAcademicFicha } from './AcademicClassAttendanceModule';
@@ -71,7 +93,12 @@ import {
   PlayCircle,
   Maximize2,
   Trophy,
-  Download
+  Download,
+  Eye,
+  EyeOff,
+  Copy,
+  Check,
+  HelpCircle
 } from 'lucide-react';
 
 interface StudentPortalProps {
@@ -104,6 +131,7 @@ interface StudentPortalProps {
   activeExamsByStudent?: Record<string, any>;
   onSaveActiveExamBackup?: (studentId: string, backup: any | null) => void;
   onForceServerSync?: () => void;
+  onActivateCourseWorkspace?: (workspace: UniversalCourseWorkspace) => void;
 }
 
 const MODALITY_OPTIONS: {
@@ -250,6 +278,7 @@ export function StudentPortal({
   onRecordAntiCheatEvent,
   onUpdateLiveSession,
   onSwitchToTeacherLogin,
+  onSwitchToEditorLogin,
   onGoToInitialHome,
   onSessionActiveChange,
   logoutSignal,
@@ -257,11 +286,18 @@ export function StudentPortal({
   academicDataset,
   onUpdateAcademicDataset,
   onSaveActiveExamBackup,
-  onForceServerSync
+  onForceServerSync,
+  onActivateCourseWorkspace
 }: StudentPortalProps) {
   // Step 1: Dual Authentication State (Clean Initial Screen)
   const [docIdInput, setDocIdInput] = useState('');
   const [accessCodeInput, setAccessCodeInput] = useState('');
+  const [showLoginAccessCode, setShowLoginAccessCode] = useState(false);
+  const [codeHelpRequestStatus, setCodeHelpRequestStatus] = useState<{
+    type: 'idle' | 'sending' | 'sent' | 'error';
+    message?: string;
+  }>({ type: 'idle' });
+  const [receiptCopied, setReceiptCopied] = useState(false);
   const [classroomPinInput, setClassroomPinInput] = useState('');
   const [loginError, setLoginError] = useState<string | null>(null);
   const [rollCallFeedbackBanner, setRollCallFeedbackBanner] = useState<string | null>(null);
@@ -278,6 +314,7 @@ export function StudentPortal({
     authState,
     loginStudent,
     logoutStudent,
+    setStudentSelectedCourseId,
     setStudentDashboardTab: persistStudentTab,
     setSelectedModality: persistSelectedModality,
     setStudentExamPhase: persistStudentExamPhase
@@ -289,6 +326,10 @@ export function StudentPortal({
       ? authState.verifiedStudentId
       : null
   );
+  const [isCourseSelectionWindowOpen, setIsCourseSelectionWindowOpen] = useState<boolean>(
+    () => !authState.studentSelectedCourseId
+  );
+  const [courseSearchQuery, setCourseSearchQuery] = useState<string>('');
   const [studentDashboardTab, setStudentDashboardTabState] = useState<StudentDashboardTabType>(
     () => authState.studentDashboardTab || 'inicio'
   );
@@ -368,10 +409,12 @@ export function StudentPortal({
     [persistSelectedModality]
   );
 
-  // Edit Student Profile Modal (Name & Access Code editable, ID Read-only)
+  // Edit Student Profile Modal (Name, Access Code, Email & WhatsApp editable, ID Read-only)
   const [editProfileModalOpen, setEditProfileModalOpen] = useState(false);
   const [profileNameInput, setProfileNameInput] = useState('');
   const [profileCodeInput, setProfileCodeInput] = useState('');
+  const [profileEmailInput, setProfileEmailInput] = useState('');
+  const [profileWhatsappInput, setProfileWhatsappInput] = useState('');
   const [profileSaveMsg, setProfileSaveMsg] = useState<string | null>(null);
 
   // Pre-Exam Induction Confirmation Modal (1-Warning Rule Induction) & Zero Trial Simulator
@@ -394,6 +437,14 @@ export function StudentPortal({
   const [sheetExcuseReason, setSheetExcuseReason] = useState<string>('');
   const [sheetExcuseUrl, setSheetExcuseUrl] = useState<string>('');
   const [sheetNotice, setSheetNotice] = useState<string | null>(null);
+
+  // Estados para Ticket Formal de Revisión de Nota / Reclamo Académico / Excusa
+  const [reviewTicketType, setReviewTicketType] = useState<AcademicReviewTicketType>('RECALIFICACION_EXAMEN');
+  const [reviewTicketTargetId, setReviewTicketTargetId] = useState<string>('integral');
+  const [reviewTicketTargetLabel, setReviewTicketTargetLabel] = useState<string>('Examen Integral Final');
+  const [reviewTicketCurrentGrade, setReviewTicketCurrentGrade] = useState<number>(0);
+  const [reviewTicketRequestedGrade, setReviewTicketRequestedGrade] = useState<string>('4.0');
+  const [reviewTicketQuestionRef, setReviewTicketQuestionRef] = useState<string>('');
 
   const playRollCallChime = useCallback(() => {
     try {
@@ -432,7 +483,58 @@ export function StudentPortal({
   const [isExtendedMonitorDetected, setIsExtendedMonitorDetected] = useState<boolean>(false);
 
   // Dynamic Course Metadata & Modality Options derived from Universal Course Engine
-  const activeCourseMeta = useMemo(() => getEffectiveCourseMetadata(config), [config]);
+  const activeCourseMeta = useMemo(
+    () => getEffectiveCourseMetadata(config, null, authState.studentSelectedCourseId),
+    [config, authState.studentSelectedCourseId]
+  );
+
+  // Courses assigned to this authenticated student
+  const assignedStudentCourses = useMemo(
+    () =>
+      getAssignedCourseWorkspacesForStudent(config, verifiedStudentId, {
+        students,
+        questions,
+        attempts,
+        customMiniRetos,
+        academicDataset
+      }),
+    [config, verifiedStudentId, students, questions, attempts, customMiniRetos, academicDataset]
+  );
+
+  const filteredStudentCourses = useMemo(() => {
+    const q = courseSearchQuery.trim().toLowerCase();
+    if (!q) return assignedStudentCourses;
+    return assignedStudentCourses.filter(
+      (c) =>
+        (c.meta?.nombreCurso || '').toLowerCase().includes(q) ||
+        (c.meta?.codigoCurso || '').toLowerCase().includes(q) ||
+        (c.meta?.programaAcademico || '').toLowerCase().includes(q) ||
+        (c.meta?.periodoAcademico || '').toLowerCase().includes(q) ||
+        (c.meta?.docenteResponsable || '').toLowerCase().includes(q)
+    );
+  }, [assignedStudentCourses, courseSearchQuery]);
+
+  const handleSelectStudentCourse = useCallback(
+    (workspace: UniversalCourseWorkspace) => {
+      if (!workspace || !workspace.meta?.courseId) return;
+      onActivateCourseWorkspace?.(workspace);
+      setStudentSelectedCourseId(workspace.meta.courseId);
+      setIsCourseSelectionWindowOpen(false);
+      setFinishedResult(null);
+      setThirdAttemptBlockedModal(null);
+      setInductionModalOpen(false);
+      setTabHistory([]);
+      setStudentDashboardTabState('inicio');
+      persistStudentTab('inicio');
+      setExamPhase('modality_select');
+    },
+    [
+      onActivateCourseWorkspace,
+      setStudentSelectedCourseId,
+      persistStudentTab,
+      setExamPhase
+    ]
+  );
 
   const studentClassSessions = useMemo(() => {
     const mods = Array.isArray(activeCourseMeta.modulosCurso)
@@ -522,9 +624,23 @@ export function StudentPortal({
   const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
   const [lastSavedTime, setLastSavedTime] = useState<string>('');
 
-  // DUA Live Accessibility Toolbar State
-  const [duaFontSize, setDuaFontSize] = useState<'normal' | 'large' | 'xlarge'>('normal');
-  const [duaWarmPaper, setDuaWarmPaper] = useState<boolean>(false);
+  // DUA Live Accessibility Toolbar State (Persisted in localStorage across modules)
+  const [duaFontSize, setDuaFontSize] = useState<'normal' | 'large' | 'xlarge'>(() => {
+    try {
+      const saved = localStorage.getItem('evaluaplus_student_font_size_v1');
+      if (saved === 'large' || saved === 'xlarge' || saved === 'normal') return saved;
+    } catch {
+      // ignore
+    }
+    return 'normal';
+  });
+  const [duaWarmPaper, setDuaWarmPaper] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('evaluaplus_student_warm_paper_v1') === 'true';
+    } catch {
+      return false;
+    }
+  });
   const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
 
   // Anti-Cheat & Review Drawer States
@@ -562,10 +678,275 @@ export function StudentPortal({
   const isExamPsychometricEqualizerEnabled = config.ecualizadorPsicometricoActivo !== false;
   const isExamShuffleOptionsEnabled = config.barajarOpciones !== false;
 
-  // Always lookup fresh student object from props
-  const currentStudent = verifiedStudentId
-    ? students.find((s) => s.id === verifiedStudentId) || null
-    : null;
+  // Always lookup fresh student object from active roster or across assigned courses in universalCoursesCatalog
+  const currentStudent = useMemo(() => {
+    if (!verifiedStudentId) return null;
+    const cleanVerified = String(verifiedStudentId).trim().replace(/[\s.-]/g, '').toUpperCase();
+    const fromActive = students.find(
+      (s) => String(s?.id || '').trim().replace(/[\s.-]/g, '').toUpperCase() === cleanVerified
+    );
+    if (fromActive) return fromActive;
+    const acrossCatalog = findStudentAcrossAllCourses(cleanVerified, undefined, config, students);
+    return acrossCatalog.student || null;
+  }, [verifiedStudentId, students, config]);
+
+  // Synchronize profile form inputs when currentStudent loads or updates
+  useEffect(() => {
+    if (!currentStudent) return;
+    setProfileNameInput(currentStudent.nombre || '');
+    setProfileCodeInput(currentStudent.codigoAcceso || '');
+    setProfileEmailInput(currentStudent.correo || '');
+    setProfileWhatsappInput(currentStudent.whatsapp || '');
+  }, [
+    currentStudent?.id,
+    currentStudent?.nombre,
+    currentStudent?.codigoAcceso,
+    currentStudent?.correo,
+    currentStudent?.whatsapp
+  ]);
+
+  const handleOpenStudentCredentialsSheet = useCallback(() => {
+    if (!currentStudent) return;
+    setProfileNameInput(currentStudent.nombre || '');
+    setProfileCodeInput(currentStudent.codigoAcceso || '');
+    setProfileEmailInput(currentStudent.correo || '');
+    setProfileWhatsappInput(currentStudent.whatsapp || '');
+    setProfileSaveMsg(null);
+    setStudentBottomSheet('perfil');
+  }, [currentStudent]);
+
+  const handleLogoutCurrentStudent = useCallback(() => {
+    if (verifiedStudentId) {
+      onUpdateLiveSession(null, verifiedStudentId);
+    } else if (currentStudent) {
+      onUpdateLiveSession(null, currentStudent.id);
+    }
+    logoutStudent();
+    setVerifiedStudentId(null);
+    setIsCourseSelectionWindowOpen(true);
+    setDocIdInput('');
+    setAccessCodeInput('');
+    setClassroomPinInput('');
+    setThirdAttemptBlockedModal(null);
+    setInductionModalOpen(false);
+    setConfirmSubmitModal(false);
+    setDrawerOpen(false);
+    setFinishedResult(null);
+    setTabHistory([]);
+    setStudentBottomSheet('none');
+    setSessionAtRiskModalOpen(false);
+    setExamPhase('login');
+  }, [verifiedStudentId, currentStudent, onUpdateLiveSession, logoutStudent, setExamPhase]);
+
+  // ================= TEMPORIZADOR DE INACTIVIDAD GLOBAL DEL PANEL DEL ESTUDIANTE (15 MIN ALERTA 'SESIÓN EN RIESGO' + 5 MIN CIERRE AUTOMÁTICO) =================
+  const INACTIVITY_WARNING_MS = 15 * 60 * 1000; // 15 minutos sin interacción -> muestra modal 'Sesión en riesgo'
+  const INACTIVITY_AUTO_LOGOUT_MS = 20 * 60 * 1000; // +5 minutos adicionales (20 min en total) -> cierre de sesión automático
+  const lastStudentActivityMsRef = useRef<number>(Date.now());
+  const [sessionAtRiskModalOpen, setSessionAtRiskModalOpen] = useState<boolean>(false);
+  const [sessionAtRiskCountdownSec, setSessionAtRiskCountdownSec] = useState<number>(5 * 60);
+  const [examFocusMode, setExamFocusMode] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('evaluaplus_student_focus_mode_v1') === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('evaluaplus_student_font_size_v1', duaFontSize);
+      localStorage.setItem('evaluaplus_student_warm_paper_v1', String(duaWarmPaper));
+      localStorage.setItem('evaluaplus_student_focus_mode_v1', String(examFocusMode));
+    } catch {
+      // ignore
+    }
+  }, [duaFontSize, duaWarmPaper, examFocusMode]);
+
+  const handleRequestClassroomCodeHelp = async () => {
+    const cleanDoc = (docIdInput || '').trim();
+    if (!cleanDoc) {
+      setCodeHelpRequestStatus({
+        type: 'error',
+        message: 'Primero escriba su ID de Estudiante arriba para notificar al docente.'
+      });
+      return;
+    }
+    setCodeHelpRequestStatus({ type: 'sending' });
+    try {
+      const res = await fetch('/api/auth/request-code-help', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ studentId: cleanDoc })
+      });
+      const data = await res.json();
+      if (res.ok && data?.ok) {
+        setCodeHelpRequestStatus({
+          type: 'sent',
+          message:
+            data.message ||
+            'Solicitud enviada al Panel del Docente. El profesor podrá visualizar su código en pantalla.'
+        });
+      } else {
+        setCodeHelpRequestStatus({
+          type: 'error',
+          message: data?.error || 'No se pudo enviar la solicitud.'
+        });
+      }
+    } catch {
+      setCodeHelpRequestStatus({
+        type: 'error',
+        message: 'Sin conexión con el servidor del aula. Consulte directamente al docente.'
+      });
+    }
+  };
+  const [offlineSubmissionQueued, setOfflineSubmissionQueued] = useState<boolean>(() => {
+    try {
+      return Boolean(localStorage.getItem('evaluaplus_pending_offline_submission_v1'));
+    } catch {
+      return false;
+    }
+  });
+
+  const handleConfirmKeepStudentSessionActive = useCallback(() => {
+    lastStudentActivityMsRef.current = Date.now();
+    setSessionAtRiskModalOpen(false);
+    setSessionAtRiskCountdownSec(5 * 60);
+  }, []);
+
+  useEffect(() => {
+    const isSessionActive = Boolean(verifiedStudentId && examPhase !== 'login');
+    if (!isSessionActive) {
+      setSessionAtRiskModalOpen(false);
+      setSessionAtRiskCountdownSec(5 * 60);
+      return;
+    }
+
+    lastStudentActivityMsRef.current = Date.now();
+
+    let lastRecordedEventMs = 0;
+    const registerUserActivity = () => {
+      const now = Date.now();
+      if (now - lastRecordedEventMs < 800) return;
+      lastRecordedEventMs = now;
+      // Si el modal de 'Sesión en riesgo' AÚN NO está abierto, cualquier interacción reinicia el temporizador de 15 minutos
+      if (now - lastStudentActivityMsRef.current < INACTIVITY_WARNING_MS) {
+        lastStudentActivityMsRef.current = now;
+      }
+    };
+
+    const activityEvents: (keyof WindowEventMap)[] = [
+      'mousedown',
+      'mousemove',
+      'keydown',
+      'touchstart',
+      'scroll',
+      'click',
+      'pointerdown'
+    ];
+
+    activityEvents.forEach((evt) =>
+      window.addEventListener(evt, registerUserActivity, { passive: true })
+    );
+
+    const checkInterval = window.setInterval(() => {
+      const elapsedMs = Date.now() - lastStudentActivityMsRef.current;
+      if (elapsedMs >= INACTIVITY_AUTO_LOGOUT_MS) {
+        setSessionAtRiskModalOpen(false);
+        handleLogoutCurrentStudent();
+        setLoginError(
+          '🔒 Su sesión se cerró automáticamente por seguridad del aula tras 20 minutos de inactividad (15 minutos sin interacción + 5 minutos de espera en «Sesión en riesgo»).'
+        );
+      } else if (elapsedMs >= INACTIVITY_WARNING_MS) {
+        const remainingSec = Math.max(
+          0,
+          Math.ceil((INACTIVITY_AUTO_LOGOUT_MS - elapsedMs) / 1000)
+        );
+        setSessionAtRiskModalOpen((prev) => (prev ? prev : true));
+        setSessionAtRiskCountdownSec((prev) => (prev === remainingSec ? prev : remainingSec));
+      } else {
+        setSessionAtRiskModalOpen((prev) => (prev ? false : prev));
+        setSessionAtRiskCountdownSec((prev) => (prev === 300 ? prev : 300));
+      }
+    }, 1000);
+
+    return () => {
+      activityEvents.forEach((evt) =>
+        window.removeEventListener(evt, registerUserActivity)
+      );
+      window.clearInterval(checkInterval);
+    };
+  }, [
+    verifiedStudentId,
+    examPhase,
+    INACTIVITY_WARNING_MS,
+    INACTIVITY_AUTO_LOGOUT_MS,
+    handleLogoutCurrentStudent
+  ]);
+
+  const globalSessionAtRiskModalNode =
+    sessionAtRiskModalOpen && examPhase !== 'login' ? (
+      <div className="fixed inset-0 z-[90] bg-slate-900/75 backdrop-blur-xs flex items-center justify-center p-4 no-print">
+        <div className="bg-white border-2 border-amber-400 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
+          <div className="flex items-start gap-3">
+            <div className="w-11 h-11 rounded-2xl bg-amber-100 border border-amber-300 text-amber-700 flex items-center justify-center shrink-0">
+              <AlertTriangle className="w-6 h-6" />
+            </div>
+            <div className="space-y-1">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 font-mono text-[10px] font-extrabold uppercase">
+                🛡️ Seguridad del Aula · Temporizador de Inactividad
+              </span>
+              <h3 className="text-lg font-extrabold text-slate-900">
+                Sesión en riesgo por inactividad
+              </h3>
+            </div>
+          </div>
+
+          <p className="text-xs sm:text-sm text-slate-700 leading-relaxed">
+            No se ha detectado interacción en los últimos <strong>15 minutos</strong>. Por seguridad del aula, su sesión se cerrará automáticamente en:
+          </p>
+
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-center space-y-2">
+            <div className="text-[11px] font-bold uppercase tracking-wider text-amber-900">
+              Cierre automático de sesión en
+            </div>
+            <div className="text-3xl font-extrabold font-mono text-red-600 tabular-nums">
+              {String(Math.floor(sessionAtRiskCountdownSec / 60)).padStart(2, '0')}:
+              {String(sessionAtRiskCountdownSec % 60).padStart(2, '0')}
+            </div>
+            <div className="w-full h-2 bg-amber-200/70 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-red-600 transition-all duration-500"
+                style={{
+                  width: `${Math.min(
+                    100,
+                    Math.max(0, Math.round((sessionAtRiskCountdownSec / 300) * 100))
+                  )}%`
+                }}
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2.5 pt-2">
+            <button
+              type="button"
+              onClick={handleLogoutCurrentStudent}
+              className="min-h-[44px] px-4 py-2.5 rounded-xl border border-red-200 bg-red-50 hover:bg-red-100 text-red-700 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Cerrar sesión ahora</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleConfirmKeepStudentSessionActive}
+              className="min-h-[44px] px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 cursor-pointer shadow-xs transition-colors"
+            >
+              <CheckCircle2 className="w-4 h-4" />
+              <span>Mantener sesión activa</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    ) : null;
 
   // Effective allowed warnings ("llamados de atención") for this student (individual override or global default)
   const maxLlamadosPermitidos = useMemo(
@@ -600,6 +981,29 @@ export function StudentPortal({
 
   const [rollCallNowMs, setRollCallNowMs] = useState<number>(() => Date.now());
   const [rollCallCodeInputByClass, setRollCallCodeInputByClass] = useState<Record<number, string>>({});
+  const [showStudentScheduleAgenda, setShowStudentScheduleAgenda] = useState<boolean>(false);
+
+  const effectiveCourseSchedule = useMemo(
+    () =>
+      getDefaultCourseScheduleConfig({
+        ...config,
+        courseScheduleConfig:
+          activeCourseMeta?.courseScheduleConfig || config.courseScheduleConfig
+      }),
+    [config, activeCourseMeta?.courseScheduleConfig]
+  );
+
+  const scheduleQuarterMinTick = Math.floor(rollCallNowMs / 15000);
+  const liveActivityWindows = useMemo(
+    () =>
+      evaluateAllCourseActivities(
+        effectiveCourseSchedule,
+        new Date(rollCallNowMs),
+        currentStudent?.id
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [effectiveCourseSchedule, scheduleQuarterMinTick, currentStudent?.id]
+  );
 
   useEffect(() => {
     const id = window.setInterval(() => {
@@ -683,9 +1087,29 @@ export function StudentPortal({
     return { modStats, bloomStats, weakTopics };
   }, [studentAttempts]);
 
-  // Online / Offline Resilience Listener
+  // Online / Offline Resilience Listener + Automatic Flush of Offline Queued Submissions
   useEffect(() => {
-    const handleOnline = () => setIsOnline(true);
+    const handleOnline = () => {
+      setIsOnline(true);
+      try {
+        const queuedRaw = localStorage.getItem('evaluaplus_pending_offline_submission_v1');
+        if (queuedRaw) {
+          void handleExecuteServerSave(
+            'estudiante_reenvio_offline_automatico',
+            'Sincronización automática de entrega de examen guardada en cola offline'
+          ).then(() => {
+            try {
+              localStorage.removeItem('evaluaplus_pending_offline_submission_v1');
+            } catch {
+              // ignore
+            }
+            setOfflineSubmissionQueued(false);
+          });
+        }
+      } catch {
+        // ignore
+      }
+    };
     const handleOffline = () => setIsOnline(false);
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
@@ -693,7 +1117,7 @@ export function StudentPortal({
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, []);
+  }, [handleExecuteServerSave]);
 
   // Stop TTS when changing question or exiting exam
   useEffect(() => {
@@ -786,19 +1210,10 @@ export function StudentPortal({
       }
     }
 
-    // Find student in official roster (ignores dots, spaces or hyphens in document ID)
-    const matchedStudent = students.find(
-      (s) => String(s?.id || '').trim().replace(/[\s.-]/g, '').toUpperCase() === cleanId
-    );
-
-    const storedStudentCode = (matchedStudent?.codigoAcceso || '').trim().toUpperCase();
-    const deterministicFallback = matchedStudent
-      ? generateDeterministicAccessCode(matchedStudent.id).toUpperCase()
-      : '';
-    const isStudentCodeValid =
-      Boolean(matchedStudent) &&
-      (storedStudentCode === cleanCode ||
-        (!storedStudentCode && deterministicFallback === cleanCode));
+    // Find student in official roster or across any course in universalCoursesCatalog
+    const lookupResult = findStudentAcrossAllCourses(cleanId, cleanCode, config, students);
+    const matchedStudent = lookupResult.student;
+    const isStudentCodeValid = lookupResult.isValidCode;
 
     if (!matchedStudent || !isStudentCodeValid) {
       setLoginError('Código de acceso de sesión inválido para este ID de estudiante. Solicite su código al docente.');
@@ -812,26 +1227,31 @@ export function StudentPortal({
       return;
     }
 
-    // Credentials verified! Allow student into the portal even if Estado Maestro del Examen is CERRADO
-    // so they can always access "Zona de Retos & Insignias", "Calificaciones", and "Diagnóstico"
-    // (only starting a new exam attempt is restricted when Estado Maestro del Examen is CERRADO).
+    // Credentials verified! Show the Available Courses Window so the student can choose one of their assigned courses
     onForceServerSync?.();
     setVerifiedStudentId(matchedStudent.id);
     loginStudent(matchedStudent.id);
+    setStudentSelectedCourseId(null);
+    setIsCourseSelectionWindowOpen(true);
+    setCourseSearchQuery('');
     setProfileNameInput(matchedStudent.nombre || '');
     setProfileCodeInput(matchedStudent.codigoAcceso || '');
+    setProfileEmailInput(matchedStudent.correo || '');
+    setProfileWhatsappInput(matchedStudent.whatsapp || '');
     setTabHistory([]);
     setStudentDashboardTabState('inicio');
     persistStudentTab('inicio');
     setExamPhase('modality_select');
   };
 
-  // Save Student Self-Service Profile Update (Name & Access Code, ID Read-Only)
+  // Save Student Self-Service Profile Update (Name, Access Code, Email & WhatsApp, ID Read-Only)
   const handleSaveStudentProfile = (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentStudent) return;
     const cleanName = (profileNameInput || '').trim();
     const cleanCode = (profileCodeInput || '').trim().toUpperCase();
+    const cleanEmail = (profileEmailInput || '').trim().toLowerCase();
+    const cleanWhatsapp = (profileWhatsappInput || '').trim();
     if (!cleanName || cleanCode.length < 6) {
       setProfileSaveMsg('Ingrese su nombre completo y un código válido (mínimo 6 caracteres).');
       return;
@@ -839,17 +1259,32 @@ export function StudentPortal({
     const updated: StudentRecord = {
       ...currentStudent,
       nombre: cleanName,
-      codigoAcceso: cleanCode
+      codigoAcceso: cleanCode,
+      correo: cleanEmail,
+      whatsapp: cleanWhatsapp
     };
     onUpdateStudentProfile(updated);
     void handleExecuteServerSave(
       'estudiante_perfil_datos',
       `Actualización automática de perfil del estudiante (${updated.nombre})`
     );
-    setProfileSaveMsg('✓ Sus datos (Nombre y Código de Acceso) se actualizaron automáticamente en la Base de Datos del Servidor.');
+    fetch('/api/audit-logs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        section: 'CuentaCredencialesEstudiante',
+        description: `Estudiante ${updated.nombre} (${updated.id}) actualizó sus credenciales/datos de contacto (Correo: ${updated.correo || 'N/A'}, WhatsApp: ${updated.whatsapp || 'N/A'}).`,
+        actorId: updated.id,
+        actorRole: 'estudiante'
+      })
+    }).catch(() => {});
+    setProfileSaveMsg(
+      '✓ Sus datos (Nombre, Código de Acceso, Correo Electrónico y WhatsApp/Celular) se actualizaron automáticamente en la Base de Datos del Servidor.'
+    );
     setTimeout(() => {
       setProfileSaveMsg(null);
       setEditProfileModalOpen(false);
+      setStudentBottomSheet('none');
     }, 1500);
   };
 
@@ -937,14 +1372,25 @@ export function StudentPortal({
       }
 
       setThirdAttemptBlockedModal(null);
+      const hasPersonalExamExtension =
+        liveActivityWindows.EXAMENES.status === 'EXTENSION_ACTIVE';
       const isMasterClosedForCurrentStudent =
-        !config.examenAbierto ||
-        Boolean((config.estudiantesConEstadoCerrado || []).includes(currentStudent.id));
+        !hasPersonalExamExtension &&
+        (!config.examenAbierto ||
+          !liveActivityWindows.EXAMENES.isAccessible ||
+          Boolean((config.estudiantesConEstadoCerrado || []).includes(currentStudent.id)));
       if (attemptToStart && !st.isBlockedByTeacher && !isMasterClosedForCurrentStudent) {
         setInductionModalOpen(true);
       }
     },
-    [currentStudent, activeModalityOptions, getModalityAttemptStats, config.examenAbierto, config.estudiantesConEstadoCerrado]
+    [
+      currentStudent,
+      activeModalityOptions,
+      getModalityAttemptStats,
+      config.examenAbierto,
+      config.estudiantesConEstadoCerrado,
+      liveActivityWindows.EXAMENES
+    ]
   );
 
   // Helper to return to the main student panel and select an available exam modality
@@ -977,6 +1423,13 @@ export function StudentPortal({
 
     if (modStats.isBlockedByTeacher) {
       setLoginError('Esta modalidad de examen ha sido bloqueada para su usuario por el docente.');
+      return;
+    }
+
+    if (!liveActivityWindows.EXAMENES.isAccessible) {
+      setLoginError(
+        `⏳ ${liveActivityWindows.EXAMENES.badgeText}: ${liveActivityWindows.EXAMENES.reasonDetail}`
+      );
       return;
     }
 
@@ -1238,13 +1691,20 @@ export function StudentPortal({
         };
       });
 
-      const rawNota = isSuspended ? 0.0 : Number(((aciertosCount / totalQ) * 5.0).toFixed(1));
+      const baseRawNota = isSuspended ? 0.0 : Number(((aciertosCount / totalQ) * 5.0).toFixed(1));
+      const latePenaltyEval = !isSuspended
+        ? applyLateSubmissionPenalty(baseRawNota, liveActivityWindows.EXAMENES)
+        : { finalGrade: 0.0, penaltyApplied: false, penaltyDetail: '' };
+      const rawNota = latePenaltyEval.finalGrade;
       const porcentaje = isSuspended ? 0 : Math.round((aciertosCount / totalQ) * 100);
-      const finalConcept = isSuspended
+      const baseConcept = isSuspended
         ? customInfractionConcept || suspensionReason || 'Suspendido por infracción de seguridad'
         : warningsCount > 0
         ? `${warningsCount}/${maxLlamadosPermitidos} Llamado(s) preventivo(s) (${suspensionReason})`
         : '✓ Sin infracciones';
+      const finalConcept = latePenaltyEval.penaltyApplied
+        ? `${baseConcept} · ${latePenaltyEval.penaltyDetail}`
+        : baseConcept;
 
       const minPassingGrade = Number(config.notaMinimaAprobacion) || 3.0;
       const estadoFinal: 'APROBADO' | 'REPROBADO' | 'SUSPENDIDO' = isSuspended
@@ -1354,10 +1814,35 @@ export function StudentPortal({
         pantallaMaximizada: true
       });
       onRecordAttempt(result, updatedStudent);
+      if (!navigator.onLine || !isOnline) {
+        try {
+          localStorage.setItem(
+            'evaluaplus_pending_offline_submission_v1',
+            JSON.stringify({
+              studentId: currentStudent.id,
+              attemptId: result.id,
+              nota: rawNota,
+              savedAtIso: new Date().toISOString()
+            })
+          );
+          setOfflineSubmissionQueued(true);
+        } catch {
+          // ignore
+        }
+      }
       void handleExecuteServerSave(
         'estudiante_certificado_resultados',
         `Registro automático de examen (${modConfig.title} - Intento #${currentAttemptNumber} - Nota: ${rawNota.toFixed(1)})`
-      );
+      ).then((ok) => {
+        if (ok) {
+          try {
+            localStorage.removeItem('evaluaplus_pending_offline_submission_v1');
+          } catch {
+            // ignore
+          }
+          setOfflineSubmissionQueued(false);
+        }
+      });
       setFinishedResult(result);
       setConfirmSubmitModal(false);
       setDrawerOpen(false);
@@ -1916,137 +2401,6 @@ export function StudentPortal({
     return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   };
 
-  // ================= VIEW 1: VENTANA DE INICIO DE SESIÓN DEL ESTUDIANTE =================
-  if (examPhase === 'login') {
-    return (
-      <div className="min-h-screen flex items-center justify-center px-4 py-8 sm:py-10">
-        <div className="w-full max-w-md bg-white border border-slate-200 rounded-2xl shadow-xs p-6 sm:p-8 space-y-6">
-          {onGoToInitialHome && (
-            <div>
-              <button
-                type="button"
-                onClick={onGoToInitialHome}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-semibold text-slate-700 transition-colors cursor-pointer"
-              >
-                <ArrowLeft className="w-3.5 h-3.5" />
-                <span>Volver</span>
-              </button>
-            </div>
-          )}
-
-          <div className="space-y-2 text-center">
-            <div className="w-11 h-11 rounded-xl bg-sky-600 text-white flex items-center justify-center mx-auto">
-              <GraduationCap className="w-5 h-5" />
-            </div>
-            <h1 className="text-2xl font-bold text-slate-900 tracking-tight">
-              Estudiante
-            </h1>
-          </div>
-
-          {/* Bloqueo por Tercer Intento */}
-          {thirdAttemptBlockedModal && (
-            <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 space-y-3 text-sm">
-              <div className="flex items-start gap-2.5 text-amber-900 font-semibold">
-                <AlertTriangle className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
-                <span>
-                  «Total intentos terminados. Has alcanzado el límite máximo de 2 intentos permitidos para esta evaluación.»
-                </span>
-              </div>
-              <div className="bg-white rounded-lg p-3 border border-amber-200 space-y-1 text-xs text-slate-700 font-mono">
-                <div>Estudiante: {thirdAttemptBlockedModal.student.nombre}</div>
-                {thirdAttemptBlockedModal.modalidadLabel && (
-                  <div>Evaluación: {thirdAttemptBlockedModal.modalidadLabel}</div>
-                )}
-                <div>
-                  Intento 1:{' '}
-                  {thirdAttemptBlockedModal.att1 !== null
-                    ? `${thirdAttemptBlockedModal.att1.toFixed(1)} / 5.0`
-                    : 'N/A'}
-                </div>
-                <div>
-                  Intento 2:{' '}
-                  {thirdAttemptBlockedModal.att2 !== null
-                    ? `${thirdAttemptBlockedModal.att2.toFixed(1)} / 5.0`
-                    : 'N/A'}
-                </div>
-                <div className="font-bold text-slate-900 pt-1 border-t border-slate-100">
-                  Nota Definitiva Más Alta (Math.max): {thirdAttemptBlockedModal.bestGrade.toFixed(1)} / 5.0
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Error de Coincidencia Dual */}
-          {loginError && (
-            <div className="bg-red-50 border border-red-200 rounded-xl p-3.5 flex items-start gap-2.5 text-xs text-red-800 font-medium">
-              <XCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
-              <span>{loginError}</span>
-            </div>
-          )}
-
-          <form onSubmit={handleLoginSubmit} className="space-y-4">
-            <div className="space-y-1.5">
-              <label htmlFor="docId" className="block text-xs sm:text-sm font-bold text-slate-800">
-                ID de Estudiante
-              </label>
-              <input
-                id="docId"
-                type="text"
-                inputMode="numeric"
-                required
-                autoComplete="off"
-                value={docIdInput}
-                onChange={(e) => setDocIdInput(e.target.value)}
-                className="w-full min-h-[48px] px-4 py-3 rounded-xl border border-slate-300 text-base sm:text-sm font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-600 focus:border-transparent"
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <label htmlFor="accessCode" className="block text-xs sm:text-sm font-bold text-slate-800">
-                Código de Acceso de Sesión
-              </label>
-              <input
-                id="accessCode"
-                type="password"
-                required
-                autoComplete="off"
-                maxLength={24}
-                value={accessCodeInput}
-                onChange={(e) => setAccessCodeInput(e.target.value.toUpperCase())}
-                className="w-full min-h-[48px] px-4 py-3 rounded-xl border border-slate-300 text-base sm:text-sm font-mono uppercase text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-600 focus:border-transparent"
-              />
-            </div>
-
-            {config.exigirPinAula && (
-              <div className="space-y-1.5 pt-1">
-                <label htmlFor="classroomPin" className="block text-xs sm:text-sm font-bold text-sky-900">
-                  PIN de Aula Temporal del Día
-                </label>
-                <input
-                  id="classroomPin"
-                  type="text"
-                  required
-                  autoComplete="off"
-                  value={classroomPinInput}
-                  onChange={(e) => setClassroomPinInput(e.target.value.toUpperCase())}
-                  className="w-full min-h-[48px] px-4 py-3 rounded-xl border border-sky-300 bg-sky-50/50 text-base sm:text-sm font-mono uppercase text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-600"
-                />
-              </div>
-            )}
-
-            <button
-              type="submit"
-              className="w-full min-h-[52px] py-3.5 px-5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-bold text-base sm:text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-xs"
-            >
-              <span>Iniciar Sesión</span>
-              <ArrowRight className="w-5 h-5" />
-            </button>
-          </form>
-        </div>
-      </div>
-    );
-  }
-
   const currentStudentAcademicRecord = currentStudent
     ? (academicDataset || buildInitialAcademicDataset(students)).records.find(
         (r) => r.studentId === currentStudent.id
@@ -2260,6 +2614,11 @@ export function StudentPortal({
           ...rec.clases,
           [claseId]: {
             ...prevC,
+            asistenciaSolicitudEstado: 'pendiente' as const,
+            asistenciaSolicitudBloque: bloque === 'AB' ? 'AMBOS' : bloque,
+            asistenciaSolicitudMotivo: motivo,
+            asistenciaSolicitudSoporteUrl: soporteUrl,
+            asistenciaSolicitudFechaIso: nowIso,
             excusaEstado: 'pendiente_revision' as const,
             excusaBloque: bloque,
             excusaMotivo: motivo,
@@ -2274,6 +2633,130 @@ export function StudentPortal({
       updatedAtIso: nowIso,
       records: nextRecords
     });
+
+    if (onUpdateStudentProfile) {
+      const csInfo = (studentClassSessions || []).find((s) => s.id === claseId);
+      const label = `${csInfo?.code || `Clase C${claseId}`} — Excusa de Inasistencia (Bloque ${bloque})`;
+      const newTicket: AcademicReviewTicket = {
+        id: `TCK-${Date.now().toString(36).toUpperCase()}`,
+        studentId: currentStudent.id,
+        studentName: currentStudent.nombre,
+        fechaCreacion: new Date(nowIso).toLocaleString('es-CO'),
+        createdAtIso: nowIso,
+        timestampMs: Date.now(),
+        tipo: 'EXCUSA_INASISTENCIA',
+        referenciaId: `clase_${claseId}`,
+        referenciaLabel: label,
+        targetId: `clase_${claseId}`,
+        targetLabel: label,
+        claseId,
+        bloqueExcusa: bloque,
+        motivoEstudiante: motivo,
+        enlaceEvidencia: soporteUrl || undefined,
+        soporteUrl: soporteUrl || undefined,
+        estado: 'PENDIENTE'
+      };
+      const prevTickets = Array.isArray(currentStudent.solicitudesRevision)
+        ? currentStudent.solicitudesRevision
+        : [];
+      onUpdateStudentProfile({
+        ...currentStudent,
+        solicitudesRevision: [newTicket, ...prevTickets]
+      });
+    }
+  };
+
+  const openFormalReviewTicketModal = (params: {
+    tipo: AcademicReviewTicketType;
+    targetId: string;
+    targetLabel: string;
+    notaActual?: number;
+    preguntaReferencia?: string;
+    claseId?: ClassSessionId;
+  }) => {
+    setReviewTicketType(params.tipo);
+    setReviewTicketTargetId(params.targetId);
+    setReviewTicketTargetLabel(params.targetLabel);
+    const currentG = typeof params.notaActual === 'number' ? params.notaActual : 0;
+    setReviewTicketCurrentGrade(currentG);
+    setReviewTicketRequestedGrade(
+      Math.min(5.0, Math.max(3.0, Number((currentG + 0.5).toFixed(1)))).toFixed(1)
+    );
+    setReviewTicketQuestionRef(params.preguntaReferencia || '');
+    if (params.claseId) {
+      setSheetClassId(params.claseId);
+    }
+    setSheetExcuseReason(
+      params.preguntaReferencia
+        ? `Solicito revisión académica respecto a ${params.preguntaReferencia}: considero que el enunciado admite interpretación válida porque...`
+        : ''
+    );
+    setSheetExcuseUrl('');
+    setSheetNotice(null);
+    setStudentBottomSheet('justificar_falla');
+  };
+
+  const handleStudentSubmitFormalTicket = () => {
+    if (!currentStudent) return;
+    const cleanReason = sheetExcuseReason.trim();
+    if (!cleanReason) {
+      setSheetNotice('⚠️ Por favor describa la justificación académica o motivo de su solicitud.');
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    if (reviewTicketType === 'EXCUSA_INASISTENCIA') {
+      handleStudentSubmitExcusa(
+        sheetClassId,
+        sheetExcuseBlock,
+        cleanReason,
+        sheetExcuseUrl.trim()
+      );
+      setSheetNotice(
+        `✓ Excusa de inasistencia para Clase C${sheetClassId} (Bloque ${sheetExcuseBlock}) radicada con éxito en la Bandeja del Docente.`
+      );
+      setTimeout(() => setStudentBottomSheet('none'), 1300);
+      return;
+    }
+
+    const parsedReqGrade = Math.min(
+      5.0,
+      Math.max(0.0, Number(parseFloat(reviewTicketRequestedGrade || '0').toFixed(1)) || 0)
+    );
+    const ticketId = `TCK-${Date.now().toString(36).toUpperCase()}`;
+    const newTicket: AcademicReviewTicket = {
+      id: ticketId,
+      studentId: currentStudent.id,
+      studentName: currentStudent.nombre,
+      fechaCreacion: new Date(nowIso).toLocaleString('es-CO'),
+      createdAtIso: nowIso,
+      timestampMs: Date.now(),
+      tipo: reviewTicketType,
+      referenciaId: reviewTicketTargetId,
+      referenciaLabel: reviewTicketTargetLabel,
+      targetId: reviewTicketTargetId,
+      targetLabel: reviewTicketTargetLabel,
+      preguntaReferencia: reviewTicketQuestionRef.trim() || undefined,
+      notaActual: Number(reviewTicketCurrentGrade.toFixed(1)),
+      notaSolicitada: parsedReqGrade,
+      motivoEstudiante: cleanReason,
+      enlaceEvidencia: sheetExcuseUrl.trim() || undefined,
+      soporteUrl: sheetExcuseUrl.trim() || undefined,
+      estado: 'PENDIENTE'
+    };
+
+    const prevTickets = Array.isArray(currentStudent.solicitudesRevision)
+      ? currentStudent.solicitudesRevision
+      : [];
+    onUpdateStudentProfile?.({
+      ...currentStudent,
+      solicitudesRevision: [newTicket, ...prevTickets]
+    });
+
+    setSheetNotice(
+      `✓ Ticket #${ticketId} radicado exitosamente. El docente recibirá su solicitud en la Bandeja Centralizada.`
+    );
+    setTimeout(() => setStudentBottomSheet('none'), 1300);
   };
 
   // Emitir sonido automático cuando se detecte un nuevo llamado de asistencia activo
@@ -2288,7 +2771,590 @@ export function StudentPortal({
     }
   }, [activeRollCallClasses, currentStudentAcademicRecord, playRollCallChime, rollCallSoundEnabled]);
 
-  // ================= VIEW 2: PANEL DEL ESTUDIANTE CON SESIÓN INICIADA (ACTIVA) — REORGANIZADO PARA WEB Y MÓVIL =================
+  // ================= VIEW 1: VENTANA DE INICIO DE SESIÓN DEL ESTUDIANTE =================
+  if (examPhase === 'login') {
+    return (
+      <div className="min-h-screen flex items-center justify-center px-4 py-8 sm:py-10">
+        <div className="w-full max-w-md bg-white border border-slate-200 rounded-2xl shadow-xs p-6 sm:p-8 space-y-6">
+          {onGoToInitialHome && (
+            <div>
+              <button
+                type="button"
+                onClick={onGoToInitialHome}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-semibold text-slate-700 transition-colors cursor-pointer"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                <span>Volver</span>
+              </button>
+            </div>
+          )}
+
+          <div className="space-y-2 text-center">
+            <div className="w-11 h-11 rounded-xl bg-sky-600 text-white flex items-center justify-center mx-auto">
+              <GraduationCap className="w-5 h-5" />
+            </div>
+            <h1 className="text-2xl font-bold text-slate-900 tracking-tight">
+              Estudiante
+            </h1>
+          </div>
+
+          {/* Bloqueo por Tercer Intento */}
+          {thirdAttemptBlockedModal && (
+            <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 space-y-3 text-sm">
+              <div className="flex items-start gap-2.5 text-amber-900 font-semibold">
+                <AlertTriangle className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+                <span>
+                  «Total intentos terminados. Has alcanzado el límite máximo de 2 intentos permitidos para esta evaluación.»
+                </span>
+              </div>
+              <div className="bg-white rounded-lg p-3 border border-amber-200 space-y-1 text-xs text-slate-700 font-mono">
+                <div>Estudiante: {thirdAttemptBlockedModal.student.nombre}</div>
+                {thirdAttemptBlockedModal.modalidadLabel && (
+                  <div>Evaluación: {thirdAttemptBlockedModal.modalidadLabel}</div>
+                )}
+                <div>
+                  Intento 1:{' '}
+                  {thirdAttemptBlockedModal.att1 !== null
+                    ? `${thirdAttemptBlockedModal.att1.toFixed(1)} / 5.0`
+                    : 'N/A'}
+                </div>
+                <div>
+                  Intento 2:{' '}
+                  {thirdAttemptBlockedModal.att2 !== null
+                    ? `${thirdAttemptBlockedModal.att2.toFixed(1)} / 5.0`
+                    : 'N/A'}
+                </div>
+                <div className="font-bold text-slate-900 pt-1 border-t border-slate-100">
+                  Nota Definitiva Más Alta (Math.max): {thirdAttemptBlockedModal.bestGrade.toFixed(1)} / 5.0
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Error de Coincidencia Dual */}
+          {loginError && (
+            <div className="bg-red-50 border border-red-200 rounded-xl p-3.5 flex items-start gap-2.5 text-xs text-red-800 font-medium">
+              <XCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+              <span>{loginError}</span>
+            </div>
+          )}
+
+          <form onSubmit={handleLoginSubmit} className="space-y-4">
+            <div className="space-y-1.5">
+              <label htmlFor="docId" className="block text-xs sm:text-sm font-bold text-slate-800">
+                ID de Estudiante
+              </label>
+              <input
+                id="docId"
+                type="text"
+                inputMode="numeric"
+                required
+                autoComplete="off"
+                value={docIdInput}
+                onChange={(e) => setDocIdInput(e.target.value)}
+                className="w-full min-h-[48px] px-4 py-3 rounded-xl border border-slate-300 text-base sm:text-sm font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-600 focus:border-transparent"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <label htmlFor="accessCode" className="block text-xs sm:text-sm font-bold text-slate-800">
+                  Código de Acceso de Sesión
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setShowLoginAccessCode((v) => !v)}
+                  className="text-[11px] font-bold text-sky-700 hover:text-sky-900 inline-flex items-center gap-1 cursor-pointer"
+                >
+                  {showLoginAccessCode ? (
+                    <>
+                      <EyeOff className="w-3.5 h-3.5" />
+                      <span>Ocultar</span>
+                    </>
+                  ) : (
+                    <>
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>Mostrar</span>
+                    </>
+                  )}
+                </button>
+              </div>
+              <input
+                id="accessCode"
+                type={showLoginAccessCode ? 'text' : 'password'}
+                required
+                autoComplete="off"
+                autoCapitalize="characters"
+                maxLength={24}
+                value={accessCodeInput}
+                onChange={(e) => setAccessCodeInput(e.target.value.toUpperCase())}
+                className="w-full min-h-[48px] px-4 py-3 rounded-xl border border-slate-300 text-base sm:text-sm font-mono uppercase text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-600 focus:border-transparent"
+              />
+            </div>
+
+            {config.exigirPinAula && (
+              <div className="space-y-1.5 pt-1">
+                <label htmlFor="classroomPin" className="block text-xs sm:text-sm font-bold text-sky-900">
+                  PIN de Aula Temporal del Día
+                </label>
+                <input
+                  id="classroomPin"
+                  type="text"
+                  required
+                  autoComplete="off"
+                  autoCapitalize="characters"
+                  value={classroomPinInput}
+                  onChange={(e) => setClassroomPinInput(e.target.value.toUpperCase())}
+                  className="w-full min-h-[48px] px-4 py-3 rounded-xl border border-sky-300 bg-sky-50/50 text-base sm:text-sm font-mono uppercase text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-600"
+                />
+              </div>
+            )}
+
+            <button
+              type="submit"
+              className="w-full min-h-[52px] py-3.5 px-5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-bold text-base sm:text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-xs"
+            >
+              <span>Iniciar Sesión</span>
+              <ArrowRight className="w-5 h-5" />
+            </button>
+
+            {/* Asistencia rápida en aula si olvidó su código */}
+            <div className="pt-2 border-t border-slate-100 space-y-2">
+              <button
+                type="button"
+                disabled={codeHelpRequestStatus.type === 'sending'}
+                onClick={() => void handleRequestClassroomCodeHelp()}
+                className="w-full py-2 px-3 rounded-xl bg-slate-50 hover:bg-sky-50 border border-slate-200 text-xs font-bold text-slate-700 hover:text-sky-800 flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <HelpCircle className="w-3.5 h-3.5 text-sky-600 shrink-0" />
+                <span>
+                  {codeHelpRequestStatus.type === 'sending'
+                    ? 'Enviando aviso al docente en sala...'
+                    : '¿Olvidó su código? Solicitar ayuda al docente en sala'}
+                </span>
+              </button>
+              {codeHelpRequestStatus.message && (
+                <div
+                  className={`p-2.5 rounded-xl text-[11px] font-semibold border ${
+                    codeHelpRequestStatus.type === 'sent'
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                      : 'bg-amber-50 border-amber-200 text-amber-900'
+                  }`}
+                >
+                  {codeHelpRequestStatus.message}
+                </div>
+              )}
+            </div>
+          </form>
+
+          {/* Navegación rápida entre perfiles de acceso */}
+          <div className="pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+            <span>Cambiar perfil de ingreso:</span>
+            <div className="flex items-center gap-3 font-semibold">
+              {onSwitchToTeacherLogin && (
+                <button
+                  type="button"
+                  onClick={onSwitchToTeacherLogin}
+                  className="text-slate-700 hover:text-slate-950 hover:underline underline-offset-4 cursor-pointer"
+                >
+                  Docente
+                </button>
+              )}
+              {onSwitchToTeacherLogin && onSwitchToEditorLogin && (
+                <span aria-hidden="true" className="text-slate-300">·</span>
+              )}
+              {onSwitchToEditorLogin && (
+                <button
+                  type="button"
+                  onClick={onSwitchToEditorLogin}
+                  className="text-indigo-700 hover:text-indigo-900 hover:underline underline-offset-4 cursor-pointer"
+                >
+                  Editor
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ================= VIEW 2A: VENTANA DE CURSOS DISPONIBLES ASIGNADOS AL ESTUDIANTE =================
+  if (
+    examPhase === 'modality_select' &&
+    currentStudent &&
+    (isCourseSelectionWindowOpen || !authState.studentSelectedCourseId)
+  ) {
+    const cleanCurrentId = String(currentStudent.id || '')
+      .trim()
+      .replace(/[\s.-]/g, '')
+      .toUpperCase();
+
+    return (
+      <div className="min-h-screen bg-slate-50 px-4 py-8 sm:py-12">
+        <div className="max-w-5xl mx-auto space-y-6">
+          {/* Cabecera de Bienvenida del Estudiante */}
+          <div className="bg-white border border-slate-200 rounded-2xl p-6 sm:p-8 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-start sm:items-center gap-4">
+              <div className="w-12 h-12 rounded-2xl bg-sky-600 text-white flex items-center justify-center shrink-0">
+                <GraduationCap className="w-6 h-6" />
+              </div>
+              <div className="space-y-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="px-2.5 py-0.5 rounded-md bg-sky-50 border border-sky-200 text-[11px] font-bold text-sky-800 uppercase tracking-wide">
+                    Portal del Estudiante · Mis Cursos Disponibles
+                  </span>
+                  <span className="px-2.5 py-0.5 rounded-md bg-emerald-50 border border-emerald-200 text-[11px] font-bold text-emerald-800">
+                    {assignedStudentCourses.length}{' '}
+                    {assignedStudentCourses.length === 1 ? 'curso asignado' : 'cursos asignados'}
+                  </span>
+                </div>
+                <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
+                  Bienvenido(a), {currentStudent.nombre}
+                </h1>
+                <p className="text-xs sm:text-sm text-slate-600">
+                  ID Estudiante: <span className="font-mono font-bold text-slate-800">{currentStudent.id}</span> · Seleccione uno de los cursos que tiene asignados para cargar toda su información académica, lecciones, mini-retos, exámenes y calificaciones.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2.5 self-end sm:self-center shrink-0">
+              {Boolean(authState.studentSelectedCourseId) && (
+                <button
+                  type="button"
+                  onClick={() => setIsCourseSelectionWindowOpen(false)}
+                  className="min-h-[44px] px-4 py-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-xs font-bold text-slate-700 transition-colors cursor-pointer"
+                >
+                  Volver al curso actual
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={handleOpenStudentCredentialsSheet}
+                className="min-h-[44px] px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold flex items-center gap-2 cursor-pointer active:scale-95 transition-transform whitespace-nowrap shrink-0 shadow-2xs"
+                title="Cuenta y Credenciales del Estudiante"
+              >
+                <UserCheck className="w-4 h-4 text-sky-400 shrink-0" />
+                <span>Cuenta Estudiante</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleLogoutCurrentStudent}
+                className="min-h-[44px] px-4 py-2.5 rounded-xl border border-red-200 bg-red-50 hover:bg-red-100 text-xs font-bold text-red-700 flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+              >
+                <RotateCcw className="w-3.5 h-3.5 shrink-0" />
+                <span>Cerrar sesión</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Buscador cuando hay cursos asignados */}
+          {assignedStudentCourses.length > 1 && (
+            <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="text-xs font-bold text-slate-700">
+                Filtrar mis cursos asignados ({filteredStudentCourses.length} de {assignedStudentCourses.length})
+              </div>
+              <input
+                type="text"
+                value={courseSearchQuery}
+                onChange={(e) => setCourseSearchQuery(e.target.value)}
+                placeholder="Buscar por nombre del curso, código, docente o periodo..."
+                className="w-full sm:w-96 px-3.5 py-2 rounded-xl border border-slate-300 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-600"
+              />
+            </div>
+          )}
+
+          {/* Listado de Cursos Asignados al Estudiante */}
+          {filteredStudentCourses.length === 0 ? (
+            <div className="bg-white border border-slate-200 rounded-2xl p-10 text-center space-y-3 shadow-xs">
+              <div className="w-12 h-12 rounded-2xl bg-slate-100 text-slate-500 flex items-center justify-center mx-auto">
+                <BookOpen className="w-6 h-6" />
+              </div>
+              <div className="text-base font-bold text-slate-900">
+                No se encontraron cursos con ese criterio
+              </div>
+              <p className="text-xs text-slate-600 max-w-md mx-auto">
+                Verifique el término de búsqueda o consulte con su docente la asignación de su curso.
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+              {filteredStudentCourses.map((course) => {
+                const cMeta = getEffectiveCourseMetadata(config, null, course.meta.courseId);
+                const isCurrentlySelected =
+                  authState.studentSelectedCourseId === cMeta.courseId ||
+                  config.activeCourseId === cMeta.courseId;
+
+                const courseRoster = Array.isArray(course.students) ? course.students : [];
+                const studentInCourse =
+                  courseRoster.find(
+                    (s) =>
+                      String(s?.id || '')
+                        .trim()
+                        .replace(/[\s.-]/g, '')
+                        .toUpperCase() === cleanCurrentId
+                  ) || currentStudent;
+
+                const courseAttempts = Array.isArray(course.attempts) ? course.attempts : [];
+                const myCourseAttempts = courseAttempts.filter(
+                  (a) =>
+                    String(a?.studentId || '')
+                      .trim()
+                      .replace(/[\s.-]/g, '')
+                      .toUpperCase() === cleanCurrentId
+                );
+                const myBestGradeInCourse =
+                  myCourseAttempts.length > 0
+                    ? Math.max(...myCourseAttempts.map((a) => Number(a.notaColombiana) || 0))
+                    : 0;
+                const myUnlockedBadgesCount = ([1, 2, 3, 4, 5] as const).filter(
+                  (m) => studentInCourse?.progresoRetos?.[m]?.insigniaDesbloqueada
+                ).length;
+                const modulesCount = Math.max(
+                  1,
+                  Array.isArray(cMeta.modulosCurso) && cMeta.modulosCurso.length > 0
+                    ? cMeta.modulosCurso.length
+                    : Number(cMeta.cantidadModulos) || 5
+                );
+
+                return (
+                  <div
+                    key={cMeta.courseId}
+                    onClick={() => handleSelectStudentCourse(course)}
+                    className={`group bg-white rounded-2xl p-6 border-2 transition-all flex flex-col justify-between gap-5 cursor-pointer shadow-xs hover:shadow-md ${
+                      isCurrentlySelected
+                        ? 'border-sky-600 ring-2 ring-sky-600/10'
+                        : 'border-slate-200 hover:border-sky-600'
+                    }`}
+                  >
+                    <div className="space-y-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="px-2.5 py-1 rounded-lg bg-sky-600 text-white font-mono text-xs font-bold">
+                            {cMeta.codigoCurso || 'CURSO'}
+                          </span>
+                          {cMeta.periodoAcademico && (
+                            <span className="px-2.5 py-1 rounded-lg bg-slate-100 text-slate-700 text-xs font-semibold">
+                              {cMeta.periodoAcademico}
+                            </span>
+                          )}
+                          {isCurrentlySelected && (
+                            <span className="px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] font-bold">
+                              Curso Activo
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="space-y-1">
+                        <h2 className="text-lg font-bold text-slate-900 group-hover:text-sky-700 transition-colors">
+                          {cMeta.nombreCurso || 'Curso Académico'}
+                        </h2>
+                        {cMeta.programaAcademico && (
+                          <div className="text-xs font-semibold text-slate-600">
+                            {cMeta.programaAcademico}
+                            {cMeta.institucionSede ? ` · ${cMeta.institucionSede}` : ''}
+                          </div>
+                        )}
+                        <div className="text-xs text-slate-500">
+                          Docente:{' '}
+                          <span className="font-semibold text-slate-700">
+                            {cMeta.docenteResponsable || config.nombreDocente || 'Docente Titular'}
+                          </span>
+                        </div>
+                        {cMeta.descripcionGeneral && (
+                          <p className="text-xs text-slate-500 line-clamp-2 pt-1">
+                            {cMeta.descripcionGeneral}
+                          </p>
+                        )}
+                      </div>
+
+                      {/* Resumen Académico del Estudiante en este Curso */}
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2">
+                        <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200/80">
+                          <div className="text-[10px] font-bold text-slate-500 uppercase">
+                            Módulos / Clases
+                          </div>
+                          <div className="text-sm font-bold text-slate-900 font-mono">
+                            {modulesCount}
+                          </div>
+                        </div>
+                        <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200/80">
+                          <div className="text-[10px] font-bold text-slate-500 uppercase">
+                            Mis Evaluaciones
+                          </div>
+                          <div className="text-sm font-bold text-slate-900 font-mono">
+                            {myCourseAttempts.length}
+                          </div>
+                        </div>
+                        <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200/80">
+                          <div className="text-[10px] font-bold text-slate-500 uppercase">
+                            Mis Insignias
+                          </div>
+                          <div className="text-sm font-bold text-slate-900 font-mono">
+                            {myUnlockedBadgesCount}/{modulesCount}
+                          </div>
+                        </div>
+                        <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200/80">
+                          <div className="text-[10px] font-bold text-slate-500 uppercase">
+                            Mejor Nota
+                          </div>
+                          <div className="text-sm font-bold text-sky-700 font-mono">
+                            {myBestGradeInCourse > 0 ? `${myBestGradeInCourse.toFixed(1)}/5.0` : '—'}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-[11px] font-medium text-slate-500">
+                        Carga lecciones, retos, exámenes y notas del curso
+                      </span>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleLogoutCurrentStudent();
+                          }}
+                          className="px-3 py-2 rounded-xl border border-red-200 bg-red-50 hover:bg-red-100 text-red-700 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shrink-0"
+                          title="Cerrar sesión del estudiante rápidamente"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5 shrink-0" />
+                          <span>Cerrar sesión</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleSelectStudentCourse(course);
+                          }}
+                          className="px-4 py-2 rounded-xl bg-sky-600 group-hover:bg-sky-700 text-white text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shrink-0"
+                        >
+                          <span>Elegir curso</span>
+                          <ArrowRight className="w-4 h-4 group-hover:translate-x-0.5 transition-transform" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* MODAL / HOJA DE CUENTA Y CREDENCIALES DEL ESTUDIANTE EN LA VENTANA INICIAL DE CURSOS DISPONIBLES */}
+        {studentBottomSheet === 'perfil' && (
+          <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
+            <div className="bg-white border border-slate-200 rounded-t-3xl sm:rounded-2xl max-w-lg w-full p-5 sm:p-6 space-y-4 max-h-[90vh] overflow-y-auto shadow-2xl">
+              <div className="w-10 h-1.5 bg-slate-300 rounded-full mx-auto sm:hidden" />
+              <div className="space-y-4 text-xs">
+                <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                  <div>
+                    <h3 className="text-base font-bold text-slate-900">
+                      Cuenta y Credenciales del Estudiante
+                    </h3>
+                    <p className="text-slate-500 font-mono">
+                      Documento / ID: {currentStudent.id}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setStudentBottomSheet('none')}
+                    className="min-h-[44px] min-w-[44px] flex items-center justify-center text-slate-400 hover:text-slate-800 font-bold cursor-pointer"
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                <form onSubmit={handleSaveStudentProfile} className="space-y-3">
+                  <div>
+                    <label className="block font-bold text-slate-800 mb-1">
+                      Nombre Completo:
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={profileNameInput}
+                      onChange={(e) => setProfileNameInput(e.target.value)}
+                      className="w-full min-h-[48px] px-3.5 py-2 rounded-xl border border-slate-300 text-slate-900 font-semibold"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-bold text-slate-800 mb-1">
+                      Código de Acceso Personal:
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      maxLength={12}
+                      value={profileCodeInput}
+                      onChange={(e) => setProfileCodeInput(e.target.value.toUpperCase())}
+                      className="w-full min-h-[48px] px-3.5 py-2 rounded-xl border border-slate-300 font-mono uppercase text-slate-900 font-bold"
+                    />
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block font-bold text-slate-800 mb-1">
+                        Correo Electrónico:
+                      </label>
+                      <input
+                        type="email"
+                        value={profileEmailInput}
+                        onChange={(e) => setProfileEmailInput(e.target.value)}
+                        placeholder="estudiante@correo.com"
+                        className="w-full min-h-[48px] px-3.5 py-2 rounded-xl border border-slate-300 text-slate-900"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-bold text-slate-800 mb-1">
+                        WhatsApp/Celular:
+                      </label>
+                      <input
+                        type="tel"
+                        value={profileWhatsappInput}
+                        onChange={(e) => setProfileWhatsappInput(e.target.value)}
+                        placeholder="Ej: 3001234567"
+                        className="w-full min-h-[48px] px-3.5 py-2 rounded-xl border border-slate-300 font-mono text-slate-900"
+                      />
+                    </div>
+                  </div>
+                  {profileSaveMsg && (
+                    <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 font-semibold">
+                      {profileSaveMsg}
+                    </div>
+                  )}
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleLogoutCurrentStudent();
+                        onGoToInitialHome?.();
+                      }}
+                      className="min-h-[48px] px-4 py-2.5 rounded-xl border border-red-200 bg-red-50 hover:bg-red-100 text-red-700 font-bold flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <RotateCcw className="w-4 h-4" />
+                      <span>Cerrar Sesión</span>
+                    </button>
+
+                    <button
+                      type="submit"
+                      className="min-h-[48px] px-5 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-bold cursor-pointer active:scale-95 transition-transform"
+                    >
+                      Guardar Cambios
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+        )}
+        {globalSessionAtRiskModalNode}
+      </div>
+    );
+  }
+
+  // ================= VIEW 2B: PANEL DEL ESTUDIANTE CON SESIÓN INICIADA (ACTIVA) — REORGANIZADO PARA WEB Y MÓVIL =================
   if (examPhase === 'modality_select' && currentStudent && currentStudentAcademicRecord) {
     const selectedModStats = getModalityAttemptStats(selectedModality);
     const selectedModConfig =
@@ -2323,6 +3389,103 @@ export function StudentPortal({
       return true;
     });
 
+    const studentAcademicSummaryForChart = computeStudentAcademicSummary(
+      currentStudentAcademicRecord,
+      currentStudent,
+      studentAttempts,
+      studentClassSessions
+    );
+
+    const moduleGradesBarData = studentClassSessions.map((cs) => {
+      const cId = cs.id as ClassSessionId;
+      const cRec = studentAcademicSummaryForChart.record.clases[cId];
+      const finalModGrade = Number((studentAcademicSummaryForChart.classFinals[cId] ?? 0).toFixed(2));
+      const examGrade = Number((cRec?.examen ?? 0).toFixed(2));
+      const practRetoGrade = Number(
+        Math.max(Number(cRec?.trabajoPractico || 0), Number(cRec?.participacion || 0)).toFixed(2)
+      );
+      const bestSignal = Number(Math.max(finalModGrade, examGrade, practRetoGrade).toFixed(2));
+      return {
+        classId: cId,
+        modulo: cs.code || `M${cId}`,
+        nombreModulo: cs.shortTitle || cs.fullTitle || `Módulo ${cId}`,
+        notaModulo: finalModGrade > 0 ? finalModGrade : bestSignal,
+        notaExamen: examGrade,
+        notaPracticaReto: practRetoGrade,
+        metaMinima: minPass
+      };
+    });
+
+    const evaluatedModulesInChartCount = moduleGradesBarData.filter(
+      (d) => d.notaModulo > 0 || d.notaExamen > 0 || d.notaPracticaReto > 0
+    ).length;
+
+    const studentMenuCards = [
+      {
+        id: 'inicio' as const,
+        badge: 'Módulo 1 · Inicio',
+        title: 'Escritorio y Rendimiento',
+        subtitle: 'Resumen académico y gráfica por módulos',
+        metric: `Prom: ${studentAcademicSummaryForChart.promedioAcumulado.toFixed(1)} / 5.0`,
+        icon: LayoutGrid,
+        accentBg: 'bg-sky-50 text-sky-700 border-sky-200',
+        activeRing: 'ring-sky-500/40',
+        onClick: handleGoHomeStudentPanel,
+        isActive: studentDashboardTab === 'inicio'
+      },
+      {
+        id: 'material_modulos' as const,
+        badge: 'Módulo 2 · Estudio',
+        title: 'Lecciones y Material',
+        subtitle: 'Guías de lectura y recursos descargables',
+        metric: `${activeCourseMeta.cantidadModulos} Módulos`,
+        icon: BookOpen,
+        accentBg: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+        activeRing: 'ring-emerald-500/40',
+        onClick: () => setStudentDashboardTab('material_modulos'),
+        isActive: studentDashboardTab === 'material_modulos'
+      },
+      {
+        id: 'mini_retos' as const,
+        badge: 'Módulo 3 · Práctica',
+        title: 'Mini Retos e Insignias',
+        subtitle: 'Entrenamiento gamificado por módulo',
+        metric: `${unlockedBadgesCount}/${totalCourseModulesCount} Insignias`,
+        icon: Trophy,
+        accentBg: 'bg-amber-50 text-amber-700 border-amber-200',
+        activeRing: 'ring-amber-500/40',
+        onClick: () => setStudentDashboardTab('mini_retos'),
+        isActive: studentDashboardTab === 'mini_retos'
+      },
+      {
+        id: 'modalidades' as const,
+        badge: 'Módulo 4 · Evaluación',
+        title: 'Exámenes Oficiales',
+        subtitle: 'Presentar evaluaciones y certificados',
+        metric: `${completedExamsCount}/${modalitiesOverview.length} Exámenes`,
+        icon: GraduationCap,
+        accentBg: 'bg-indigo-50 text-indigo-700 border-indigo-200',
+        activeRing: 'ring-indigo-500/40',
+        onClick: () => setStudentDashboardTab('modalidades'),
+        isActive:
+          studentDashboardTab === 'modalidades' ||
+          studentDashboardTab === 'mis_notas' ||
+          studentDashboardTab === 'diagnostico_pedagogico'
+      },
+      {
+        id: 'notas_asistencia_clases' as const,
+        badge: 'Módulo 5 · Boletín',
+        title: 'Expediente y Asistencia',
+        subtitle: 'Sábana C1–C6, simulador y reporte PDF',
+        metric: `${studentAcademicSummaryForChart.porcentajeAsistencia}% Asist.`,
+        icon: BarChart3,
+        accentBg: 'bg-violet-50 text-violet-700 border-violet-200',
+        activeRing: 'ring-violet-500/40',
+        onClick: () => setStudentDashboardTab('notas_asistencia_clases'),
+        isActive: studentDashboardTab === 'notas_asistencia_clases'
+      }
+    ];
+
     return (
       <div className="max-w-7xl mx-auto px-3 sm:px-6 pt-3 pb-24 lg:pb-10 space-y-4">
         <OptionServerSaveBar
@@ -2337,110 +3500,338 @@ export function StudentPortal({
           }}
         />
 
-        {/* BARRA SUPERIOR DE ESTADO (TOP BAR CONTRACT: 3 ZONAS LIMPIAS) */}
-        <header className="bg-white border border-slate-200 rounded-2xl px-4 sm:px-6 py-3.5 flex items-center justify-between gap-4">
+        {/* BARRA SUPERIOR DE ESTADO Y ACCIONES DE SESIÓN (DESPEJADA Y ORGANIZADA) */}
+        <header className="bg-white border border-slate-200 rounded-2xl p-4 sm:px-6 sm:py-4 flex flex-col md:flex-row md:items-center justify-between gap-3.5 shadow-2xs">
           {/* Zona 1: Marca / Curso Activo */}
           <div className="flex items-center gap-3 min-w-0">
             {studentDashboardTab !== 'inicio' && (
               <button
                 type="button"
                 onClick={handleGoHomeStudentPanel}
-                className="min-h-[44px] min-w-[44px] px-3 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-800 text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 transition-transform shrink-0"
+                className="min-h-[42px] px-3.5 py-2 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-800 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 transition-transform shrink-0"
                 title="Volver al Escritorio Principal"
               >
                 <ArrowLeft className="w-4 h-4" />
-                <span className="hidden sm:inline whitespace-nowrap">Escritorio</span>
+                <span>Inicio</span>
               </button>
             )}
+            <div className="w-10 h-10 rounded-xl bg-sky-600 text-white flex items-center justify-center shrink-0">
+              <GraduationCap className="w-5 h-5" />
+            </div>
             <button
               type="button"
               onClick={handleGoHomeStudentPanel}
-              className="text-left truncate cursor-pointer"
+              className="text-left min-w-0 cursor-pointer"
             >
-              <span className="text-sm sm:text-base font-bold tracking-tight text-slate-900 whitespace-nowrap">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="px-2 py-0.5 rounded-md bg-sky-50 border border-sky-200 font-mono text-[10px] font-bold text-sky-800 uppercase">
+                  {activeCourseMeta.codigoCurso || 'CURSO'}
+                </span>
+                <span className="text-[11px] font-medium text-slate-500 truncate">
+                  Docente: {activeCourseMeta.docenteResponsable || config.nombreDocente || 'Docente Titular'}
+                </span>
+              </div>
+              <div className="text-sm sm:text-base font-bold tracking-tight text-slate-900 truncate">
                 {activeCourseMeta.nombreCurso || 'Portal del Estudiante'}
-              </span>
+              </div>
             </button>
           </div>
 
-          {/* Zona 2: Enlaces de navegación limpia en Desktop */}
-          <nav className="hidden lg:flex items-center gap-6 text-xs font-semibold text-slate-600">
-            <button
-              type="button"
-              onClick={handleGoHomeStudentPanel}
-              className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                studentDashboardTab === 'inicio'
-                  ? 'text-slate-900 underline underline-offset-8 decoration-2'
-                  : 'hover:text-slate-900'
-              }`}
-            >
-              Panel Bento
-            </button>
-            <button
-              type="button"
-              onClick={() => setStudentDashboardTab('material_modulos')}
-              className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                studentDashboardTab === 'material_modulos'
-                  ? 'text-slate-900 underline underline-offset-8 decoration-2'
-                  : 'hover:text-slate-900'
-              }`}
-            >
-              Lecciones ({activeCourseMeta.cantidadModulos})
-            </button>
-            <button
-              type="button"
-              onClick={() => setStudentDashboardTab('mini_retos')}
-              className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                studentDashboardTab === 'mini_retos'
-                  ? 'text-slate-900 underline underline-offset-8 decoration-2'
-                  : 'hover:text-slate-900'
-              }`}
-            >
-              Mini Retos ({unlockedBadgesCount}/{totalCourseModulesCount})
-            </button>
-            <button
-              type="button"
-              onClick={() => setStudentDashboardTab('modalidades')}
-              className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                studentDashboardTab === 'modalidades' ||
-                studentDashboardTab === 'mis_notas' ||
-                studentDashboardTab === 'diagnostico_pedagogico'
-                  ? 'text-slate-900 underline underline-offset-8 decoration-2'
-                  : 'hover:text-slate-900'
-              }`}
-            >
-              Exámenes ({completedExamsCount}/{modalitiesOverview.length})
-            </button>
-            <button
-              type="button"
-              onClick={() => setStudentDashboardTab('notas_asistencia_clases')}
-              className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                studentDashboardTab === 'notas_asistencia_clases'
-                  ? 'text-slate-900 underline underline-offset-8 decoration-2'
-                  : 'hover:text-slate-900'
-              }`}
-            >
-              Expediente y Notas
-            </button>
-          </nav>
-
-          {/* Zona 3: Acción Primaria Unificada (Perfil / Cuenta en Hoja Deslizable) */}
-          <div className="flex items-center gap-2 shrink-0">
+          {/* Zona 2: Acciones de Sesión Organizadas en Tarjetas de Acción Rápida */}
+          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
             <button
               type="button"
               onClick={() => {
-                setProfileNameInput(currentStudent.nombre);
-                setProfileCodeInput(currentStudent.codigoAcceso);
-                setProfileSaveMsg(null);
-                setStudentBottomSheet('perfil');
+                setCourseSearchQuery('');
+                setIsCourseSelectionWindowOpen(true);
               }}
-              className="min-h-[44px] px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center gap-2 cursor-pointer active:scale-95 transition-transform whitespace-nowrap shrink-0"
+              className="min-h-[42px] px-3.5 py-2 rounded-xl border border-sky-200 bg-sky-50/80 hover:bg-sky-100 text-sky-900 text-xs font-bold flex items-center gap-2 cursor-pointer active:scale-95 transition-all whitespace-nowrap shrink-0"
+              title="Ver mis cursos asignados y cambiar de curso"
+            >
+              <BookOpen className="w-4 h-4 text-sky-700 shrink-0" />
+              <span>Cambiar curso</span>
+              <span className="px-1.5 py-0.5 rounded-md bg-white border border-sky-200 text-[10px] font-mono font-bold text-sky-800">
+                {assignedStudentCourses.length}
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowStudentScheduleAgenda((prev) => !prev)}
+              className={`min-h-[42px] px-3.5 py-2 rounded-xl border text-xs font-bold flex items-center gap-2 cursor-pointer active:scale-95 transition-all whitespace-nowrap shrink-0 ${
+                showStudentScheduleAgenda
+                  ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                  : 'border-indigo-200 bg-indigo-50/80 hover:bg-indigo-100 text-indigo-900'
+              }`}
+              title="Ver cronograma de fechas de apertura/cierre del curso, horarios de exámenes, trabajos, mini retos y prórrogas"
+            >
+              <span>📅 Mi Agenda y Horarios</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleOpenStudentCredentialsSheet}
+              className="min-h-[42px] px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold flex items-center gap-2 cursor-pointer active:scale-95 transition-all whitespace-nowrap shrink-0 shadow-2xs"
+              title="Cuenta y Credenciales del Estudiante"
             >
               <UserCheck className="w-4 h-4 text-sky-400 shrink-0" />
-              <span className="max-w-[140px] truncate">{currentStudent.nombre}</span>
+              <span>Cuenta Estudiante</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleLogoutCurrentStudent}
+              className="min-h-[42px] px-3.5 py-2 rounded-xl border border-red-200 bg-red-50 hover:bg-red-100 text-red-700 text-xs font-bold flex items-center gap-1.5 cursor-pointer active:scale-95 transition-all whitespace-nowrap shrink-0"
+              title="Cerrar sesión rápidamente"
+            >
+              <RotateCcw className="w-3.5 h-3.5 shrink-0" />
+              <span>Cerrar sesión</span>
             </button>
           </div>
         </header>
+
+        {/* R1, R5 y R6: SEMÁFORO EN TIEMPO REAL DE VIGENCIA DEL CURSO, ACTIVIDADES Y AGENDA ACADÉMICA */}
+        <div className="bg-white border border-slate-200 rounded-2xl p-3.5 sm:px-5 sm:py-3.5 shadow-2xs space-y-3">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-extrabold text-slate-900 flex items-center gap-1.5">
+                <span>🚦 Ventanas de Apertura y Cierre en Vivo:</span>
+              </span>
+              {(
+                [
+                  'CURSO_GENERAL',
+                  'EXAMENES',
+                  'TRABAJOS_TALLERES',
+                  'MINI_RETOS',
+                  'PARTICIPACION_ASISTENCIA'
+                ] as AcademicActivityKey[]
+              ).map((actKey) => {
+                const st = liveActivityWindows[actKey];
+                const badgeStyle =
+                  st.status === 'OPEN'
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                    : st.status === 'LATE_GRACE'
+                    ? 'bg-amber-50 border-amber-300 text-amber-900'
+                    : st.status === 'EXTENSION_ACTIVE'
+                    ? 'bg-cyan-50 border-cyan-300 text-cyan-900'
+                    : st.status === 'UPCOMING'
+                    ? 'bg-yellow-50 border-yellow-300 text-yellow-900'
+                    : 'bg-rose-50 border-rose-200 text-rose-900';
+                return (
+                  <button
+                    key={actKey}
+                    type="button"
+                    onClick={() => setShowStudentScheduleAgenda((prev) => !prev)}
+                    className={`px-2.5 py-1 rounded-xl border text-[11px] font-bold flex items-center gap-1.5 cursor-pointer transition hover:opacity-90 ${badgeStyle}`}
+                    title={`${st.label}: ${st.reasonDetail}`}
+                  >
+                    <span>{st.icon}</span>
+                    <span className="font-extrabold">
+                      {actKey === 'CURSO_GENERAL'
+                        ? 'Curso'
+                        : actKey === 'EXAMENES'
+                        ? 'Exámenes'
+                        : actKey === 'TRABAJOS_TALLERES'
+                        ? 'Trabajos'
+                        : actKey === 'MINI_RETOS'
+                        ? 'Mini Retos'
+                        : 'Participación'}
+                      :
+                    </span>
+                    <span>{st.shortStatusLabel}</span>
+                    <span className="font-mono text-[10px] opacity-80">
+                      ({st.countdownText})
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setShowStudentScheduleAgenda((prev) => !prev)}
+              className="text-xs font-bold text-indigo-700 hover:text-indigo-900 self-start lg:self-center cursor-pointer whitespace-nowrap"
+            >
+              {showStudentScheduleAgenda
+                ? 'Ocultar cronograma detallado ▲'
+                : 'Ver fechas y horarios detallados ▼'}
+            </button>
+          </div>
+
+          {/* Alerta si el Curso General está Cerrado o en Modo Consulta Solo Lectura (R1) */}
+          {!liveActivityWindows.CURSO_GENERAL.isAccessible && (
+            <div className="p-3 rounded-xl bg-amber-50 border border-amber-300 text-amber-950 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <span className="font-extrabold">
+                  {liveActivityWindows.CURSO_GENERAL.badgeText}:
+                </span>{' '}
+                <span>{liveActivityWindows.CURSO_GENERAL.reasonDetail}</span>
+                {liveActivityWindows.CURSO_GENERAL.isReadOnlyConsultation && (
+                  <span className="ml-1 font-bold text-indigo-900">
+                    · Modo Consulta (Solo Lectura) habilitado para revisar tus calificaciones y certificados.
+                  </span>
+                )}
+              </div>
+              <span className="font-mono text-[11px] font-bold px-2.5 py-1 rounded bg-white border border-amber-300 shrink-0">
+                Vigencia: {liveActivityWindows.CURSO_GENERAL.openDate} →{' '}
+                {liveActivityWindows.CURSO_GENERAL.closeDate}
+              </span>
+            </div>
+          )}
+
+          {/* R6: Agenda Académica Visual Desplegable del Estudiante */}
+          {showStudentScheduleAgenda && (
+            <div className="pt-3 border-t border-slate-200 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-extrabold text-slate-900">
+                    📅 Cronograma Oficial de Fechas, Días y Rango de Horas del Curso
+                  </h3>
+                  <p className="text-xs text-slate-600">
+                    Consulta las ventanas habilitadas para Exámenes, Trabajos/Talleres, Mini Retos y Participación, así como las reglas de entrega tardía o prórrogas individuales.
+                  </p>
+                </div>
+                <span className="px-2.5 py-1 rounded-lg bg-slate-100 text-slate-800 font-mono text-[11px] font-bold">
+                  Hora actual verificada:{' '}
+                  {new Date(rollCallNowMs).toLocaleTimeString('es-CO', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit'
+                  })}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
+                {(
+                  [
+                    'CURSO_GENERAL',
+                    'EXAMENES',
+                    'TRABAJOS_TALLERES',
+                    'MINI_RETOS',
+                    'PARTICIPACION_ASISTENCIA'
+                  ] as AcademicActivityKey[]
+                ).map((actKey) => {
+                  const st = liveActivityWindows[actKey];
+                  const winCfg = effectiveCourseSchedule.activityWindows[actKey];
+                  const cardBorder =
+                    st.status === 'OPEN'
+                      ? 'border-emerald-300 bg-emerald-50/40'
+                      : st.status === 'LATE_GRACE'
+                      ? 'border-amber-300 bg-amber-50/40'
+                      : st.status === 'EXTENSION_ACTIVE'
+                      ? 'border-cyan-300 bg-cyan-50/40'
+                      : st.status === 'UPCOMING'
+                      ? 'border-yellow-300 bg-yellow-50/40'
+                      : 'border-rose-300 bg-rose-50/40';
+
+                  return (
+                    <div
+                      key={actKey}
+                      className={`p-3.5 rounded-xl border flex flex-col justify-between gap-2 text-xs ${cardBorder}`}
+                    >
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="text-base">{st.icon}</span>
+                          <span className="px-2 py-0.5 rounded bg-white border border-slate-200 font-mono text-[10px] font-extrabold text-slate-900">
+                            {st.shortStatusLabel}
+                          </span>
+                        </div>
+                        <div className="font-extrabold text-slate-900 leading-snug">
+                          {st.label}
+                        </div>
+                        <div className="text-[11px] font-semibold text-indigo-900">
+                          {st.badgeText}
+                        </div>
+                        <div className="text-[11px] text-slate-600 space-y-0.5 pt-1 border-t border-slate-200/70">
+                          <div>
+                            <strong>Apertura:</strong>{' '}
+                            <span className="font-mono">{st.openDate}</span>
+                          </div>
+                          <div>
+                            <strong>Cierre:</strong>{' '}
+                            <span className="font-mono">{st.closeDate}</span>
+                          </div>
+                          <div>
+                            <strong>Días:</strong> {st.allowedDaysLabel}
+                          </div>
+                          <div>
+                            <strong>Horario:</strong>{' '}
+                            <span className="font-mono">{st.hoursRangeLabel}</span>
+                          </div>
+                          {winCfg?.allowLateSubmission && (
+                            <div className="text-amber-900 font-medium">
+                              <strong>Prórroga tardía:</strong> +{winCfg.lateGraceHours}h (-
+                              {winCfg.latePenaltyPercent}%, máx {winCfg.maxGradeOnLate.toFixed(1)})
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      <div className="text-[10px] text-slate-600 bg-white/80 rounded-lg p-2 border border-slate-200/80">
+                        {st.reasonDetail}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* MENÚ PRINCIPAL DEL ESTUDIANTE EN TARJETAS INTERACTIVAS (FÁCIL IDENTIFICACIÓN Y SIN AMONTONAMIENTO) */}
+        <nav aria-label="Menú principal del estudiante" className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+          {studentMenuCards.map((item) => {
+            const ItemIcon = item.icon;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={item.onClick}
+                className={`p-3.5 rounded-2xl border text-left transition-all cursor-pointer flex flex-col justify-between gap-2.5 ${
+                  item.isActive
+                    ? `bg-slate-900 text-white border-slate-900 shadow-md ring-2 ${item.activeRing}`
+                    : 'bg-white hover:border-sky-300 text-slate-900 border-slate-200/90 hover:shadow-xs'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span
+                    className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] font-mono font-bold uppercase border ${
+                      item.isActive
+                        ? 'bg-white/15 text-sky-300 border-white/20'
+                        : item.accentBg
+                    }`}
+                  >
+                    <ItemIcon className="w-3.5 h-3.5 shrink-0" />
+                    <span>{item.badge}</span>
+                  </span>
+                  <ArrowRight
+                    className={`w-4 h-4 shrink-0 ${
+                      item.isActive ? 'text-sky-400' : 'text-slate-400'
+                    }`}
+                  />
+                </div>
+                <div>
+                  <div className="text-xs sm:text-sm font-bold leading-snug">
+                    {item.title}
+                  </div>
+                  <p
+                    className={`text-[11px] mt-0.5 leading-snug ${
+                      item.isActive ? 'text-slate-300' : 'text-slate-500'
+                    }`}
+                  >
+                    {item.subtitle}
+                  </p>
+                </div>
+                <div
+                  className={`text-[10px] font-mono font-bold pt-2 border-t flex items-center justify-between ${
+                    item.isActive
+                      ? 'border-slate-700 text-sky-300'
+                      : 'border-slate-100 text-slate-700'
+                  }`}
+                >
+                  <span>{item.metric}</span>
+                  <span>{item.isActive ? '● Activo' : 'Abrir →'}</span>
+                </div>
+              </button>
+            );
+          })}
+        </nav>
 
         {rollCallFeedbackBanner && (
           <div className="bg-emerald-600 text-white rounded-2xl p-4 flex items-center justify-between gap-3 text-xs sm:text-sm font-bold">
@@ -2778,15 +4169,25 @@ export function StudentPortal({
                           </p>
                         </div>
 
-                        {/* Acciones Táctiles >= 48px del Módulo Actual */}
-                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-1">
+                        {/* Acciones Táctiles en Tarjetas Interactivas del Módulo Actual */}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
                           <button
                             type="button"
                             onClick={() => setStudentDashboardTab('material_modulos')}
-                            className="min-h-[48px] px-3 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 transition-transform whitespace-nowrap"
+                            className="p-3.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-left flex items-center justify-between gap-3 cursor-pointer active:scale-[0.98] transition-all"
                           >
-                            <BookOpen className="w-4 h-4 shrink-0" />
-                            <span>Leer Lección</span>
+                            <div className="flex items-center gap-3 min-w-0">
+                              <div className="w-9 h-9 rounded-lg bg-white/15 flex items-center justify-center shrink-0">
+                                <BookOpen className="w-4 h-4 text-sky-300" />
+                              </div>
+                              <div className="min-w-0">
+                                <div className="text-xs font-bold">Leer Lección</div>
+                                <div className="text-[11px] text-slate-300 truncate">
+                                  Guía y material ({stepDocs.length} doc.)
+                                </div>
+                              </div>
+                            </div>
+                            <ArrowRight className="w-4 h-4 text-sky-300 shrink-0" />
                           </button>
 
                           <button
@@ -2798,10 +4199,20 @@ export function StudentPortal({
                               setSheetNotice(null);
                               setStudentBottomSheet('entregar_trabajo');
                             }}
-                            className="min-h-[48px] px-3 py-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-900 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 transition-transform whitespace-nowrap"
+                            className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/70 hover:bg-sky-50/60 hover:border-sky-300 text-slate-900 text-left flex items-center justify-between gap-3 cursor-pointer active:scale-[0.98] transition-all"
                           >
-                            <FileCheck2 className="w-4 h-4 text-sky-600 shrink-0" />
-                            <span>Entregar Trabajo</span>
+                            <div className="flex items-center gap-3 min-w-0">
+                              <div className="w-9 h-9 rounded-lg bg-sky-100 text-sky-700 flex items-center justify-center shrink-0">
+                                <FileCheck2 className="w-4 h-4" />
+                              </div>
+                              <div className="min-w-0">
+                                <div className="text-xs font-bold">Entregar Trabajo</div>
+                                <div className="text-[11px] text-slate-500 truncate">
+                                  Taller práctico {activeStepSession?.code}
+                                </div>
+                              </div>
+                            </div>
+                            <ArrowRight className="w-4 h-4 text-slate-400 shrink-0" />
                           </button>
 
                           <button
@@ -2812,10 +4223,20 @@ export function StudentPortal({
                               }
                               setStudentDashboardTab('mini_retos');
                             }}
-                            className="min-h-[48px] px-3 py-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-900 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 transition-transform whitespace-nowrap"
+                            className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/70 hover:bg-amber-50/60 hover:border-amber-300 text-slate-900 text-left flex items-center justify-between gap-3 cursor-pointer active:scale-[0.98] transition-all"
                           >
-                            <Trophy className="w-4 h-4 text-amber-600 shrink-0" />
-                            <span>Mini Reto</span>
+                            <div className="flex items-center gap-3 min-w-0">
+                              <div className="w-9 h-9 rounded-lg bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+                                <Trophy className="w-4 h-4" />
+                              </div>
+                              <div className="min-w-0">
+                                <div className="text-xs font-bold">Mini Reto</div>
+                                <div className="text-[11px] text-slate-500 truncate">
+                                  Práctica e insignia {activeStepSession?.code}
+                                </div>
+                              </div>
+                            </div>
+                            <ArrowRight className="w-4 h-4 text-slate-400 shrink-0" />
                           </button>
 
                           <button
@@ -2824,15 +4245,178 @@ export function StudentPortal({
                               setSelectedModality(stepExamMod);
                               setStudentDashboardTab('modalidades');
                             }}
-                            className="min-h-[48px] px-3 py-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-900 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 transition-transform whitespace-nowrap"
+                            className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/70 hover:bg-indigo-50/60 hover:border-indigo-300 text-slate-900 text-left flex items-center justify-between gap-3 cursor-pointer active:scale-[0.98] transition-all"
                           >
-                            <GraduationCap className="w-4 h-4 text-indigo-600 shrink-0" />
-                            <span>Examen {activeStepSession?.code}</span>
+                            <div className="flex items-center gap-3 min-w-0">
+                              <div className="w-9 h-9 rounded-lg bg-indigo-100 text-indigo-700 flex items-center justify-center shrink-0">
+                                <GraduationCap className="w-4 h-4" />
+                              </div>
+                              <div className="min-w-0">
+                                <div className="text-xs font-bold">
+                                  Examen {activeStepSession?.code}
+                                </div>
+                                <div className="text-[11px] text-slate-500 truncate">
+                                  Evaluación oficial del módulo
+                                </div>
+                              </div>
+                            </div>
+                            <ArrowRight className="w-4 h-4 text-slate-400 shrink-0" />
                           </button>
                         </div>
                       </div>
                     );
                   })()}
+
+                  {/* TARJETA DE RESUMEN DE RENDIMIENTO ACADÉMICO CON RECHARTS (NOTAS POR MÓDULO DEL CURSO ACTUAL) */}
+                  <div className="col-span-2 sm:col-span-4 bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-4">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3.5">
+                      <div className="space-y-0.5">
+                        <div className="inline-flex items-center gap-1.5 text-[11px] font-bold text-sky-700 uppercase tracking-wider">
+                          <BarChart3 className="w-4 h-4" />
+                          <span>Analítica Visual Recharts · Curso Actual</span>
+                        </div>
+                        <h2 className="text-base sm:text-lg font-bold text-slate-900">
+                          Resumen de Rendimiento Académico
+                        </h2>
+                        <p className="text-xs text-slate-500">
+                          Calificaciones obtenidas en los diferentes módulos de{' '}
+                          <strong className="text-slate-700">{activeCourseMeta.nombreCurso}</strong>{' '}
+                          (escala 0.0 a 5.0).
+                        </p>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 text-xs font-mono shrink-0">
+                        <div className="px-3 py-1.5 rounded-xl bg-sky-50 border border-sky-200 text-sky-900">
+                          <span className="block text-[10px] font-sans font-semibold text-sky-700 uppercase">
+                            Promedio Curso
+                          </span>
+                          <strong className="text-sm">
+                            {studentAcademicSummaryForChart.promedioAcumulado.toFixed(1)} / 5.0
+                          </strong>
+                        </div>
+                        <div className="px-3 py-1.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900">
+                          <span className="block text-[10px] font-sans font-semibold text-emerald-700 uppercase">
+                            Módulos con Nota
+                          </span>
+                          <strong className="text-sm">
+                            {evaluatedModulesInChartCount} / {moduleGradesBarData.length}
+                          </strong>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="w-full h-64">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart
+                          data={moduleGradesBarData}
+                          margin={{ top: 10, right: 16, left: -12, bottom: 5 }}
+                        >
+                          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                          <XAxis
+                            dataKey="modulo"
+                            tick={{ fontSize: 11, fill: '#334155', fontWeight: 700 }}
+                          />
+                          <YAxis
+                            domain={[0, 5]}
+                            ticks={[0, 1, 2, 3, 4, 5]}
+                            tick={{ fontSize: 11, fill: '#475569' }}
+                          />
+                          <Tooltip
+                            formatter={(value: number, name: string) => [
+                              `${Number(value || 0).toFixed(2)} / 5.0`,
+                              name
+                            ]}
+                            labelFormatter={(label, payload) => {
+                              const item = payload?.[0]?.payload;
+                              return item
+                                ? `${item.modulo} — ${item.nombreModulo}`
+                                : `Módulo ${label}`;
+                            }}
+                            contentStyle={{
+                              backgroundColor: '#ffffff',
+                              borderColor: '#cbd5e1',
+                              borderRadius: '12px',
+                              fontSize: '12px',
+                              boxShadow: '0 4px 12px rgba(15, 23, 42, 0.08)'
+                            }}
+                          />
+                          <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '6px' }} />
+                          <ReferenceLine
+                            y={minPass}
+                            stroke="#ef4444"
+                            strokeDasharray="4 4"
+                            label={{
+                              value: `Mín. ${minPass.toFixed(1)}`,
+                              position: 'insideTopRight',
+                              fill: '#dc2626',
+                              fontSize: 10
+                            }}
+                          />
+                          <Bar
+                            dataKey="notaModulo"
+                            name="Nota del Módulo"
+                            fill="#0284c7"
+                            radius={[6, 6, 0, 0]}
+                            maxBarSize={34}
+                          />
+                          <Bar
+                            dataKey="notaExamen"
+                            name="Examen del Módulo"
+                            fill="#4f46e5"
+                            radius={[6, 6, 0, 0]}
+                            maxBarSize={28}
+                          />
+                          <Bar
+                            dataKey="notaPracticaReto"
+                            name="Trabajo / Mini Reto"
+                            fill="#10b981"
+                            radius={[6, 6, 0, 0]}
+                            maxBarSize={28}
+                          />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+
+                    {/* Tarjetas rápidas por módulo debajo de la gráfica */}
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2 pt-1">
+                      {moduleGradesBarData.map((mItem) => {
+                        const isSelectedMod = selectedStepperClassId === mItem.classId;
+                        const isPassing = mItem.notaModulo >= minPass;
+                        return (
+                          <button
+                            key={mItem.classId}
+                            type="button"
+                            onClick={() => setSelectedStepperClassId(mItem.classId)}
+                            className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                              isSelectedMod
+                                ? 'bg-sky-50 border-sky-400 ring-1 ring-sky-400/30'
+                                : 'bg-slate-50/80 border-slate-200 hover:border-slate-300'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-1">
+                              <span className="font-mono text-[11px] font-bold text-slate-900">
+                                {mItem.modulo}
+                              </span>
+                              <span
+                                className={`font-mono text-[11px] font-extrabold ${
+                                  mItem.notaModulo === 0
+                                    ? 'text-slate-400'
+                                    : isPassing
+                                    ? 'text-emerald-700'
+                                    : 'text-amber-700'
+                                }`}
+                              >
+                                {mItem.notaModulo > 0 ? mItem.notaModulo.toFixed(1) : '—'}
+                              </span>
+                            </div>
+                            <div className="text-[10px] text-slate-500 truncate mt-0.5">
+                              {mItem.nombreModulo}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
 
                   {/* APP BENTO 1: LECCIONES Y MATERIAL DE ESTUDIO */}
                   <button
@@ -2987,6 +4571,33 @@ export function StudentPortal({
                   onChange={(e) => setProfileCodeInput(e.target.value.toUpperCase())}
                   className="w-full min-h-[46px] px-4 py-2.5 rounded-xl border border-slate-300 text-slate-900 font-mono uppercase focus:outline-none focus:ring-2 focus:ring-sky-600"
                 />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-800 mb-1.5">
+                    Correo Electrónico
+                  </label>
+                  <input
+                    type="email"
+                    value={profileEmailInput}
+                    onChange={(e) => setProfileEmailInput(e.target.value)}
+                    placeholder="estudiante@correo.com"
+                    className="w-full min-h-[46px] px-4 py-2.5 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-600"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-800 mb-1.5">
+                    WhatsApp/Celular
+                  </label>
+                  <input
+                    type="tel"
+                    value={profileWhatsappInput}
+                    onChange={(e) => setProfileWhatsappInput(e.target.value)}
+                    placeholder="Ej: 3001234567"
+                    className="w-full min-h-[46px] px-4 py-2.5 rounded-xl border border-slate-300 text-slate-900 font-mono focus:outline-none focus:ring-2 focus:ring-sky-600"
+                  />
+                </div>
               </div>
 
               {profileSaveMsg && (
@@ -3415,22 +5026,40 @@ export function StudentPortal({
                         </button>
 
                         {st.count > 0 && (
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              const latestAtt = st.att2 || st.att1;
-                              if (latestAtt) {
-                                setFinishedResult(latestAtt);
-                                setExamPhase('results');
-                              } else {
-                                setStudentDashboardTab('mis_notas');
-                              }
-                            }}
-                            className="min-h-[52px] px-4 py-3 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs sm:text-sm font-bold shrink-0 cursor-pointer"
-                          >
-                            Ver Certificado
-                          </button>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const latestAtt = st.att2 || st.att1;
+                                if (latestAtt) {
+                                  setFinishedResult(latestAtt);
+                                  setExamPhase('results');
+                                } else {
+                                  setStudentDashboardTab('mis_notas');
+                                }
+                              }}
+                              className="min-h-[52px] px-3.5 py-3 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs font-bold shrink-0 cursor-pointer"
+                            >
+                              Ver Certificado
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openFormalReviewTicketModal({
+                                  tipo: 'RECALIFICACION_EXAMEN',
+                                  targetId: mod.id,
+                                  targetLabel: mod.title,
+                                  notaActual: st.bestGrade
+                                });
+                              }}
+                              className="min-h-[52px] px-3.5 py-3 rounded-xl border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-950 text-xs font-extrabold shrink-0 cursor-pointer"
+                              title="Enviar solicitud justificada de revisión de nota o pregunta de este examen"
+                            >
+                              🎫 Ticket Revisión
+                            </button>
+                          </div>
                         )}
                       </div>
                     </div>
@@ -3569,24 +5198,43 @@ export function StudentPortal({
                             </div>
                           </div>
 
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSelectedModality(m.id);
-                              setStudentDashboardTab('modalidades');
-                            }}
-                            className={`min-h-[42px] px-3.5 py-2 rounded-lg font-bold text-xs shrink-0 cursor-pointer ${
-                              done && st.isExhausted
-                                ? 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                                : 'bg-sky-600 text-white hover:bg-sky-700'
-                            }`}
-                          >
-                            {done && st.isExhausted
-                              ? 'Ver Examen'
-                              : done
-                              ? '2º Intento →'
-                              : 'Presentar →'}
-                          </button>
+                          <div className="flex flex-wrap items-center gap-2 shrink-0">
+                            {done && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  openFormalReviewTicketModal({
+                                    tipo: 'RECALIFICACION_EXAMEN',
+                                    targetId: m.id,
+                                    targetLabel: m.title,
+                                    notaActual: st.bestGrade
+                                  })
+                                }
+                                className="min-h-[42px] px-3 py-2 rounded-lg border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-950 font-extrabold text-xs cursor-pointer"
+                                title="Radicar Ticket de Revisión de Nota para este examen"
+                              >
+                                🎫 Revisión
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedModality(m.id);
+                                setStudentDashboardTab('modalidades');
+                              }}
+                              className={`min-h-[42px] px-3.5 py-2 rounded-lg font-bold text-xs shrink-0 cursor-pointer ${
+                                done && st.isExhausted
+                                  ? 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                                  : 'bg-sky-600 text-white hover:bg-sky-700'
+                              }`}
+                            >
+                              {done && st.isExhausted
+                                ? 'Ver Examen'
+                                : done
+                                ? '2º Intento →'
+                                : 'Presentar →'}
+                            </button>
+                          </div>
                         </div>
                       );
                     })}
@@ -3733,17 +5381,33 @@ export function StudentPortal({
                           <span>Tiempo: {formatTime(att.tiempoEmpleadoSegundos)}</span>
                         </div>
 
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setFinishedResult(att);
-                            setExamPhase('results');
-                          }}
-                          className="w-full min-h-[48px] py-3 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-2 cursor-pointer"
-                        >
-                          <FileCheck2 className="w-4 h-4" />
-                          <span>Ver Certificado Oficial y Revisión de Preguntas</span>
-                        </button>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setFinishedResult(att);
+                              setExamPhase('results');
+                            }}
+                            className="w-full min-h-[46px] py-2.5 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs flex items-center justify-center gap-2 cursor-pointer"
+                          >
+                            <FileCheck2 className="w-4 h-4" />
+                            <span>Ver Certificado y Preguntas</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              openFormalReviewTicketModal({
+                                tipo: 'RECALIFICACION_EXAMEN',
+                                targetId: att.modalidad,
+                                targetLabel: `${att.modalidadLabel} (Intento #${att.intentoNumero})`,
+                                notaActual: att.notaColombiana
+                              })
+                            }
+                            className="w-full min-h-[46px] py-2.5 px-4 rounded-xl border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-950 font-extrabold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                          >
+                            <span>🎫 Solicitar Revisión de Nota</span>
+                          </button>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -3786,16 +5450,33 @@ export function StudentPortal({
                               )}
                             </td>
                             <td className="py-3.5 px-4 text-right">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setFinishedResult(att);
-                                  setExamPhase('results');
-                                }}
-                                className="min-h-[38px] px-3.5 py-2 rounded-lg bg-slate-900 text-white font-bold hover:bg-slate-800 cursor-pointer"
-                              >
-                                Ver Certificado / Revisión
-                              </button>
+                              <div className="inline-flex items-center justify-end gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setFinishedResult(att);
+                                    setExamPhase('results');
+                                  }}
+                                  className="min-h-[38px] px-3 py-2 rounded-lg bg-slate-900 text-white font-bold hover:bg-slate-800 cursor-pointer"
+                                >
+                                  Ver Certificado / Revisión
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    openFormalReviewTicketModal({
+                                      tipo: 'RECALIFICACION_EXAMEN',
+                                      targetId: att.modalidad,
+                                      targetLabel: `${att.modalidadLabel} (Intento #${att.intentoNumero})`,
+                                      notaActual: att.notaColombiana
+                                    })
+                                  }
+                                  className="min-h-[38px] px-3 py-2 rounded-lg border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-950 font-extrabold cursor-pointer"
+                                  title="Enviar solicitud justificada de revisión de nota para este examen"
+                                >
+                                  🎫 Ticket Revisión
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         ))}
@@ -3806,7 +5487,224 @@ export function StudentPortal({
               )}
             </div>
 
-            {/* C. Gráfica Comparativa de Rendimiento Estudiantil */}
+            {/* C. Cortes Académicos Calificados + Bandeja de Tickets de Revisión de Nota y Reclamos Académicos */}
+            {(() => {
+              const acadSummary = computeStudentAcademicSummary(
+                currentStudentAcademicRecord,
+                currentStudent,
+                studentAttempts,
+                studentClassSessions
+              );
+              const s1 = acadSummary.classSummaries.find((c) => c.classId === 1)?.notaFinalClase ?? 0;
+              const s2 = acadSummary.classSummaries.find((c) => c.classId === 2)?.notaFinalClase ?? 0;
+              const s3 = acadSummary.classSummaries.find((c) => c.classId === 3)?.notaFinalClase ?? 0;
+              const s4 = acadSummary.classSummaries.find((c) => c.classId === 4)?.notaFinalClase ?? 0;
+              const s5 = acadSummary.classSummaries.find((c) => c.classId === 5)?.notaFinalClase ?? 0;
+              const s6 = acadSummary.classSummaries.find((c) => c.classId === 6)?.notaFinalClase ?? 0;
+              const corte1Score = Number(((s1 + s2) / 2).toFixed(1));
+              const corte2Score = Number(((s3 + s4) / 2).toFixed(1));
+              const corte3Score = Number(((s5 + s6) / 2).toFixed(1));
+              const studentTickets = Array.isArray(currentStudent.solicitudesRevision)
+                ? currentStudent.solicitudesRevision
+                : [];
+
+              return (
+                <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 shadow-xs space-y-5">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
+                    <div>
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-amber-50 border border-amber-200 text-[11px] font-mono font-extrabold text-amber-900 uppercase">
+                        🎫 Trazabilidad Oficial Estudiante ↔ Docente
+                      </span>
+                      <h3 className="text-base sm:text-lg font-bold text-slate-900 mt-1">
+                        Cortes Calificados y Solicitudes Formales de Revisión de Nota / Excusas
+                      </h3>
+                      <p className="text-xs text-slate-600">
+                        Envíe una solicitud justificada junto a cualquier examen, corte académico o sesión (ej. interpretación de pregunta o soporte médico de inasistencia) con respuesta oficial trazada del docente.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        openFormalReviewTicketModal({
+                          tipo: 'RECALIFICACION_EXAMEN',
+                          targetId: 'integral',
+                          targetLabel: 'Examen Integral Final',
+                          notaActual: studentBestGrade
+                        })
+                      }
+                      className="min-h-[44px] px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold text-xs shrink-0 cursor-pointer shadow-2xs"
+                    >
+                      + Nuevo Ticket de Revisión / Excusa
+                    </button>
+                  </div>
+
+                  {/* Tarjetas de los 3 Cortes Académicos con botón de Ticket de Revisión */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
+                    {[
+                      {
+                        id: 'corte_1',
+                        title: 'Corte Académico 1 (30%)',
+                        subtitle: 'Consolidado Clases S1 y S2 + Evaluaciones',
+                        score: corte1Score
+                      },
+                      {
+                        id: 'corte_2',
+                        title: 'Corte Académico 2 (30%)',
+                        subtitle: 'Consolidado Clases S3 y S4 + Evaluaciones',
+                        score: corte2Score
+                      },
+                      {
+                        id: 'corte_3',
+                        title: 'Corte Académico 3 Final (40%)',
+                        subtitle: 'Consolidado Clases S5, S6 y Proyecto ABPro',
+                        score: corte3Score
+                      }
+                    ].map((cut) => (
+                      <div
+                        key={cut.id}
+                        className="p-4 rounded-xl border border-slate-200 bg-slate-50/70 flex flex-col justify-between gap-3 text-xs"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <div className="font-extrabold text-slate-900 text-sm">{cut.title}</div>
+                            <div className="text-[11px] text-slate-500">{cut.subtitle}</div>
+                          </div>
+                          <span
+                            className={`px-2.5 py-1 rounded-lg font-mono font-extrabold text-sm ${
+                              cut.score >= minPass
+                                ? 'bg-emerald-100 text-emerald-900'
+                                : 'bg-amber-100 text-amber-900'
+                            }`}
+                          >
+                            {cut.score.toFixed(1)} / 5.0
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            openFormalReviewTicketModal({
+                              tipo: 'REVISION_CORTE_NOTA',
+                              targetId: cut.id,
+                              targetLabel: cut.title,
+                              notaActual: cut.score
+                            })
+                          }
+                          className="w-full min-h-[40px] px-3 py-2 rounded-lg bg-white hover:bg-amber-50 border border-amber-300 text-amber-950 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+                        >
+                          <span>🎫 Solicitar Revisión de {cut.title.split(' (')[0]}</span>
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Historial de Tickets Enviados por el Estudiante */}
+                  <div className="space-y-2.5 pt-2">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-xs font-mono font-extrabold uppercase text-slate-700">
+                        Historial de Mis Tickets de Revisión y Excusas ({studentTickets.length})
+                      </h4>
+                    </div>
+                    {studentTickets.length === 0 ? (
+                      <div className="p-5 rounded-xl bg-slate-50 border border-dashed border-slate-200 text-center text-xs text-slate-500">
+                        No ha enviado solicitudes de revisión de nota ni excusas académicas hasta el momento.
+                      </div>
+                    ) : (
+                      <div className="space-y-2.5">
+                        {studentTickets.map((tck) => (
+                          <div
+                            key={tck.id}
+                            className={`p-4 rounded-xl border text-xs space-y-2 ${
+                              tck.estado === 'APROBADA'
+                                ? 'bg-emerald-50/50 border-emerald-200'
+                                : tck.estado === 'RECHAZADA'
+                                ? 'bg-rose-50/50 border-rose-200'
+                                : 'bg-amber-50/40 border-amber-200'
+                            }`}
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="px-2 py-0.5 rounded bg-slate-900 text-white font-mono text-[10px] font-bold">
+                                  #{tck.id}
+                                </span>
+                                <span className="font-extrabold text-slate-900 text-sm">
+                                  {tck.targetLabel}
+                                </span>
+                                {tck.preguntaReferencia && (
+                                  <span className="px-2 py-0.5 rounded bg-white border border-slate-300 font-mono text-[10px] font-semibold text-slate-700">
+                                    Ref: {tck.preguntaReferencia}
+                                  </span>
+                                )}
+                              </div>
+                              <span
+                                className={`px-2.5 py-0.5 rounded-full font-mono text-[10px] font-extrabold uppercase ${
+                                  tck.estado === 'APROBADA'
+                                    ? 'bg-emerald-600 text-white'
+                                    : tck.estado === 'RECHAZADA'
+                                    ? 'bg-rose-600 text-white'
+                                    : 'bg-amber-500 text-slate-950'
+                                }`}
+                              >
+                                {tck.estado === 'APROBADA'
+                                  ? '✓ APROBADA POR DOCENTE'
+                                  : tck.estado === 'RECHAZADA'
+                                  ? '✕ RECHAZADA'
+                                  : '⏳ PENDIENTE DE RESPUESTA'}
+                              </span>
+                            </div>
+
+                            <p className="text-slate-700 leading-relaxed">
+                              <strong>Mi justificación:</strong> “{tck.motivoEstudiante}”
+                            </p>
+
+                            <div className="flex flex-wrap items-center gap-4 text-[11px] font-mono text-slate-600">
+                              <span>
+                                Radicado: {new Date(tck.createdAtIso).toLocaleString('es-CO')}
+                              </span>
+                              {typeof tck.notaActual === 'number' && (
+                                <span>Nota original: {tck.notaActual.toFixed(1)} / 5.0</span>
+                              )}
+                              {typeof tck.notaSolicitada === 'number' && (
+                                <span>Nota solicitada: {tck.notaSolicitada.toFixed(1)} / 5.0</span>
+                              )}
+                              {typeof tck.notaAprobada === 'number' && (
+                                <strong className="text-emerald-800">
+                                  Nueva nota oficial: {tck.notaAprobada.toFixed(1)} / 5.0
+                                </strong>
+                              )}
+                              {tck.soporteUrl && (
+                                <a
+                                  href={tck.soporteUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-sky-700 font-bold underline"
+                                >
+                                  Ver Soporte Adjunto ↗
+                                </a>
+                              )}
+                            </div>
+
+                            {tck.comentarioDocente && (
+                              <div className="p-3 rounded-lg bg-white border border-slate-200/90 text-slate-800 mt-1">
+                                <div className="font-bold text-slate-900 mb-0.5">
+                                  👨‍🏫 Respuesta Oficial del Docente{' '}
+                                  {tck.respondedAtIso
+                                    ? `(${new Date(tck.respondedAtIso).toLocaleString('es-CO')})`
+                                    : ''}
+                                  :
+                                </div>
+                                <p>{tck.comentarioDocente}</p>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* D. Gráfica Comparativa de Rendimiento Estudiantil */}
             <StudentPerformanceDashboard
               studentId={currentStudent.id}
               studentName={currentStudent.nombre}
@@ -4221,11 +6119,14 @@ export function StudentPortal({
                 <div className="space-y-4 text-xs">
                   <div className="flex items-center justify-between border-b border-slate-100 pb-3">
                     <div>
+                      <span className="inline-block px-2 py-0.5 rounded bg-amber-100 text-amber-900 font-mono text-[10px] font-extrabold uppercase mb-1">
+                        🎫 Ticket Oficial con Trazabilidad Académica
+                      </span>
                       <h3 className="text-base font-bold text-slate-900">
-                        Solicitud de Excusa / Justificación de Inasistencia
+                        Solicitud Formal de Revisión de Nota / Excusa Académica
                       </h3>
                       <p className="text-slate-500">
-                        Se enviará como pendiente de revisión a la consola del docente.
+                        Su solicitud queda radicada en la Bandeja Centralizada del Docente para respuesta oficial y actualización en un clic.
                       </p>
                     </div>
                     <button
@@ -4237,66 +6138,217 @@ export function StudentPortal({
                     </button>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block font-bold text-slate-800 mb-1">
-                        Clase / Módulo:
-                      </label>
-                      <select
-                        value={sheetClassId}
-                        onChange={(e) =>
-                          setSheetClassId(Number(e.target.value) as ClassSessionId)
-                        }
-                        className="w-full min-h-[48px] px-3 py-2 rounded-xl border border-slate-300 bg-white font-bold text-slate-900"
+                  {/* Selector de Tipo de Ticket */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    {[
+                      {
+                        id: 'RECALIFICACION_EXAMEN' as AcademicReviewTicketType,
+                        label: '📝 Revisión de Examen / Pregunta'
+                      },
+                      {
+                        id: 'REVISION_CORTE_NOTA' as AcademicReviewTicketType,
+                        label: '📊 Revisión de Corte / Nota Clase'
+                      },
+                      {
+                        id: 'EXCUSA_INASISTENCIA' as AcademicReviewTicketType,
+                        label: '🏥 Excusa de Inasistencia'
+                      }
+                    ].map((tab) => (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => {
+                          setReviewTicketType(tab.id);
+                          if (tab.id === 'RECALIFICACION_EXAMEN') {
+                            const firstMod = modalitiesOverview[0];
+                            setReviewTicketTargetId(firstMod?.id || 'integral');
+                            setReviewTicketTargetLabel(firstMod?.title || 'Examen Integral');
+                            setReviewTicketCurrentGrade(firstMod?.stats.bestGrade || 0);
+                          } else if (tab.id === 'REVISION_CORTE_NOTA') {
+                            setReviewTicketTargetId('corte_1');
+                            setReviewTicketTargetLabel('Corte Académico 1 (30%)');
+                          }
+                        }}
+                        className={`p-2.5 rounded-xl border font-bold text-left cursor-pointer transition-all ${
+                          reviewTicketType === tab.id
+                            ? 'border-slate-900 bg-slate-900 text-white'
+                            : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100'
+                        }`}
                       >
-                        {studentClassSessions.map((cs) => (
-                          <option key={cs.id} value={cs.id}>
-                            {cs.code} — {cs.shortTitle}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block font-bold text-slate-800 mb-1">
-                        Bloque de Falla:
-                      </label>
-                      <select
-                        value={sheetExcuseBlock}
-                        onChange={(e) =>
-                          setSheetExcuseBlock(e.target.value as 'A' | 'B' | 'AB')
-                        }
-                        className="w-full min-h-[48px] px-3 py-2 rounded-xl border border-slate-300 bg-white font-bold text-slate-900"
-                      >
-                        <option value="A">Bloque A (B1)</option>
-                        <option value="B">Bloque B (B2)</option>
-                        <option value="AB">Ambos Bloques (A y B)</option>
-                      </select>
-                    </div>
+                        {tab.label}
+                      </button>
+                    ))}
                   </div>
+
+                  {reviewTicketType === 'EXCUSA_INASISTENCIA' ? (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block font-bold text-slate-800 mb-1">
+                          Clase / Sesión a Justificar:
+                        </label>
+                        <select
+                          value={sheetClassId}
+                          onChange={(e) =>
+                            setSheetClassId(Number(e.target.value) as ClassSessionId)
+                          }
+                          className="w-full min-h-[46px] px-3 py-2 rounded-xl border border-slate-300 bg-white font-bold text-slate-900"
+                        >
+                          {studentClassSessions.map((cs) => (
+                            <option key={cs.id} value={cs.id}>
+                              {cs.code} — {cs.shortTitle}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block font-bold text-slate-800 mb-1">
+                          Bloque de Inasistencia:
+                        </label>
+                        <select
+                          value={sheetExcuseBlock}
+                          onChange={(e) =>
+                            setSheetExcuseBlock(e.target.value as 'A' | 'B' | 'AB')
+                          }
+                          className="w-full min-h-[46px] px-3 py-2 rounded-xl border border-slate-300 bg-white font-bold text-slate-900"
+                        >
+                          <option value="A">Bloque A (B1)</option>
+                          <option value="B">Bloque B (B2)</option>
+                          <option value="AB">Ambos Bloques (A y B)</option>
+                        </select>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block font-bold text-slate-800 mb-1">
+                            {reviewTicketType === 'RECALIFICACION_EXAMEN'
+                              ? 'Examen Oficial a Revisar:'
+                              : 'Corte o Sesión Calificada:'}
+                          </label>
+                          {reviewTicketType === 'RECALIFICACION_EXAMEN' ? (
+                            <select
+                              value={reviewTicketTargetId}
+                              onChange={(e) => {
+                                const found = modalitiesOverview.find(
+                                  (m) => m.id === e.target.value
+                                );
+                                setReviewTicketTargetId(e.target.value);
+                                setReviewTicketTargetLabel(found?.title || e.target.value);
+                                setReviewTicketCurrentGrade(found?.stats.bestGrade || 0);
+                              }}
+                              className="w-full min-h-[46px] px-3 py-2 rounded-xl border border-slate-300 bg-white font-bold text-slate-900"
+                            >
+                              {modalitiesOverview.map((m) => (
+                                <option key={m.id} value={m.id}>
+                                  {m.title} (Nota actual: {m.stats.bestGrade.toFixed(1)}/5.0)
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            <select
+                              value={reviewTicketTargetId}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setReviewTicketTargetId(val);
+                                const labels: Record<string, string> = {
+                                  corte_1: 'Corte Académico 1 (30%)',
+                                  corte_2: 'Corte Académico 2 (30%)',
+                                  corte_3: 'Corte Académico 3 Final (40%)',
+                                  clase_1: 'Clase C1 / Sesión 1',
+                                  clase_2: 'Clase C2 / Sesión 2',
+                                  clase_3: 'Clase C3 / Sesión 3',
+                                  clase_4: 'Clase C4 / Sesión 4',
+                                  clase_5: 'Clase C5 / Sesión 5',
+                                  clase_6: 'Clase C6 / Sesión 6'
+                                };
+                                setReviewTicketTargetLabel(labels[val] || val);
+                              }}
+                              className="w-full min-h-[46px] px-3 py-2 rounded-xl border border-slate-300 bg-white font-bold text-slate-900"
+                            >
+                              <option value="corte_1">Corte Académico 1 (30%)</option>
+                              <option value="corte_2">Corte Académico 2 (30%)</option>
+                              <option value="corte_3">Corte Académico 3 Final (40%)</option>
+                              {studentClassSessions.map((cs) => (
+                                <option key={cs.id} value={`clase_${cs.id}`}>
+                                  Clase {cs.code}: {cs.shortTitle}
+                                </option>
+                              ))}
+                            </select>
+                          )}
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="block font-bold text-slate-800 mb-1">
+                              Nota Actual:
+                            </label>
+                            <input
+                              type="text"
+                              readOnly
+                              value={`${reviewTicketCurrentGrade.toFixed(1)} / 5.0`}
+                              className="w-full min-h-[46px] px-3 py-2 rounded-xl border border-slate-200 bg-slate-100 font-mono font-bold text-slate-700"
+                            />
+                          </div>
+                          <div>
+                            <label className="block font-bold text-slate-800 mb-1">
+                              Nota Solicitada:
+                            </label>
+                            <input
+                              type="number"
+                              step="0.1"
+                              min="0"
+                              max="5"
+                              value={reviewTicketRequestedGrade}
+                              onChange={(e) => setReviewTicketRequestedGrade(e.target.value)}
+                              className="w-full min-h-[46px] px-3 py-2 rounded-xl border border-slate-300 bg-white font-mono font-bold text-slate-900"
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block font-bold text-slate-800 mb-1">
+                          Pregunta o Criterio Específico (Opcional, ej. &quot;Pregunta #4 / M1-04&quot;):
+                        </label>
+                        <input
+                          type="text"
+                          value={reviewTicketQuestionRef}
+                          onChange={(e) => setReviewTicketQuestionRef(e.target.value)}
+                          placeholder="Ej. Considero que la pregunta #4 tiene dos interpretaciones..."
+                          className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-slate-300 text-slate-900"
+                        />
+                      </div>
+                    </div>
+                  )}
 
                   <div>
                     <label className="block font-bold text-slate-800 mb-1">
-                      Motivo Médico / Laboral / Institucional:
+                      Justificación Académica Detallada del Estudiante:
                     </label>
                     <textarea
                       rows={3}
                       value={sheetExcuseReason}
                       onChange={(e) => setSheetExcuseReason(e.target.value)}
-                      placeholder="Explique brevemente la razón de la inasistencia..."
+                      placeholder={
+                        reviewTicketType === 'EXCUSA_INASISTENCIA'
+                          ? 'Ej. Adjunto excusa médica de la sesión S3 por incapacidad certificada...'
+                          : 'Ej. Considero que la pregunta #4 tiene dos interpretaciones válidas según el material del Módulo 1...'
+                      }
                       className="w-full p-3 rounded-xl border border-slate-300 text-slate-900"
                     />
                   </div>
 
                   <div>
                     <label className="block font-bold text-slate-800 mb-1">
-                      Enlace al Soporte o Certificado (Opcional):
+                      Enlace a Evidencia, Captura o Soporte Médico (Opcional):
                     </label>
                     <input
                       type="url"
                       value={sheetExcuseUrl}
                       onChange={(e) => setSheetExcuseUrl(e.target.value)}
                       placeholder="https://drive.google.com/..."
-                      className="w-full min-h-[48px] px-3.5 py-2 rounded-xl border border-slate-300 font-mono text-slate-900"
+                      className="w-full min-h-[46px] px-3.5 py-2 rounded-xl border border-slate-300 font-mono text-slate-900"
                     />
                   </div>
 
@@ -4310,26 +6362,16 @@ export function StudentPortal({
                     <button
                       type="button"
                       onClick={() => setStudentBottomSheet('none')}
-                      className="min-h-[48px] px-4 py-2.5 rounded-xl border border-slate-300 text-slate-700 font-bold cursor-pointer"
+                      className="min-h-[46px] px-4 py-2.5 rounded-xl border border-slate-300 text-slate-700 font-bold cursor-pointer"
                     >
                       Cancelar
                     </button>
                     <button
                       type="button"
-                      onClick={() => {
-                        if (!sheetExcuseReason.trim()) return;
-                        handleStudentSubmitExcusa(
-                          sheetClassId,
-                          sheetExcuseBlock,
-                          sheetExcuseReason.trim(),
-                          sheetExcuseUrl.trim()
-                        );
-                        setSheetNotice('✓ Solicitud de justificación enviada al docente.');
-                        setTimeout(() => setStudentBottomSheet('none'), 1200);
-                      }}
-                      className="min-h-[48px] px-5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold cursor-pointer active:scale-95 transition-transform"
+                      onClick={handleStudentSubmitFormalTicket}
+                      className="min-h-[46px] px-5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold cursor-pointer active:scale-95 transition-transform"
                     >
-                      Radicar Excusa
+                      🎫 Radicar Ticket de Revisión Ahora
                     </button>
                   </div>
                 </div>
@@ -4381,6 +6423,32 @@ export function StudentPortal({
                         className="w-full min-h-[48px] px-3.5 py-2 rounded-xl border border-slate-300 font-mono uppercase text-slate-900 font-bold"
                       />
                     </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block font-bold text-slate-800 mb-1">
+                          Correo Electrónico:
+                        </label>
+                        <input
+                          type="email"
+                          value={profileEmailInput}
+                          onChange={(e) => setProfileEmailInput(e.target.value)}
+                          placeholder="estudiante@correo.com"
+                          className="w-full min-h-[48px] px-3.5 py-2 rounded-xl border border-slate-300 text-slate-900"
+                        />
+                      </div>
+                      <div>
+                        <label className="block font-bold text-slate-800 mb-1">
+                          WhatsApp/Celular:
+                        </label>
+                        <input
+                          type="tel"
+                          value={profileWhatsappInput}
+                          onChange={(e) => setProfileWhatsappInput(e.target.value)}
+                          placeholder="Ej: 3001234567"
+                          className="w-full min-h-[48px] px-3.5 py-2 rounded-xl border border-slate-300 font-mono text-slate-900"
+                        />
+                      </div>
+                    </div>
                     {profileSaveMsg && (
                       <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 font-semibold">
                         {profileSaveMsg}
@@ -4390,18 +6458,7 @@ export function StudentPortal({
                       <button
                         type="button"
                         onClick={() => {
-                          if (currentStudent) {
-                            onUpdateLiveSession(null, currentStudent.id);
-                          }
-                          logoutStudent();
-                          setVerifiedStudentId(null);
-                          setDocIdInput('');
-                          setAccessCodeInput('');
-                          setClassroomPinInput('');
-                          setThirdAttemptBlockedModal(null);
-                          setTabHistory([]);
-                          setStudentBottomSheet('none');
-                          setExamPhase('login');
+                          handleLogoutCurrentStudent();
                           onGoToInitialHome?.();
                         }}
                         className="min-h-[48px] px-4 py-2.5 rounded-xl border border-red-200 bg-red-50 hover:bg-red-100 text-red-700 font-bold flex items-center gap-1.5 cursor-pointer"
@@ -4470,6 +6527,33 @@ export function StudentPortal({
                     onChange={(e) => setProfileCodeInput(e.target.value.toUpperCase())}
                     className="w-full px-3.5 py-2 rounded-lg border border-slate-300 text-sm font-mono uppercase"
                   />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-semibold text-slate-800 mb-1">
+                      Correo Electrónico
+                    </label>
+                    <input
+                      type="email"
+                      value={profileEmailInput}
+                      onChange={(e) => setProfileEmailInput(e.target.value)}
+                      placeholder="estudiante@correo.com"
+                      className="w-full px-3.5 py-2 rounded-lg border border-slate-300 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-slate-800 mb-1">
+                      WhatsApp/Celular
+                    </label>
+                    <input
+                      type="tel"
+                      value={profileWhatsappInput}
+                      onChange={(e) => setProfileWhatsappInput(e.target.value)}
+                      placeholder="Ej: 3001234567"
+                      className="w-full px-3.5 py-2 rounded-lg border border-slate-300 text-sm font-mono"
+                    />
+                  </div>
                 </div>
 
                 {profileSaveMsg && (
@@ -4650,6 +6734,7 @@ export function StudentPortal({
             <span className="whitespace-nowrap">Notas</span>
           </button>
         </nav>
+        {globalSessionAtRiskModalNode}
       </div>
     );
   }
@@ -4672,6 +6757,7 @@ export function StudentPortal({
             Volver al Panel Principal del Estudiante
           </button>
         </div>
+        {globalSessionAtRiskModalNode}
       </div>
     );
   }
@@ -4790,6 +6876,23 @@ export function StudentPortal({
               </span>
             </div>
 
+            {/* Modo Foco (Sin Distracciones) Toggle Button */}
+            <button
+              type="button"
+              onClick={() => setExamFocusMode((prev) => !prev)}
+              className={`px-3 py-2 rounded-lg border text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors ${
+                examFocusMode
+                  ? 'border-indigo-500 bg-indigo-600 text-white'
+                  : 'border-slate-300 bg-white hover:bg-slate-50 text-slate-700'
+              }`}
+              title="Ocultar barras secundarias para concentrarse únicamente en la pregunta y opciones"
+            >
+              <Eye className="w-3.5 h-3.5" />
+              <span className="hidden md:inline">
+                {examFocusMode ? 'Salir Modo Foco' : 'Modo Foco'}
+              </span>
+            </button>
+
             {/* Open Navigation Drawer Button */}
             <button
               type="button"
@@ -4811,8 +6914,17 @@ export function StudentPortal({
           </div>
         </div>
 
-        {/* Barra de Estado del Escudo Anti-Trampa en el Examen */}
-        <div className="bg-slate-900 text-white rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+        {offlineSubmissionQueued && (
+          <div className="bg-amber-50 border border-amber-300 rounded-xl px-4 py-2.5 flex items-center justify-between gap-2 text-xs text-amber-950 font-semibold">
+            <span>
+              📦 Cola Offline Activa: Su última entrega está resguardada localmente y se sincronizará con el servidor automáticamente al detectar conexión estable.
+            </span>
+          </div>
+        )}
+
+        {/* Barra de Estado del Escudo Anti-Trampa en el Examen (Oculta en Modo Foco para maximizar espacio vertical) */}
+        {!examFocusMode && (
+          <div className="bg-slate-900 text-white rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
           <div className="flex flex-wrap items-center gap-2">
             <span
               className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border font-semibold ${
@@ -4872,7 +6984,8 @@ export function StudentPortal({
               <span>Pantalla Completa Segura</span>
             </button>
           )}
-        </div>
+          </div>
+        )}
 
         {/* Alerta de Detección de Pantalla Dividida (<85% Ancho) o Monitor Secundario Extendido */}
         {isExamSplitScreenGuardEnabled &&
@@ -5170,6 +7283,66 @@ export function StudentPortal({
               duaWarmPaper
             }}
           />
+          <div className="h-14 sm:hidden" />
+        </div>
+
+        {/* Barra Inferior Fija Móvil (Mobile-First Ergonomic Navigation Sheet) */}
+        <div className="sm:hidden fixed bottom-0 left-0 right-0 z-40 bg-slate-900/95 backdrop-blur-xs border-t border-slate-700 px-3 py-2 flex items-center justify-between gap-2 text-white shadow-2xl no-print">
+          <button
+            type="button"
+            disabled={currentIndex === 0}
+            onClick={() => setCurrentIndex((i) => Math.max(0, i - 1))}
+            className="px-3 py-2 rounded-xl bg-slate-800 disabled:opacity-40 text-xs font-bold flex items-center gap-1 cursor-pointer"
+          >
+            <ArrowLeft className="w-3.5 h-3.5" />
+            <span>Ant.</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() =>
+              setMarkedForReview((prev) => ({
+                ...prev,
+                [currentQ.id]: !prev[currentQ.id]
+              }))
+            }
+            className={`px-2.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1 border cursor-pointer ${
+              isMarked
+                ? 'bg-amber-500 text-slate-950 border-amber-400'
+                : 'bg-slate-800 text-slate-200 border-slate-700'
+            }`}
+          >
+            <Flag className="w-3.5 h-3.5" />
+            <span>Duda</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setDrawerOpen(true)}
+            className="px-2.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-mono font-bold text-sky-300 cursor-pointer"
+          >
+            {currentIndex + 1}/{activeQuestions.length} ({answeredCount}✓)
+          </button>
+
+          {currentIndex < activeQuestions.length - 1 ? (
+            <button
+              type="button"
+              onClick={() => setCurrentIndex((i) => Math.min(activeQuestions.length - 1, i + 1))}
+              className="px-3.5 py-2 rounded-xl bg-sky-600 text-white text-xs font-bold flex items-center gap-1 cursor-pointer"
+            >
+              <span>Sig.</span>
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setConfirmSubmitModal(true)}
+              className="px-3 py-2 rounded-xl bg-emerald-600 text-white text-xs font-bold flex items-center gap-1 cursor-pointer"
+            >
+              <FileCheck2 className="w-3.5 h-3.5" />
+              <span>Entregar</span>
+            </button>
+          )}
         </div>
 
         {/* Lateral Navigation Drawer */}
@@ -5329,6 +7502,7 @@ export function StudentPortal({
             </div>
           </div>
         )}
+        {globalSessionAtRiskModalNode}
       </div>
     );
   }
@@ -5421,9 +7595,19 @@ export function StudentPortal({
             </button>
           </div>
 
-          <div className="text-left sm:text-right text-xs">
-            <div className="font-bold text-slate-900 text-sm">{currentStudent.nombre}</div>
-            <div className="font-mono text-slate-500">ID: {currentStudent.id}</div>
+          <div className="flex flex-wrap items-center justify-between sm:justify-end gap-3">
+            <div className="text-left sm:text-right text-xs">
+              <div className="font-bold text-slate-900 text-sm">{currentStudent.nombre}</div>
+              <div className="font-mono text-slate-500">ID: {currentStudent.id}</div>
+            </div>
+            <button
+              type="button"
+              onClick={handleLogoutCurrentStudent}
+              className="min-h-[44px] px-3.5 py-2 rounded-xl border border-red-200 bg-red-50 hover:bg-red-100 text-red-700 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
+            >
+              <RotateCcw className="w-3.5 h-3.5 shrink-0" />
+              <span>Cerrar sesión</span>
+            </button>
           </div>
         </div>
 
@@ -5514,6 +7698,51 @@ export function StudentPortal({
             </div>
           </div>
 
+          {/* Comprobante Digital de Entrega Verificable con Hash */}
+          <div className="bg-emerald-50/70 border border-emerald-200 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 no-print">
+            <div className="space-y-0.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="px-2 py-0.5 rounded bg-emerald-700 text-white font-mono text-[10px] font-extrabold uppercase">
+                  Recibo Digital Verificable
+                </span>
+                <span className="font-mono text-xs font-extrabold text-emerald-950">
+                  Código Hash: #{finishedResult.firmaVerificacion.slice(-8).toUpperCase()}
+                </span>
+                {offlineSubmissionQueued && (
+                  <span className="px-2 py-0.5 rounded bg-amber-100 border border-amber-300 text-amber-900 text-[10px] font-bold">
+                    ⏳ En cola de sincronización offline
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-emerald-900">
+                Conserve o copie este comprobante como respaldo institucional de su evaluación ({finishedResult.fechaHora}).
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                const receiptText = `COMPROBANTE OFICIAL DE EVALUACIÓN | Estudiante: ${finishedResult.studentName} (${finishedResult.studentId}) | Modalidad: ${finishedResult.modalidadLabel} (Intento #${finishedResult.intentoNumero}) | Nota: ${finishedResult.notaColombiana.toFixed(1)}/5.0 (${finishedResult.aciertos}/${finishedResult.totalPreguntas}) | Fecha: ${finishedResult.fechaHora} | Hash: ${finishedResult.firmaVerificacion}`;
+                navigator.clipboard?.writeText(receiptText).then(() => {
+                  setReceiptCopied(true);
+                  setTimeout(() => setReceiptCopied(false), 3000);
+                }).catch(() => {});
+              }}
+              className="px-3.5 py-2 rounded-xl bg-white hover:bg-emerald-100 border border-emerald-300 text-emerald-900 text-xs font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer shrink-0 shadow-2xs"
+            >
+              {receiptCopied ? (
+                <>
+                  <Check className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>¡Comprobante Copiado!</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="w-3.5 h-3.5 text-emerald-700" />
+                  <span>Copiar Comprobante Hash</span>
+                </>
+              )}
+            </button>
+          </div>
+
           {/* Aviso de Límite de 2 Intentos Cumplido en esta Evaluación y Retorno al Panel Principal */}
           {modStats.isExhausted && !isSuspended && (
             <div className="bg-amber-50 border-2 border-amber-300 rounded-xl p-4 space-y-2.5 text-xs text-amber-950 no-print">
@@ -5563,16 +7792,35 @@ export function StudentPortal({
             </div>
           )}
 
-          {/* Action Buttons: Print Certificate, Start 2nd Attempt, or Return to Student Panel (Adaptados a Móvil y Web) */}
+          {/* Action Buttons: Print Certificate, Request Grade Review Ticket, Start 2nd Attempt, or Return to Student Panel */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2 no-print">
-            <button
-              type="button"
-              onClick={() => window.print()}
-              className="min-h-[50px] w-full sm:w-auto px-4 py-3 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-xs sm:text-sm font-bold text-slate-800 flex items-center justify-center gap-2 cursor-pointer"
-            >
-              <Printer className="w-4 h-4 shrink-0" />
-              <span>Imprimir Certificado Oficial (PDF)</span>
-            </button>
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
+              <button
+                type="button"
+                onClick={() => window.print()}
+                className="min-h-[50px] w-full sm:w-auto px-4 py-3 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-xs sm:text-sm font-bold text-slate-800 flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <Printer className="w-4 h-4 shrink-0" />
+                <span>Imprimir Certificado Oficial (PDF)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setExamPhase('modality_select');
+                  setStudentDashboardTab('mis_notas');
+                  openFormalReviewTicketModal({
+                    tipo: 'RECALIFICACION_EXAMEN',
+                    targetId: finishedResult.modalidad,
+                    targetLabel: `${finishedResult.modalidadLabel} (Intento #${finishedResult.intentoNumero})`,
+                    notaActual: finishedResult.notaColombiana
+                  });
+                }}
+                className="min-h-[50px] w-full sm:w-auto px-4 py-3 rounded-xl border border-amber-300 bg-amber-50 hover:bg-amber-100 text-xs sm:text-sm font-extrabold text-amber-950 flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <span>🎫 Solicitar Revisión de Nota / Reclamo</span>
+              </button>
+            </div>
 
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full sm:w-auto">
               {canStartSecondAttempt && (
@@ -5705,15 +7953,37 @@ export function StudentPortal({
                     </div>
                   </div>
 
-                  <div className="p-3 rounded-lg bg-white/90 border border-slate-200/80 text-slate-700 leading-relaxed">
-                    <strong className="text-slate-900">Justificación Pedagógica: </strong>
-                    {item.justificacion}
+                  <div className="p-3 rounded-lg bg-white/90 border border-slate-200/80 text-slate-700 leading-relaxed flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div>
+                      <strong className="text-slate-900">Justificación Pedagógica: </strong>
+                      {item.justificacion}
+                    </div>
+                    {!item.acierto && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setExamPhase('modality_select');
+                          setStudentDashboardTab('mis_notas');
+                          openFormalReviewTicketModal({
+                            tipo: 'RECALIFICACION_EXAMEN',
+                            targetId: finishedResult.modalidad,
+                            targetLabel: `${finishedResult.modalidadLabel} (Intento #${finishedResult.intentoNumero})`,
+                            notaActual: finishedResult.notaColombiana,
+                            preguntaReferencia: `Pregunta #${idx + 1} (${item.questionId})`
+                          });
+                        }}
+                        className="px-2.5 py-1.5 rounded-lg border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-950 font-bold text-[11px] shrink-0 cursor-pointer"
+                      >
+                        🎫 Reclamar Pregunta #{idx + 1}
+                      </button>
+                    )}
                   </div>
                 </div>
               ))}
             </div>
           )}
         </div>
+        {globalSessionAtRiskModalNode}
       </div>
     );
   }
@@ -5765,6 +8035,7 @@ export function StudentPortal({
           )}
         </div>
       </div>
+      {globalSessionAtRiskModalNode}
     </div>
   );
 }

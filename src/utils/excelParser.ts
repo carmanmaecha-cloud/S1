@@ -520,26 +520,105 @@ export function extractQuestionsFromMatrix(
       headerMap = {};
       normCells.forEach((h, idx) => {
         if (!h) return;
-        if (h === 'id' || h.includes('id pregunta') || h === 'codigo') headerMap!.id = idx;
-        else if (h.includes('modulo')) headerMap!.modulo = idx;
-        else if (h.includes('tema')) headerMap!.tema = idx;
-        else if (h.includes('bloom') || h.includes('nivel')) headerMap!.bloom = idx;
-        else if (h.includes('enunciado') || h === 'pregunta' || h.includes('reactivo'))
+        if (h === 'id' || h.includes('id pregunta') || h === 'codigo' || h === 'nro' || h === 'numero')
+          headerMap!.id = idx;
+        else if (h.includes('modulo') || h === 'mod' || h.includes('unidad')) headerMap!.modulo = idx;
+        else if (h.includes('tema') || h.includes('competencia') || h.includes('subtema') || h.includes('categoria'))
+          headerMap!.tema = idx;
+        else if (h.includes('bloom') || h.includes('nivel') || h.includes('taxonomia') || h.includes('dificultad'))
+          headerMap!.bloom = idx;
+        else if (
+          h.includes('enunciado') ||
+          h === 'pregunta' ||
+          h.includes('texto de la pregunta') ||
+          h.includes('planteamiento') ||
+          h.includes('reactivo')
+        )
           headerMap!.enunciado = idx;
-        else if (h === 'opcion a' || h === 'a' || h === 'op a') headerMap!.a = idx;
-        else if (h === 'opcion b' || h === 'b' || h === 'op b') headerMap!.b = idx;
-        else if (h === 'opcion c' || h === 'c' || h === 'op c') headerMap!.c = idx;
-        else if (h === 'opcion d' || h === 'd' || h === 'op d') headerMap!.d = idx;
-        else if (h.includes('correcta') || h.includes('respuesta')) headerMap!.correcta = idx;
-        else if (h.includes('justificacion') || h.includes('retroalimentacion') || h.includes('explicacion'))
+        else if (
+          h === 'opcion a' ||
+          h.startsWith('opcion a ') ||
+          h === 'a' ||
+          h === 'op a' ||
+          h === 'alternativa a' ||
+          h === 'respuesta a' ||
+          h === 'inciso a' ||
+          h === 'literal a'
+        )
+          headerMap!.a = idx;
+        else if (
+          h === 'opcion b' ||
+          h.startsWith('opcion b ') ||
+          h === 'b' ||
+          h === 'op b' ||
+          h === 'alternativa b' ||
+          h === 'respuesta b' ||
+          h === 'inciso b' ||
+          h === 'literal b'
+        )
+          headerMap!.b = idx;
+        else if (
+          h === 'opcion c' ||
+          h.startsWith('opcion c ') ||
+          h === 'c' ||
+          h === 'op c' ||
+          h === 'alternativa c' ||
+          h === 'respuesta c' ||
+          h === 'inciso c' ||
+          h === 'literal c'
+        )
+          headerMap!.c = idx;
+        else if (
+          h === 'opcion d' ||
+          h.startsWith('opcion d ') ||
+          h === 'd' ||
+          h === 'op d' ||
+          h === 'alternativa d' ||
+          h === 'respuesta d' ||
+          h === 'inciso d' ||
+          h === 'literal d'
+        )
+          headerMap!.d = idx;
+        else if (
+          h.includes('correcta') ||
+          h.includes('respuesta') ||
+          h === 'clave' ||
+          h === 'solucion' ||
+          h === 'co'
+        )
+          headerMap!.correcta = idx;
+        else if (
+          h.includes('justificacion') ||
+          h.includes('retroalimentacion') ||
+          h.includes('explicacion') ||
+          h.includes('sustento')
+        )
           headerMap!.justificacion = idx;
-        else if (h === 'rap' || h.includes('resultado de aprendizaje')) headerMap!.rap = idx;
-        else if (h.includes('contexto') || h.includes('caso')) headerMap!.contexto = idx;
+        else if (h === 'rap' || h.includes('resultado de aprendizaje') || h.includes('indicador'))
+          headerMap!.rap = idx;
+        else if (h.includes('contexto') || h.includes('caso') || h.includes('escenario'))
+          headerMap!.contexto = idx;
       });
       startRow = r + 1;
       break;
     }
   }
+
+  const isKnownBloomValue = (val: string): boolean => {
+    const v = normalizeHeader(val);
+    return (
+      v === 'conocer' ||
+      v === 'comprension' ||
+      v === 'aplicacion' ||
+      v === 'analisis' ||
+      v === 'evaluacion' ||
+      v === 'recordar' ||
+      v === 'comprender' ||
+      v === 'aplicar' ||
+      v === 'analizar' ||
+      v === 'evaluar'
+    );
+  };
 
   const added: Question[] = [];
 
@@ -562,7 +641,7 @@ export function extractQuestionsFromMatrix(
 
     if (headerMap && headerMap.enunciado !== undefined) {
       const enunciado = p[headerMap.enunciado] || '';
-      if (!enunciado || enunciado.length < 5) continue;
+      if (!enunciado || enunciado.length < 3) continue;
 
       const rawMod = Number(String(p[headerMap.modulo ?? -1] || '1').replace(/[^0-9]/g, ''));
       const modNum = (rawMod >= 1 && rawMod <= 5 ? rawMod : 1) as 1 | 2 | 3 | 4 | 5;
@@ -593,17 +672,26 @@ export function extractQuestionsFromMatrix(
           'Justificación registrada desde archivo Excel.'
       });
     } else if (p.length >= 11) {
-      // Standard 11-column EvaluaPlus export format:
-      // ID | Módulo | Tema | Bloom | Enunciado | A | B | C | D | Correcta | Justificación
-      if (!p[4] || p[4].length < 4) continue;
+      // Standard 11-column format:
+      // Either: ID | Módulo | Tema | Bloom | Enunciado | A | B | C | D | Correcta | Justificación
+      // Or:     ID | Módulo | Bloom | Tema | Enunciado | A | B | C | D | Correcta | Justificación
+      if (!p[4] || p[4].length < 3) continue;
       const rawMod = Number(String(p[1]).replace(/[^0-9]/g, ''));
       const modNum = (rawMod >= 1 && rawMod <= 5 ? rawMod : 1) as 1 | 2 | 3 | 4 | 5;
-      const opciones = { A: p[5], B: p[6], C: p[7], D: p[8] };
+      const col2IsBloom = isKnownBloomValue(p[2]) && !isKnownBloomValue(p[3]);
+      const temaVal = col2IsBloom ? p[3] : p[2];
+      const bloomVal = col2IsBloom ? p[2] : p[3];
+      const opciones = {
+        A: p[5] || 'Opción A',
+        B: p[6] || 'Opción B',
+        C: p[7] || 'Opción C',
+        D: p[8] || 'Opción D'
+      };
       added.push({
         id: p[0] || `MM-M${modNum}-LOTE${existingQuestionsCount + added.length + 1}`,
         modulo: modNum,
-        tema: p[2] || 'Tema General',
-        bloom: normalizeBloom(p[3]),
+        tema: temaVal || 'Tema General',
+        bloom: normalizeBloom(bloomVal),
         enunciado: p[4],
         pregunta: p[4],
         opciones,
@@ -613,10 +701,15 @@ export function extractQuestionsFromMatrix(
     } else if (p.length >= 8) {
       // Standard 9-column format:
       // Módulo | Tema | Enunciado | A | B | C | D | Correcta | Justificación
-      if (!p[2] || p[2].length < 4) continue;
+      if (!p[2] || p[2].length < 3) continue;
       const rawMod = Number(String(p[0]).replace(/[^0-9]/g, ''));
       const modNum = (rawMod >= 1 && rawMod <= 5 ? rawMod : 1) as 1 | 2 | 3 | 4 | 5;
-      const opciones = { A: p[3], B: p[4], C: p[5], D: p[6] };
+      const opciones = {
+        A: p[3] || 'Opción A',
+        B: p[4] || 'Opción B',
+        C: p[5] || 'Opción C',
+        D: p[6] || 'Opción D'
+      };
       added.push({
         id: `MM-M${modNum}-LOTE${existingQuestionsCount + added.length + 1}`,
         modulo: modNum,
@@ -669,14 +762,6 @@ export async function parseQuestionsFromAnyFile(
     const sheet = workbook.Sheets[sheetName];
     if (!sheet) continue;
 
-    // Also support JSON-like object sheets if columns match Question keys
-    const jsonObjects = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' });
-    const normalizedFromObjects = normalizeQuestionList(jsonObjects);
-    if (normalizedFromObjects.length > 0) {
-      allQuestions.push(...normalizedFromObjects);
-      continue;
-    }
-
     const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
       header: 1,
       defval: '',
@@ -686,7 +771,16 @@ export async function parseQuestionsFromAnyFile(
       rows,
       existingQuestionsCount + allQuestions.length
     );
-    allQuestions.push(...extracted);
+
+    // Also support JSON-like object sheets if columns match Question keys
+    const jsonObjects = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' });
+    const normalizedFromObjects = normalizeQuestionList(jsonObjects);
+
+    if (extracted.length > 0 && extracted.length >= normalizedFromObjects.length) {
+      allQuestions.push(...extracted);
+    } else if (normalizedFromObjects.length > 0) {
+      allQuestions.push(...normalizedFromObjects);
+    }
   }
 
   return allQuestions;

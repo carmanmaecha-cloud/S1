@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, Suspense, lazy } from 'react';
 import {
   StudentRecord,
   Question,
@@ -13,18 +13,24 @@ import {
   SystemConfig,
   CustomMiniRetoTemplate,
   MiniRetoAttemptRecord,
-  AntiCheatLogEntry
+  AntiCheatLogEntry,
+  UniversalCourseWorkspace
 } from './types';
 import { INITIAL_STUDENTS } from './data/students';
 import { INITIAL_QUESTIONS, normalizeQuestionList } from './data/questions';
 import { INITIAL_CUSTOM_MINI_RETOS } from './utils/miniRetosEngine';
 import { enrichStudentsWithServerSummary } from './utils/academicServerSummary';
 import { StudentPortal } from './components/StudentPortal';
-import { TeacherPanel } from './components/TeacherPanel';
-import { EditorPanel } from './components/EditorPanel';
 import { ServerSaveProvider, ServerSaveResponse } from './components/ServerSaveContext';
 import { AuthProvider, useAuthSession } from './context/AuthContext';
-import { GraduationCap, BookOpen, Sliders, ArrowRight } from 'lucide-react';
+import { GraduationCap, BookOpen, Sliders, ArrowRight, CheckCircle2, RefreshCw, Sun, Moon, HelpCircle, X } from 'lucide-react';
+
+const TeacherPanel = lazy(() =>
+  import('./components/TeacherPanel').then((m) => ({ default: m.TeacherPanel }))
+);
+const EditorPanel = lazy(() =>
+  import('./components/EditorPanel').then((m) => ({ default: m.EditorPanel }))
+);
 import {
   saveCentralStateToFirestore,
   loadCentralStateFromFirestore,
@@ -36,7 +42,12 @@ import {
   buildInitialAcademicDataset,
   normalizeAndSyncAcademicDataset
 } from './data/classAttendanceAndGrades';
-import { getEffectiveCourseMetadata } from './utils/universalCourseEngine';
+import {
+  getEffectiveCourseMetadata,
+  getEffectiveStudentsForWorkspace,
+  getEffectiveQuestionsForWorkspace,
+  generateBaseRetosForCourseModules
+} from './utils/universalCourseEngine';
 import {
   CURRENT_DATA_SCHEMA_VERSION,
   SchemaValidationReport,
@@ -45,6 +56,13 @@ import {
   recordCacheDiagnosticError,
   stampCurrentSchemaVersion
 } from './utils/systemDiagnostics';
+import {
+  DecryptedAuditEvent,
+  AuditEventCategory,
+  recordEncryptedAuditEvent,
+  flushEncryptedAuditLogsToServer,
+  loadDecryptedAuditEvents
+} from './utils/encryptedAuditLogger';
 
 export interface ForceServerResyncResult {
   ok: boolean;
@@ -220,8 +238,112 @@ function AppContent() {
     return [];
   });
 
-  // Persistent State: Exam Attempts
+  // Mecanismo de Carga Diferida de Datos por Demanda (On-Demand Lazy Data Initialization)
+  // Evita la carga masiva en memoria de intentos, rúbricas ABPro y dataset académico hasta que el usuario seleccione un curso
+  const hasSelectedCourseInitially = Boolean(
+    authState.studentSelectedCourseId ||
+      authState.teacherSelectedCourseId ||
+      authState.activeView === 'editor'
+  );
+  const [isCourseDataHydratedOnDemand, setIsCourseDataHydratedOnDemand] = useState<boolean>(
+    hasSelectedCourseInitially
+  );
+  const deferredCourseStructuresRef = useRef<{
+    attempts: ExamAttemptResult[] | null;
+    abproEvaluations: ABProProjectEvaluation[] | null;
+    academicDataset: AcademicDataset | null;
+  }>({
+    attempts: null,
+    abproEvaluations: null,
+    academicDataset: null
+  });
+
+  // Registro de Eventos Cifrado Localmente (Encrypted Audit Log) con Sincronización Asíncrona
+  const [encryptedAuditLogs, setEncryptedAuditLogs] = useState<DecryptedAuditEvent[]>(() =>
+    loadDecryptedAuditEvents()
+  );
+
+  const logCriticalAppEvent = useCallback(
+    (params: {
+      category: AuditEventCategory;
+      action: string;
+      details: string;
+      actorRole?: 'ESTUDIANTE' | 'DOCENTE' | 'EDITOR' | 'SISTEMA';
+      actorId?: string;
+      courseId?: string;
+    }) => {
+      const detectedRole: 'ESTUDIANTE' | 'DOCENTE' | 'EDITOR' | 'SISTEMA' =
+        params.actorRole ||
+        (authState.editorSessionActive
+          ? 'EDITOR'
+          : authState.teacherSessionActive
+          ? 'DOCENTE'
+          : authState.studentSessionActive
+          ? 'ESTUDIANTE'
+          : 'SISTEMA');
+      const detectedActorId =
+        params.actorId ||
+        (detectedRole === 'EDITOR'
+          ? 'EDITOR'
+          : detectedRole === 'DOCENTE'
+          ? authState.teacherAuthenticatedId || 'DOCENTE'
+          : detectedRole === 'ESTUDIANTE'
+          ? authState.verifiedStudentId || 'ESTUDIANTE'
+          : 'SISTEMA');
+      const detectedCourseId =
+        params.courseId ||
+        authState.teacherSelectedCourseId ||
+        authState.studentSelectedCourseId ||
+        'global';
+
+      recordEncryptedAuditEvent({
+        actorRole: detectedRole,
+        actorId: detectedActorId,
+        courseId: detectedCourseId,
+        category: params.category,
+        action: params.action,
+        details: params.details
+      });
+      setEncryptedAuditLogs(loadDecryptedAuditEvents());
+    },
+    [
+      authState.editorSessionActive,
+      authState.teacherSessionActive,
+      authState.studentSessionActive,
+      authState.teacherAuthenticatedId,
+      authState.verifiedStudentId,
+      authState.teacherSelectedCourseId,
+      authState.studentSelectedCourseId
+    ]
+  );
+
+  const handleForceFlushEncryptedAuditLogs = useCallback(async () => {
+    const res = await flushEncryptedAuditLogsToServer();
+    setEncryptedAuditLogs(loadDecryptedAuditEvents());
+    return res;
+  }, []);
+
+  useEffect(() => {
+    const syncAuditInterval = setInterval(() => {
+      void flushEncryptedAuditLogsToServer().then((res) => {
+        if (res.flushedCount > 0) {
+          setEncryptedAuditLogs(loadDecryptedAuditEvents());
+        }
+      });
+    }, 12000);
+    const handleOnline = () => {
+      void handleForceFlushEncryptedAuditLogs();
+    };
+    window.addEventListener('online', handleOnline);
+    return () => {
+      clearInterval(syncAuditInterval);
+      window.removeEventListener('online', handleOnline);
+    };
+  }, [handleForceFlushEncryptedAuditLogs]);
+
+  // Persistent State: Exam Attempts (Diferido hasta selección de curso para optimizar memoria del navegador)
   const [attempts, setAttempts] = useState<ExamAttemptResult[]>(() => {
+    if (!hasSelectedCourseInitially) return [];
     try {
       const raw = localStorage.getItem(STORAGE_KEYS.ATTEMPTS);
       if (raw) {
@@ -234,8 +356,9 @@ function AppContent() {
     return [];
   });
 
-  // Persistent State: ABPro Project Evaluations
+  // Persistent State: ABPro Project Evaluations (Diferido hasta selección de curso)
   const [abproEvaluations, setAbproEvaluations] = useState<ABProProjectEvaluation[]>(() => {
+    if (!hasSelectedCourseInitially) return [];
     try {
       const raw = localStorage.getItem(STORAGE_KEYS.ABPRO);
       if (raw) {
@@ -289,8 +412,11 @@ function AppContent() {
     return [];
   });
 
-  // Persistent State: Academic Dataset (Classes 1 to 6 Grades & Attendance Blocks B1/B2 — strictly fed by the single `students` bank)
+  // Persistent State: Academic Dataset (Inicializado bajo demanda cuando se selecciona un curso)
   const [academicDataset, setAcademicDataset] = useState<AcademicDataset>(() => {
+    if (!hasSelectedCourseInitially) {
+      return buildInitialAcademicDataset([]);
+    }
     try {
       const raw = localStorage.getItem(STORAGE_KEYS.ACADEMIC_DATASET);
       if (raw) {
@@ -304,6 +430,93 @@ function AppContent() {
     }
     return buildInitialAcademicDataset(students);
   });
+
+  // Hidrata bajo demanda las estructuras pesadas (academicDataset, attempts, abproEvaluations) cuando el estudiante o docente selecciona un curso
+  useEffect(() => {
+    const selectedCourseId =
+      authState.studentSelectedCourseId ||
+      authState.teacherSelectedCourseId ||
+      (activeView === 'editor' ? config.activeCourseId || 'editor' : null);
+
+    if (!selectedCourseId && !studentSessionActive && !teacherSessionActive && activeView !== 'editor') {
+      return;
+    }
+
+    if (!isCourseDataHydratedOnDemand) {
+      let hydratedAttempts = deferredCourseStructuresRef.current.attempts;
+      if (!hydratedAttempts) {
+        try {
+          const rawAtt = localStorage.getItem(STORAGE_KEYS.ATTEMPTS);
+          if (rawAtt) {
+            const parsed = JSON.parse(rawAtt);
+            if (Array.isArray(parsed)) hydratedAttempts = parsed;
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      let hydratedAbpro = deferredCourseStructuresRef.current.abproEvaluations;
+      if (!hydratedAbpro) {
+        try {
+          const rawAb = localStorage.getItem(STORAGE_KEYS.ABPRO);
+          if (rawAb) {
+            const parsed = JSON.parse(rawAb);
+            if (Array.isArray(parsed)) hydratedAbpro = parsed;
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      let rawAcademic = deferredCourseStructuresRef.current.academicDataset;
+      if (!rawAcademic) {
+        try {
+          const rawAc = localStorage.getItem(STORAGE_KEYS.ACADEMIC_DATASET);
+          if (rawAc) {
+            const parsed = JSON.parse(rawAc);
+            if (parsed && typeof parsed === 'object') rawAcademic = parsed;
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      const nextAtt = hydratedAttempts || stateRef.current.attempts;
+      const nextAbpro = hydratedAbpro || stateRef.current.abproEvaluations;
+      const meta = getEffectiveCourseMetadata(stateRef.current.config);
+      const nextAcademic = rawAcademic
+        ? normalizeAndSyncAcademicDataset(
+            rawAcademic,
+            stateRef.current.students,
+            meta.modulosCurso,
+            meta.nombreCurso
+          )
+        : normalizeAndSyncAcademicDataset(
+            stateRef.current.academicDataset,
+            stateRef.current.students,
+            meta.modulosCurso,
+            meta.nombreCurso
+          );
+
+      stateRef.current.attempts = nextAtt;
+      stateRef.current.abproEvaluations = nextAbpro;
+      stateRef.current.academicDataset = nextAcademic;
+
+      setAttempts(nextAtt);
+      setAbproEvaluations(nextAbpro);
+      setAcademicDataset(nextAcademic);
+      setIsCourseDataHydratedOnDemand(true);
+    }
+  }, [
+    authState.studentSelectedCourseId,
+    authState.teacherSelectedCourseId,
+    activeView,
+    studentSessionActive,
+    teacherSessionActive,
+    config.activeCourseId,
+    isCourseDataHydratedOnDemand
+  ]);
 
   // Keep synchronous ref of latest state for functional updaters
   const stateRef = useRef({
@@ -763,15 +976,30 @@ function AppContent() {
         }
 
         if (Array.isArray(data.attempts)) {
-          setAttempts(data.attempts);
-          stateRef.current.attempts = data.attempts;
+          deferredCourseStructuresRef.current.attempts = data.attempts;
           safeWriteLocalStorage(STORAGE_KEYS.ATTEMPTS, data.attempts);
+          if (
+            authState.studentSelectedCourseId ||
+            authState.teacherSelectedCourseId ||
+            authState.activeView !== 'inicio'
+          ) {
+            setAttempts(data.attempts);
+            stateRef.current.attempts = data.attempts;
+            setIsCourseDataHydratedOnDemand(true);
+          }
         }
 
         if (Array.isArray(data.abproEvaluations)) {
-          setAbproEvaluations(data.abproEvaluations);
-          stateRef.current.abproEvaluations = data.abproEvaluations;
+          deferredCourseStructuresRef.current.abproEvaluations = data.abproEvaluations;
           safeWriteLocalStorage(STORAGE_KEYS.ABPRO, data.abproEvaluations);
+          if (
+            authState.studentSelectedCourseId ||
+            authState.teacherSelectedCourseId ||
+            authState.activeView !== 'inicio'
+          ) {
+            setAbproEvaluations(data.abproEvaluations);
+            stateRef.current.abproEvaluations = data.abproEvaluations;
+          }
         }
 
         if (Array.isArray(data.liveSessions)) {
@@ -795,15 +1023,25 @@ function AppContent() {
           data.academicDataset && typeof data.academicDataset === 'object'
             ? data.academicDataset
             : stateRef.current.academicDataset;
-        const syncedAcademic = normalizeAndSyncAcademicDataset(
-          sourceAcademic,
-          stateRef.current.students,
-          effectiveMeta.modulosCurso,
-          effectiveMeta.nombreCurso
-        );
-        setAcademicDataset(syncedAcademic);
-        stateRef.current.academicDataset = syncedAcademic;
-        safeWriteLocalStorage(STORAGE_KEYS.ACADEMIC_DATASET, syncedAcademic);
+        deferredCourseStructuresRef.current.academicDataset = sourceAcademic;
+        if (
+          authState.studentSelectedCourseId ||
+          authState.teacherSelectedCourseId ||
+          authState.activeView !== 'inicio'
+        ) {
+          const syncedAcademic = normalizeAndSyncAcademicDataset(
+            sourceAcademic,
+            stateRef.current.students,
+            effectiveMeta.modulosCurso,
+            effectiveMeta.nombreCurso
+          );
+          setAcademicDataset(syncedAcademic);
+          stateRef.current.academicDataset = syncedAcademic;
+          safeWriteLocalStorage(STORAGE_KEYS.ACADEMIC_DATASET, syncedAcademic);
+          setIsCourseDataHydratedOnDemand(true);
+        } else {
+          safeWriteLocalStorage(STORAGE_KEYS.ACADEMIC_DATASET, sourceAcademic);
+        }
 
         return {
           ok: true,
@@ -887,15 +1125,50 @@ function AppContent() {
     fetchAndApplyServerState
   ]);
 
-  // Initial authoritative hydration on mount + Periodic multi-device synchronization + Focus & Storage & BroadcastChannel sync
+  // Initial authoritative hydration on mount + Adaptive multi-device synchronization + Focus & Storage & BroadcastChannel sync
   useEffect(() => {
+    const pollIntervalMs = activeView === 'docente' ? 2500 : 6000;
+
+    const runLightweightOrFullPoll = async () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      if (pendingWritesCountRef.current > 0 || Date.now() - lastMutationStartedAtRef.current < 3500) {
+        return;
+      }
+      try {
+        const cRev = serverRevisionRef.current;
+        const qRev = questionsRevisionRef.current;
+        if (cRev <= 0) {
+          await fetchAndApplyServerState(false);
+          return;
+        }
+        const pingRes = await fetch(
+          `/api/state/live-ping?clientRevision=${cRev}&clientQuestionsRevision=${qRev}&_t=${Date.now()}`,
+          { method: 'GET', cache: 'no-store' }
+        );
+        if (pingRes.ok) {
+          const pingData = await pingRes.json();
+          if (pingData && pingData.upToDate) {
+            if (Array.isArray(pingData.liveSessions)) {
+              setLiveSessions(pingData.liveSessions);
+              stateRef.current.liveSessions = pingData.liveSessions;
+            }
+            setLastServerSyncFormatted(new Date().toLocaleTimeString('es-CO'));
+            return;
+          }
+        }
+      } catch {
+        // Fallback to standard state check
+      }
+      await fetchAndApplyServerState(false);
+    };
+
     const interval = setInterval(() => {
-      fetchAndApplyServerState(false);
-    }, 2500);
+      void runLightweightOrFullPoll();
+    }, pollIntervalMs);
 
     const handleVisibilityOrFocus = () => {
       if (!document.hidden) {
-        fetchAndApplyServerState(false);
+        void runLightweightOrFullPoll();
       }
     };
 
@@ -966,36 +1239,63 @@ function AppContent() {
         }
       }
     };
-  }, [fetchAndApplyServerState]);
+  }, [fetchAndApplyServerState, activeView]);
 
   // ============================================================================
   // CENTRALIZED PERSISTENCE ACTION WRAPPERS (Immediate UI + Server + Local Cache)
   // ============================================================================
 
-  const syncStudentsIntoActiveCourseConfig = useCallback(
-    (nextStudents: StudentRecord[], baseConfig: SystemConfig): SystemConfig => {
-      if (!Array.isArray(baseConfig.universalCoursesCatalog) || baseConfig.universalCoursesCatalog.length === 0) {
+  const syncActiveCourseWorkspaceInConfig = useCallback(
+    (
+      partialWorkspace: Partial<{
+        students: StudentRecord[];
+        questions: Question[];
+        attempts: ExamAttemptResult[];
+        abproEvaluations: ABProProjectEvaluation[];
+        customMiniRetos: CustomMiniRetoTemplate[];
+        academicDataset: AcademicDataset;
+      }>,
+      baseConfig: SystemConfig
+    ): SystemConfig => {
+      if (
+        !Array.isArray(baseConfig.universalCoursesCatalog) ||
+        baseConfig.universalCoursesCatalog.length === 0
+      ) {
         return baseConfig;
       }
       const targetCourseId =
         baseConfig.activeCourseId || baseConfig.universalCoursesCatalog[0]?.meta?.courseId;
       if (!targetCourseId) return baseConfig;
 
-      const updatedCatalog = baseConfig.universalCoursesCatalog.map((c) =>
-        c.meta?.courseId === targetCourseId
-          ? {
-              ...c,
-              students: nextStudents,
-              updatedAtIso: new Date().toISOString()
-            }
-          : c
-      );
+      const updatedCatalog = baseConfig.universalCoursesCatalog.map((c) => {
+        if (c.meta?.courseId !== targetCourseId) return c;
+        const nextSt = partialWorkspace.students ?? c.students ?? [];
+        const nextQ = partialWorkspace.questions ?? c.questions ?? [];
+        const nextAtt = partialWorkspace.attempts ?? c.attempts ?? [];
+        const nextRet = partialWorkspace.customMiniRetos ?? c.customMiniRetos ?? [];
+        return {
+          ...c,
+          ...partialWorkspace,
+          studentsCount: Array.isArray(nextSt) ? nextSt.length : c.studentsCount,
+          questionsCount: Array.isArray(nextQ) ? nextQ.length : c.questionsCount,
+          attemptsCount: Array.isArray(nextAtt) ? nextAtt.length : c.attemptsCount,
+          retosCount: Array.isArray(nextRet) ? nextRet.length : c.retosCount,
+          updatedAtIso: new Date().toISOString()
+        };
+      });
       return {
         ...baseConfig,
         universalCoursesCatalog: updatedCatalog
       };
     },
     []
+  );
+
+  const syncStudentsIntoActiveCourseConfig = useCallback(
+    (nextStudents: StudentRecord[], baseConfig: SystemConfig): SystemConfig => {
+      return syncActiveCourseWorkspaceInConfig({ students: nextStudents }, baseConfig);
+    },
+    [syncActiveCourseWorkspaceInConfig]
   );
 
   const handleUpdateStudents: React.Dispatch<React.SetStateAction<StudentRecord[]>> = useCallback(
@@ -1039,7 +1339,18 @@ function AppContent() {
 
   const handleUpdateStudentProfile = useCallback(
     (updated: StudentRecord) => {
-      const rawNext = stateRef.current.students.map((s) => (s.id === updated.id ? updated : s));
+      const cleanUpdatedId = String(updated.id || '')
+        .trim()
+        .replace(/[\s.-]/g, '')
+        .toUpperCase();
+
+      const rawNext = stateRef.current.students.map((s) => {
+        const cleanId = String(s?.id || '')
+          .trim()
+          .replace(/[\s.-]/g, '')
+          .toUpperCase();
+        return cleanId === cleanUpdatedId ? { ...s, ...updated } : s;
+      });
       const next = enrichStudentsWithServerSummary(
         rawNext,
         stateRef.current.attempts,
@@ -1049,12 +1360,80 @@ function AppContent() {
       setStudents(next);
       safeWriteLocalStorage(STORAGE_KEYS.STUDENTS, next);
 
-      // Keep active course in universalCoursesCatalog synchronized with Control de Estudiantes
-      const syncedConfig = syncStudentsIntoActiveCourseConfig(next, stateRef.current.config);
-      if (syncedConfig !== stateRef.current.config) {
-        stateRef.current.config = syncedConfig;
-        setConfig(syncedConfig);
-        safeWriteLocalStorage(STORAGE_KEYS.CONFIG, syncedConfig);
+      // Keep active course and all assigned courses in universalCoursesCatalog & studentRosterDatabases synchronized
+      let nextConfig = syncStudentsIntoActiveCourseConfig(next, stateRef.current.config);
+      if (Array.isArray(nextConfig.universalCoursesCatalog)) {
+        nextConfig = {
+          ...nextConfig,
+          universalCoursesCatalog: nextConfig.universalCoursesCatalog.map((course) => {
+            if (!Array.isArray(course.students)) return course;
+            let courseModified = false;
+            const nextCourseStudents = course.students.map((st) => {
+              const cleanStId = String(st?.id || '')
+                .trim()
+                .replace(/[\s.-]/g, '')
+                .toUpperCase();
+              if (cleanStId === cleanUpdatedId) {
+                courseModified = true;
+                return {
+                  ...st,
+                  nombre: updated.nombre,
+                  codigoAcceso: updated.codigoAcceso,
+                  correo: updated.correo,
+                  whatsapp: updated.whatsapp
+                };
+              }
+              return st;
+            });
+            return courseModified
+              ? {
+                  ...course,
+                  students: nextCourseStudents,
+                  updatedAtIso: new Date().toISOString()
+                }
+              : course;
+          })
+        };
+      }
+      if (Array.isArray(nextConfig.studentRosterDatabases)) {
+        nextConfig = {
+          ...nextConfig,
+          studentRosterDatabases: nextConfig.studentRosterDatabases.map((db) => {
+            if (!Array.isArray(db.students)) return db;
+            let dbModified = false;
+            const nextDbStudents = db.students.map((st) => {
+              const cleanStId = String(st?.id || '')
+                .trim()
+                .replace(/[\s.-]/g, '')
+                .toUpperCase();
+              if (cleanStId === cleanUpdatedId) {
+                dbModified = true;
+                return {
+                  ...st,
+                  nombre: updated.nombre,
+                  codigoAcceso: updated.codigoAcceso,
+                  correo: updated.correo,
+                  whatsapp: updated.whatsapp
+                };
+              }
+              return st;
+            });
+            return dbModified
+              ? {
+                  ...db,
+                  students: nextDbStudents,
+                  updatedAtIso: new Date().toISOString()
+                }
+              : db;
+          })
+        };
+      }
+
+      if (nextConfig !== stateRef.current.config) {
+        stateRef.current.config = nextConfig;
+        setConfig(nextConfig);
+        safeWriteLocalStorage(STORAGE_KEYS.CONFIG, nextConfig);
+        pushServerMutation('/api/state/config', 'PUT', { config: nextConfig });
       }
 
       const meta = getEffectiveCourseMetadata(stateRef.current.config);
@@ -1068,7 +1447,14 @@ function AppContent() {
       setAcademicDataset(syncedAcademic);
       safeWriteLocalStorage(STORAGE_KEYS.ACADEMIC_DATASET, syncedAcademic);
 
-      const enrichedUpdated = next.find((s) => s.id === updated.id) || updated;
+      const enrichedUpdated =
+        next.find(
+          (s) =>
+            String(s?.id || '')
+              .trim()
+              .replace(/[\s.-]/g, '')
+              .toUpperCase() === cleanUpdatedId
+        ) || updated;
       pushServerMutation(`/api/state/student/${encodeURIComponent(updated.id)}`, 'PATCH', {
         student: enrichedUpdated
       });
@@ -1093,12 +1479,24 @@ function AppContent() {
       setQuestionsBankExplicitlyCleared(isCleared);
       safeWriteLocalStorage(STORAGE_KEYS.QUESTIONS_CLEARED, isCleared);
       safeWriteLocalStorage(STORAGE_KEYS.QUESTIONS, normalized);
+
+      const syncedConfig = syncActiveCourseWorkspaceInConfig(
+        { questions: normalized },
+        stateRef.current.config
+      );
+      if (syncedConfig !== stateRef.current.config) {
+        stateRef.current.config = syncedConfig;
+        setConfig(syncedConfig);
+        safeWriteLocalStorage(STORAGE_KEYS.CONFIG, syncedConfig);
+        pushServerMutation('/api/state/config', 'PUT', { config: syncedConfig });
+      }
+
       pushServerMutation('/api/state/questions', 'PUT', {
         questions: normalized,
         saveSnapshot: true
       });
     },
-    [pushServerMutation]
+    [pushServerMutation, syncActiveCourseWorkspaceInConfig]
   );
 
   const handleUndoQuestionsSnapshot = useCallback(async (): Promise<number | null> => {
@@ -1148,9 +1546,26 @@ function AppContent() {
       stateRef.current.students = reEnriched;
       setStudents(reEnriched);
       safeWriteLocalStorage(STORAGE_KEYS.STUDENTS, reEnriched);
+
+      const syncedConfig = syncActiveCourseWorkspaceInConfig(
+        { attempts: next, students: reEnriched },
+        stateRef.current.config
+      );
+      if (syncedConfig !== stateRef.current.config) {
+        stateRef.current.config = syncedConfig;
+        setConfig(syncedConfig);
+        safeWriteLocalStorage(STORAGE_KEYS.CONFIG, syncedConfig);
+        pushServerMutation('/api/state/config', 'PUT', { config: syncedConfig });
+      }
+
       pushServerMutation('/api/state/attempts', 'PUT', { attempts: next });
+      logCriticalAppEvent({
+        category: 'CALIFICACIONES',
+        action: 'ACTUALIZACION_INTENTOS_EXAMEN',
+        details: `Modificación de registros de intentos de evaluación (Total: ${next.length} intento(s))`
+      });
     },
-    [pushServerMutation]
+    [pushServerMutation, syncActiveCourseWorkspaceInConfig, logCriticalAppEvent]
   );
 
   const handleUpdateABProEvaluations = useCallback(
@@ -1158,14 +1573,32 @@ function AppContent() {
       stateRef.current.abproEvaluations = next;
       setAbproEvaluations(next);
       safeWriteLocalStorage(STORAGE_KEYS.ABPRO, next);
+
+      const syncedConfig = syncActiveCourseWorkspaceInConfig(
+        { abproEvaluations: next },
+        stateRef.current.config
+      );
+      if (syncedConfig !== stateRef.current.config) {
+        stateRef.current.config = syncedConfig;
+        setConfig(syncedConfig);
+        safeWriteLocalStorage(STORAGE_KEYS.CONFIG, syncedConfig);
+        pushServerMutation('/api/state/config', 'PUT', { config: syncedConfig });
+      }
+
       pushServerMutation('/api/state/abpro', 'PUT', { abproEvaluations: next });
+      logCriticalAppEvent({
+        category: 'CALIFICACIONES',
+        action: 'CALIFICACION_RUBRICA_ABPRO',
+        details: `Actualización de calificaciones de proyecto ABPro (${next.length} registro(s) evaluados)`
+      });
     },
-    [pushServerMutation]
+    [pushServerMutation, syncActiveCourseWorkspaceInConfig, logCriticalAppEvent]
   );
 
   const handleUpdateConfig: React.Dispatch<React.SetStateAction<SystemConfig>> = useCallback(
     (action) => {
-      const next = typeof action === 'function' ? action(stateRef.current.config) : action;
+      const prevCfg = stateRef.current.config;
+      const next = typeof action === 'function' ? action(prevCfg) : action;
       stateRef.current.config = next;
       setConfig(next);
       safeWriteLocalStorage(STORAGE_KEYS.CONFIG, next);
@@ -1192,8 +1625,39 @@ function AppContent() {
       safeWriteLocalStorage(STORAGE_KEYS.ACADEMIC_DATASET, syncedAcademic);
 
       pushServerMutation('/api/state/config', 'PUT', { config: next });
+
+      // Auditar cambios críticos en configuración de examen
+      const configDiffs: string[] = [];
+      if (prevCfg.examenAbierto !== next.examenAbierto) {
+        configDiffs.push(`examenAbierto: ${next.examenAbierto ? 'ABIERTO' : 'CERRADO'}`);
+      }
+      if (prevCfg.tiempoExamenIntegralMin !== next.tiempoExamenIntegralMin) {
+        configDiffs.push(`tiempoIntegral: ${next.tiempoExamenIntegralMin}m`);
+      }
+      if (prevCfg.preguntasExamenIntegral !== next.preguntasExamenIntegral) {
+        configDiffs.push(`preguntasIntegral: ${next.preguntasExamenIntegral}`);
+      }
+      if (prevCfg.tiempoExamenModuloMin !== next.tiempoExamenModuloMin) {
+        configDiffs.push(`tiempoModulo: ${next.tiempoExamenModuloMin}m`);
+      }
+      if (prevCfg.preguntasExamenModulo !== next.preguntasExamenModulo) {
+        configDiffs.push(`preguntasModulo: ${next.preguntasExamenModulo}`);
+      }
+      if (prevCfg.notaMinimaAprobacion !== next.notaMinimaAprobacion) {
+        configDiffs.push(`umbralAprobacion: ${next.notaMinimaAprobacion}`);
+      }
+      if (prevCfg.exigirPinAula !== next.exigirPinAula || prevCfg.pinAulaDia !== next.pinAulaDia) {
+        configDiffs.push(`PIN Aula: ${next.exigirPinAula ? next.pinAulaDia : 'Desactivado'}`);
+      }
+      if (configDiffs.length > 0) {
+        logCriticalAppEvent({
+          category: 'CONFIGURACION_EXAMEN',
+          action: 'CAMBIO_PARAMETROS_EVALUACION',
+          details: `Curso ${meta.codigoCurso || meta.nombreCurso}: ${configDiffs.join(' · ')}`
+        });
+      }
     },
-    [pushServerMutation]
+    [pushServerMutation, logCriticalAppEvent]
   );
 
   const handleUpdateCustomMiniRetos: React.Dispatch<
@@ -1205,9 +1669,21 @@ function AppContent() {
       stateRef.current.customMiniRetos = next;
       setCustomMiniRetos(next);
       safeWriteLocalStorage(STORAGE_KEYS.CUSTOM_MINI_RETOS, next);
+
+      const syncedConfig = syncActiveCourseWorkspaceInConfig(
+        { customMiniRetos: next },
+        stateRef.current.config
+      );
+      if (syncedConfig !== stateRef.current.config) {
+        stateRef.current.config = syncedConfig;
+        setConfig(syncedConfig);
+        safeWriteLocalStorage(STORAGE_KEYS.CONFIG, syncedConfig);
+        pushServerMutation('/api/state/config', 'PUT', { config: syncedConfig });
+      }
+
       pushServerMutation('/api/state/custom-mini-retos', 'PUT', { customMiniRetos: next });
     },
-    [pushServerMutation]
+    [pushServerMutation, syncActiveCourseWorkspaceInConfig]
   );
 
   const handleRecordAttempt = useCallback(
@@ -1235,13 +1711,6 @@ function AppContent() {
       safeWriteLocalStorage(STORAGE_KEYS.ATTEMPTS, nextAttempts);
       safeWriteLocalStorage(STORAGE_KEYS.STUDENTS, nextStudents);
 
-      const syncedConfig = syncStudentsIntoActiveCourseConfig(nextStudents, stateRef.current.config);
-      if (syncedConfig !== stateRef.current.config) {
-        stateRef.current.config = syncedConfig;
-        setConfig(syncedConfig);
-        safeWriteLocalStorage(STORAGE_KEYS.CONFIG, syncedConfig);
-      }
-
       // Synchronize exam grade into Clases y Asistencia (academicDataset) immediately
       const meta = getEffectiveCourseMetadata(stateRef.current.config);
       const syncedAcademic = normalizeAndSyncAcademicDataset(
@@ -1253,6 +1722,22 @@ function AppContent() {
       stateRef.current.academicDataset = syncedAcademic;
       setAcademicDataset(syncedAcademic);
       safeWriteLocalStorage(STORAGE_KEYS.ACADEMIC_DATASET, syncedAcademic);
+
+      const syncedConfig = syncActiveCourseWorkspaceInConfig(
+        {
+          attempts: nextAttempts,
+          students: nextStudents,
+          academicDataset: syncedAcademic
+        },
+        stateRef.current.config
+      );
+      if (syncedConfig !== stateRef.current.config) {
+        stateRef.current.config = syncedConfig;
+        setConfig(syncedConfig);
+        safeWriteLocalStorage(STORAGE_KEYS.CONFIG, syncedConfig);
+        pushServerMutation('/api/state/config', 'PUT', { config: syncedConfig });
+      }
+
       pushServerMutation('/api/academic-dataset/update', 'POST', {
         academicDataset: syncedAcademic
       });
@@ -1263,6 +1748,14 @@ function AppContent() {
       pushServerMutation('/api/state/attempt', 'POST', {
         attempt: attemptWithSyncFlag,
         student: enrichedUpdatedStudent
+      });
+
+      logCriticalAppEvent({
+        category: 'CALIFICACIONES',
+        action: 'ENTREGA_EXAMEN_REGISTRADA',
+        actorRole: 'ESTUDIANTE',
+        actorId: updatedStudent.id,
+        details: `Estudiante ${updatedStudent.nombre} (${updatedStudent.id}) entregó ${result.modalidadTitle || result.modalidad} · Nota: ${result.notaFinal.toFixed(2)}/5.0 · Tiempo: ${Math.round((result.duracionSegundos || 0) / 60)} min`
       });
 
       if (stateRef.current.config.webhookUrl) {
@@ -1309,13 +1802,6 @@ function AppContent() {
       setStudents(nextStudents);
       safeWriteLocalStorage(STORAGE_KEYS.STUDENTS, nextStudents);
 
-      const syncedConfig = syncStudentsIntoActiveCourseConfig(nextStudents, stateRef.current.config);
-      if (syncedConfig !== stateRef.current.config) {
-        stateRef.current.config = syncedConfig;
-        setConfig(syncedConfig);
-        safeWriteLocalStorage(STORAGE_KEYS.CONFIG, syncedConfig);
-      }
-
       // Synchronize mini-reto grade into Clases y Asistencia (academicDataset) immediately
       const meta = getEffectiveCourseMetadata(stateRef.current.config);
       const syncedAcademic = normalizeAndSyncAcademicDataset(
@@ -1327,6 +1813,21 @@ function AppContent() {
       stateRef.current.academicDataset = syncedAcademic;
       setAcademicDataset(syncedAcademic);
       safeWriteLocalStorage(STORAGE_KEYS.ACADEMIC_DATASET, syncedAcademic);
+
+      const syncedConfig = syncActiveCourseWorkspaceInConfig(
+        {
+          students: nextStudents,
+          academicDataset: syncedAcademic
+        },
+        stateRef.current.config
+      );
+      if (syncedConfig !== stateRef.current.config) {
+        stateRef.current.config = syncedConfig;
+        setConfig(syncedConfig);
+        safeWriteLocalStorage(STORAGE_KEYS.CONFIG, syncedConfig);
+        pushServerMutation('/api/state/config', 'PUT', { config: syncedConfig });
+      }
+
       pushServerMutation('/api/academic-dataset/update', 'POST', {
         academicDataset: syncedAcademic
       });
@@ -1361,13 +1862,170 @@ function AppContent() {
       setStudents(nextStudents);
       safeWriteLocalStorage(STORAGE_KEYS.STUDENTS, nextStudents);
 
+      const syncedConfig = syncActiveCourseWorkspaceInConfig(
+        { students: nextStudents },
+        stateRef.current.config
+      );
+      if (syncedConfig !== stateRef.current.config) {
+        stateRef.current.config = syncedConfig;
+        setConfig(syncedConfig);
+        safeWriteLocalStorage(STORAGE_KEYS.CONFIG, syncedConfig);
+      }
+
       pushServerMutation('/api/state/anti-cheat-event', 'POST', {
         studentId,
         logEntry,
         updatedStudent: nextStudents.find((s) => s.id === studentId)
       });
+
+      logCriticalAppEvent({
+        category: 'ANTI_TRAMPA',
+        action: logEntry.tipoDeteccion || 'ALERTA_ANTI_TRAMPA',
+        actorRole: 'ESTUDIANTE',
+        actorId: studentId,
+        details: `${logEntry.studentName || studentId} · ${logEntry.etiquetaDeteccion || logEntry.tipoDeteccion}: ${logEntry.descripcion} (Acción: ${logEntry.accionTomada})`
+      });
     },
-    [pushServerMutation]
+    [pushServerMutation, syncActiveCourseWorkspaceInConfig, logCriticalAppEvent]
+  );
+
+  const handleActivateCourseWorkspace = useCallback(
+    (targetWorkspace: UniversalCourseWorkspace) => {
+      if (!targetWorkspace || !targetWorkspace.meta || !targetWorkspace.meta.courseId) return;
+
+      const currentCfg = stateRef.current.config;
+      const syncedCurrentCfg = syncActiveCourseWorkspaceInConfig(
+        {
+          students: stateRef.current.students,
+          questions: stateRef.current.questions,
+          attempts: stateRef.current.attempts,
+          abproEvaluations: stateRef.current.abproEvaluations,
+          customMiniRetos: stateRef.current.customMiniRetos,
+          academicDataset: stateRef.current.academicDataset
+        },
+        currentCfg
+      );
+
+      const targetCourseId = targetWorkspace.meta.courseId;
+      const freshTargetWorkspace =
+        (syncedCurrentCfg.universalCoursesCatalog || []).find(
+          (w) => w.meta?.courseId === targetCourseId
+        ) || targetWorkspace;
+
+      const targetMeta = getEffectiveCourseMetadata(syncedCurrentCfg, null, targetCourseId);
+      const rawTargetStudents = getEffectiveStudentsForWorkspace(
+        freshTargetWorkspace,
+        syncedCurrentCfg,
+        targetCourseId === currentCfg.activeCourseId ? stateRef.current.students : undefined
+      );
+      const rawTargetQuestions = getEffectiveQuestionsForWorkspace(
+        freshTargetWorkspace,
+        syncedCurrentCfg,
+        targetCourseId === currentCfg.activeCourseId ? stateRef.current.questions : undefined
+      );
+      const normalizedQuestions =
+        rawTargetQuestions.length > 0 ? normalizeQuestionList(rawTargetQuestions) : [];
+      const targetAttempts =
+        targetCourseId === currentCfg.activeCourseId
+          ? stateRef.current.attempts
+          : Array.isArray(freshTargetWorkspace.attempts)
+          ? freshTargetWorkspace.attempts
+          : [];
+      const targetAbpro =
+        targetCourseId === currentCfg.activeCourseId
+          ? stateRef.current.abproEvaluations
+          : Array.isArray(freshTargetWorkspace.abproEvaluations)
+          ? freshTargetWorkspace.abproEvaluations
+          : [];
+      const targetRetos =
+        targetCourseId === currentCfg.activeCourseId &&
+        Array.isArray(stateRef.current.customMiniRetos) &&
+        stateRef.current.customMiniRetos.length > 0
+          ? stateRef.current.customMiniRetos
+          : Array.isArray(freshTargetWorkspace.customMiniRetos) &&
+            freshTargetWorkspace.customMiniRetos.length > 0
+          ? freshTargetWorkspace.customMiniRetos
+          : generateBaseRetosForCourseModules(targetMeta, normalizedQuestions);
+
+      const nextConfig: SystemConfig = {
+        ...syncedCurrentCfg,
+        activeCourseId: targetMeta.courseId,
+        activeCourseMeta: targetMeta
+      };
+
+      const enrichedStudents = enrichStudentsWithServerSummary(
+        rawTargetStudents,
+        targetAttempts,
+        nextConfig
+      );
+
+      const nextAcademic = freshTargetWorkspace.academicDataset
+        ? normalizeAndSyncAcademicDataset(
+            freshTargetWorkspace.academicDataset,
+            enrichedStudents,
+            targetMeta.modulosCurso,
+            targetMeta.nombreCurso
+          )
+        : buildInitialAcademicDataset(
+            enrichedStudents,
+            targetMeta.modulosCurso,
+            targetMeta.nombreCurso
+          );
+
+      const finalConfig = syncActiveCourseWorkspaceInConfig(
+        {
+          students: enrichedStudents,
+          questions: normalizedQuestions,
+          attempts: targetAttempts,
+          abproEvaluations: targetAbpro,
+          customMiniRetos: targetRetos,
+          academicDataset: nextAcademic
+        },
+        nextConfig
+      );
+
+      stateRef.current.config = finalConfig;
+      stateRef.current.students = enrichedStudents;
+      stateRef.current.questions = normalizedQuestions;
+      stateRef.current.questionsBankExplicitlyCleared = normalizedQuestions.length === 0;
+      stateRef.current.attempts = targetAttempts;
+      stateRef.current.abproEvaluations = targetAbpro;
+      stateRef.current.customMiniRetos = targetRetos;
+      stateRef.current.academicDataset = nextAcademic;
+
+      setConfig(finalConfig);
+      setStudents(enrichedStudents);
+      setQuestions(normalizedQuestions);
+      setQuestionsBankExplicitlyCleared(normalizedQuestions.length === 0);
+      setAttempts(targetAttempts);
+      setAbproEvaluations(targetAbpro);
+      setCustomMiniRetos(targetRetos);
+      setAcademicDataset(nextAcademic);
+      setIsCourseDataHydratedOnDemand(true);
+
+      safeWriteLocalStorage(STORAGE_KEYS.CONFIG, finalConfig);
+      safeWriteLocalStorage(STORAGE_KEYS.STUDENTS, enrichedStudents);
+      safeWriteLocalStorage(STORAGE_KEYS.QUESTIONS, normalizedQuestions);
+      safeWriteLocalStorage(STORAGE_KEYS.QUESTIONS_CLEARED, normalizedQuestions.length === 0);
+      safeWriteLocalStorage(STORAGE_KEYS.ATTEMPTS, targetAttempts);
+      safeWriteLocalStorage(STORAGE_KEYS.ABPRO, targetAbpro);
+      safeWriteLocalStorage(STORAGE_KEYS.CUSTOM_MINI_RETOS, targetRetos);
+      safeWriteLocalStorage(STORAGE_KEYS.ACADEMIC_DATASET, nextAcademic);
+
+      void pushServerMutation('/api/state/save-all', 'POST', {
+        section: 'student_course_switch',
+        description: `Activación de curso (${targetMeta.nombreCurso})`,
+        config: finalConfig,
+        students: enrichedStudents,
+        questions: normalizedQuestions,
+        attempts: targetAttempts,
+        abproEvaluations: targetAbpro,
+        customMiniRetos: targetRetos,
+        academicDataset: nextAcademic,
+        questionsBankExplicitlyCleared: normalizedQuestions.length === 0
+      });
+    },
+    [pushServerMutation, syncActiveCourseWorkspaceInConfig]
   );
 
   const handleUpdateLiveSession = useCallback(
@@ -1481,6 +2139,17 @@ function AppContent() {
       stateRef.current.academicDataset = normalized;
       setAcademicDataset(normalized);
       safeWriteLocalStorage(STORAGE_KEYS.ACADEMIC_DATASET, normalized);
+
+      const syncedConfigWithAcademic = syncActiveCourseWorkspaceInConfig(
+        { academicDataset: normalized, students: currentRoster },
+        stateRef.current.config
+      );
+      if (syncedConfigWithAcademic !== stateRef.current.config) {
+        stateRef.current.config = syncedConfigWithAcademic;
+        setConfig(syncedConfigWithAcademic);
+        safeWriteLocalStorage(STORAGE_KEYS.CONFIG, syncedConfigWithAcademic);
+        pushServerMutation('/api/state/config', 'PUT', { config: syncedConfigWithAcademic });
+      }
       if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
         try {
           const bc = new BroadcastChannel('evaluaplus_realtime_sync_v1');
@@ -1497,8 +2166,13 @@ function AppContent() {
       void pushServerMutation('/api/academic-dataset/update', 'POST', {
         academicDataset: normalized
       });
+      logCriticalAppEvent({
+        category: 'ASISTENCIA_ACADEMICA',
+        action: 'ACTUALIZACION_DATASET_ACADEMICO',
+        details: `Actualización de asistencia o calificaciones por clase en ${meta.nombreCurso} (${normalized.records.length} estudiante(s))`
+      });
     },
-    [pushServerMutation, syncStudentsIntoActiveCourseConfig]
+    [pushServerMutation, syncStudentsIntoActiveCourseConfig, logCriticalAppEvent]
   );
 
   const handleFullSystemRestore = useCallback(
@@ -1690,88 +2364,611 @@ function AppContent() {
     editorSessionActive ||
     Boolean(authState.editorSessionActive);
   const activeCourseMeta = getEffectiveCourseMetadata(config);
+  const [homeDarkMode, setHomeDarkMode] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('evaluaplus_home_dark_mode') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const [homeSupportModalOpen, setHomeSupportModalOpen] = useState<boolean>(false);
+
+  const handleToggleHomeDarkMode = () => {
+    setHomeDarkMode((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('evaluaplus_home_dark_mode', next ? '1' : '0');
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    if (activeView !== 'inicio' || anySessionActive) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      if (e.key === 'Escape' && homeSupportModalOpen) {
+        setHomeSupportModalOpen(false);
+        return;
+      }
+      if (e.key === '1') {
+        handleSwitchToStudentLogin();
+      } else if (e.key === '2') {
+        handleSwitchToTeacherLogin();
+      } else if (e.key === '3') {
+        handleSwitchToEditorLogin();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [
+    activeView,
+    anySessionActive,
+    homeSupportModalOpen,
+    handleSwitchToStudentLogin,
+    handleSwitchToTeacherLogin,
+    handleSwitchToEditorLogin
+  ]);
 
   return (
     <ServerSaveProvider onExecuteServerSave={handleExecuteServerSave}>
       <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
-        {/* Main Content Area (Top Header Block Removed) */}
+        {/* Main Content Area */}
         <main className="flex-1 flex flex-col">
           {!isServerHydrated ? (
-            <div className="min-h-screen flex items-center justify-center px-4">
-              <div className="bg-white border border-slate-200 rounded-2xl p-6 max-w-sm w-full text-center space-y-2 shadow-xs">
-                <div className="text-sm font-bold text-slate-900">
-                  Sincronizando Base de Datos Centralizada...
+            <div
+              className={`min-h-screen flex flex-col justify-between transition-colors duration-200 ${
+                homeDarkMode
+                  ? 'bg-slate-950 text-slate-100'
+                  : 'bg-[#F8FAFC] text-slate-900'
+              }`}
+              role="status"
+              aria-live="polite"
+              aria-busy="true"
+              aria-label="Sincronizando plataforma y cargando paneles principales"
+            >
+              {/* Skeleton Header */}
+              <header
+                className={`w-full border-b ${
+                  homeDarkMode
+                    ? 'border-slate-800/80 bg-slate-900/80'
+                    : 'border-slate-200/80 bg-white/90'
+                }`}
+              >
+                <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <span
+                      className={`text-xl font-bold tracking-tight ${
+                        homeDarkMode ? 'text-white' : 'text-slate-900'
+                      }`}
+                    >
+                      Evalua<span className="text-sky-600">Plus</span>
+                    </span>
+                    <div
+                      className={`hidden sm:block h-5 w-20 rounded-md animate-pulse ${
+                        homeDarkMode ? 'bg-slate-800' : 'bg-slate-200/80'
+                      }`}
+                    />
+                  </div>
+
+                  <div className="flex items-center gap-2 sm:gap-3">
+                    <div
+                      className={`h-8 w-28 sm:w-32 rounded-xl border animate-pulse ${
+                        homeDarkMode
+                          ? 'bg-slate-900 border-slate-800'
+                          : 'bg-slate-100 border-slate-200/80'
+                      }`}
+                    />
+                    <div
+                      className={`h-8 w-16 sm:w-20 rounded-xl border animate-pulse ${
+                        homeDarkMode
+                          ? 'bg-slate-900 border-slate-800'
+                          : 'bg-slate-100 border-slate-200/80'
+                      }`}
+                    />
+                  </div>
                 </div>
-                <p className="text-xs text-slate-600">
-                  Cargando estado oficial del servidor.
-                </p>
+              </header>
+
+              {/* Skeleton Central Dashboard & Profile Cards */}
+              <div className="flex-1 flex flex-col justify-center max-w-5xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-12 sm:py-16 space-y-10">
+                {/* Skeleton Hero Section */}
+                <div className="max-w-2xl mx-auto w-full text-center space-y-4 flex flex-col items-center">
+                  <div
+                    className={`inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-medium border ${
+                      homeDarkMode
+                        ? 'bg-slate-900 border-slate-800 text-sky-400'
+                        : 'bg-white border-slate-200/90 text-sky-700 shadow-2xs'
+                    }`}
+                  >
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin shrink-0" />
+                    <span>Sincronizando Base de Datos Centralizada...</span>
+                  </div>
+
+                  <div
+                    className={`h-8 sm:h-10 w-4/5 max-w-lg rounded-xl animate-pulse ${
+                      homeDarkMode ? 'bg-slate-800/90' : 'bg-slate-200/90'
+                    }`}
+                  />
+                  <div className="w-full max-w-xl space-y-2 flex flex-col items-center pt-1">
+                    <div
+                      className={`h-4 w-11/12 rounded-lg animate-pulse ${
+                        homeDarkMode ? 'bg-slate-800/70' : 'bg-slate-200/75'
+                      }`}
+                    />
+                    <div
+                      className={`h-4 w-3/4 rounded-lg animate-pulse ${
+                        homeDarkMode ? 'bg-slate-800/70' : 'bg-slate-200/75'
+                      }`}
+                    />
+                  </div>
+                  <div
+                    className={`h-3.5 w-64 rounded-md animate-pulse mt-2 ${
+                      homeDarkMode ? 'bg-slate-800/60' : 'bg-slate-200/60'
+                    }`}
+                  />
+                </div>
+
+                {/* Skeleton 3-Card Grid (Matching Estudiante, Docente, Editor Cards) */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-5 sm:gap-6 items-stretch">
+                  {[
+                    { accent: homeDarkMode ? 'bg-sky-950/50' : 'bg-sky-50/90' },
+                    { accent: homeDarkMode ? 'bg-emerald-950/50' : 'bg-emerald-50/90' },
+                    { accent: homeDarkMode ? 'bg-indigo-950/50' : 'bg-indigo-50/90' }
+                  ].map((card, idx) => (
+                    <div
+                      key={idx}
+                      className={`rounded-2xl p-7 sm:p-8 border flex flex-col items-center justify-between gap-5 ${
+                        homeDarkMode
+                          ? 'bg-slate-900/90 border-slate-800 shadow-lg shadow-black/20'
+                          : 'bg-white border-slate-200/90 shadow-xs'
+                      }`}
+                    >
+                      <div className="w-full space-y-3 flex flex-col items-center">
+                        <div
+                          className={`w-16 h-16 rounded-2xl animate-pulse ${card.accent}`}
+                        />
+                        <div
+                          className={`h-6 w-28 rounded-lg animate-pulse ${
+                            homeDarkMode ? 'bg-slate-800' : 'bg-slate-200/90'
+                          }`}
+                        />
+                        <div className="w-full space-y-2 flex flex-col items-center pt-1">
+                          <div
+                            className={`h-3.5 w-4/5 rounded-md animate-pulse ${
+                              homeDarkMode ? 'bg-slate-800/75' : 'bg-slate-200/70'
+                            }`}
+                          />
+                          <div
+                            className={`h-3.5 w-3/5 rounded-md animate-pulse ${
+                              homeDarkMode ? 'bg-slate-800/60' : 'bg-slate-200/60'
+                            }`}
+                          />
+                        </div>
+                      </div>
+                      <div
+                        className={`h-4 w-20 rounded-md animate-pulse ${
+                          homeDarkMode ? 'bg-slate-800' : 'bg-slate-200/80'
+                        }`}
+                      />
+                    </div>
+                  ))}
+                </div>
               </div>
+
+              {/* Skeleton Footer */}
+              <footer
+                className={`w-full border-t py-5 px-4 flex justify-center ${
+                  homeDarkMode
+                    ? 'border-slate-800/80 bg-slate-900/50'
+                    : 'border-slate-200/80 bg-white/70'
+                }`}
+              >
+                <div
+                  className={`h-3.5 w-64 rounded-md animate-pulse ${
+                    homeDarkMode ? 'bg-slate-800' : 'bg-slate-200/80'
+                  }`}
+                />
+              </footer>
             </div>
           ) : activeView === 'inicio' && !anySessionActive ? (
-            <div className="min-h-screen flex items-center justify-center px-4 py-12">
-              <div className="max-w-5xl w-full">
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                  {/* Tarjeta Interactiva 1: Estudiante */}
+            <div
+              className={`min-h-screen flex flex-col justify-between transition-colors duration-200 ${
+                homeDarkMode
+                  ? 'bg-slate-950 text-slate-100'
+                  : 'bg-[#F8FAFC] text-slate-900'
+              }`}
+            >
+              {/* 1. Cabecera Limpia (Header) */}
+              <header
+                className={`w-full border-b transition-colors duration-200 ${
+                  homeDarkMode
+                    ? 'border-slate-800/80 bg-slate-900/80'
+                    : 'border-slate-200/80 bg-white/90'
+                } backdrop-blur-xs`}
+              >
+                <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
+                  {/* Izquierda: Nombre de la plataforma */}
+                  <a
+                    href="#inicio"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      handleGoToInitialHome();
+                    }}
+                    className="flex items-center gap-2.5 shrink-0 group focus-visible:outline-none"
+                  >
+                    <span
+                      className={`text-xl font-bold tracking-tight transition-colors ${
+                        homeDarkMode ? 'text-white' : 'text-slate-900'
+                      }`}
+                    >
+                      Evalua<span className="text-sky-600">Plus</span>
+                    </span>
+                    {activeCourseMeta.codigoCurso && (
+                      <span
+                        className={`hidden sm:inline-block text-xs font-medium px-2 py-0.5 rounded-md border ${
+                          homeDarkMode
+                            ? 'bg-slate-800 border-slate-700 text-slate-300'
+                            : 'bg-slate-100 border-slate-200 text-slate-600'
+                        }`}
+                      >
+                        {activeCourseMeta.codigoCurso}
+                      </span>
+                    )}
+                  </a>
+
+                  {/* Derecha: Botón sutil de Ayuda / Soporte e interruptor de Modo Oscuro/Claro */}
+                  <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setHomeSupportModalOpen(true)}
+                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs sm:text-sm font-medium border transition-colors cursor-pointer ${
+                        homeDarkMode
+                          ? 'bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800 hover:text-white'
+                          : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                      }`}
+                    >
+                      <HelpCircle className="w-4 h-4 text-sky-600 shrink-0" />
+                      <span>Ayuda / Soporte</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleToggleHomeDarkMode}
+                      aria-label={homeDarkMode ? 'Activar modo claro' : 'Activar modo oscuro'}
+                      title={homeDarkMode ? 'Cambiar a modo claro' : 'Cambiar a modo oscuro'}
+                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs sm:text-sm font-medium border transition-colors cursor-pointer ${
+                        homeDarkMode
+                          ? 'bg-slate-900 border-slate-800 text-amber-300 hover:bg-slate-800'
+                          : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'
+                      }`}
+                    >
+                      {homeDarkMode ? (
+                        <>
+                          <Sun className="w-4 h-4 shrink-0" />
+                          <span className="hidden sm:inline">Claro</span>
+                        </>
+                      ) : (
+                        <>
+                          <Moon className="w-4 h-4 shrink-0" />
+                          <span className="hidden sm:inline">Oscuro</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </header>
+
+              {/* 2. Zona Central (Hero Section) + 3. El Selector de Perfiles (Tarjetas Minimalistas) */}
+              <div className="flex-1 flex flex-col justify-center max-w-5xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-12 sm:py-16 space-y-10">
+                {/* Hero Section */}
+                <section className="max-w-2xl mx-auto text-center space-y-4">
+                  {activeCourseMeta.nombreCurso && (
+                    <p
+                      className={`text-xs sm:text-sm font-medium tracking-wide ${
+                        homeDarkMode ? 'text-sky-400' : 'text-sky-700'
+                      }`}
+                    >
+                      {activeCourseMeta.nombreCurso}
+                    </p>
+                  )}
+
+                  <h1
+                    className={`text-2xl sm:text-4xl font-bold tracking-tight leading-snug ${
+                      homeDarkMode ? 'text-white' : 'text-slate-900'
+                    }`}
+                  >
+                    ¡Hola! Te damos la bienvenida a EvaluaPlus.
+                  </h1>
+
+                  <p
+                    className={`text-sm sm:text-base leading-relaxed ${
+                      homeDarkMode ? 'text-slate-300' : 'text-slate-600'
+                    }`}
+                  >
+                    Tu puerta de entrada digital a un espacio diseñado para gestionar tareas, exámenes y participación de forma sencilla.
+                  </p>
+
+                  <p
+                    className={`pt-2 text-xs sm:text-sm font-semibold ${
+                      homeDarkMode ? 'text-slate-400' : 'text-slate-700'
+                    }`}
+                  >
+                    Por favor, selecciona tu perfil para ingresar al panel:
+                  </p>
+                </section>
+
+                {/* 3. El Selector de Perfiles (Tarjetas Minimalistas) */}
+                <section
+                  aria-label="Selección de perfil de acceso"
+                  className="grid grid-cols-1 md:grid-cols-3 gap-5 sm:gap-6 items-stretch"
+                >
+                  {/* Tarjeta 1: Estudiante */}
                   <button
                     type="button"
                     onClick={handleSwitchToStudentLogin}
-                    className="group text-left bg-white hover:bg-sky-50/40 border-2 border-slate-200 hover:border-sky-600 rounded-2xl p-8 shadow-xs hover:shadow-md transition-all flex flex-col justify-between gap-8 cursor-pointer"
+                    className={`group text-center rounded-2xl p-7 sm:p-8 border transition-all duration-200 flex flex-col items-center justify-between gap-5 cursor-pointer hover:-translate-y-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-600 ${
+                      homeDarkMode
+                        ? 'bg-slate-900/90 border-slate-800 hover:border-sky-500 hover:bg-slate-900 shadow-lg shadow-black/20'
+                        : 'bg-white border-slate-200/90 hover:border-sky-500 shadow-xs hover:shadow-md'
+                    }`}
                   >
-                    <div className="space-y-4">
-                      <div className="w-14 h-14 rounded-2xl bg-sky-100 text-sky-700 group-hover:bg-sky-600 group-hover:text-white flex items-center justify-center transition-colors">
-                        <GraduationCap className="w-7 h-7" />
+                    <div className="space-y-3 flex flex-col items-center">
+                      <div
+                        className={`w-16 h-16 rounded-2xl flex items-center justify-center text-3xl transition-transform duration-200 group-hover:scale-105 ${
+                          homeDarkMode ? 'bg-sky-950/70' : 'bg-sky-50'
+                        }`}
+                        aria-hidden="true"
+                      >
+                        👨‍🎓
                       </div>
-                      <h2 className="text-2xl font-bold text-slate-900 group-hover:text-sky-700 transition-colors">
+                      <h2
+                        className={`text-xl font-bold transition-colors ${
+                          homeDarkMode
+                            ? 'text-white group-hover:text-sky-400'
+                            : 'text-slate-900 group-hover:text-sky-700'
+                        }`}
+                      >
                         Estudiante
                       </h2>
+                      <p
+                        className={`text-sm leading-relaxed ${
+                          homeDarkMode ? 'text-slate-400' : 'text-slate-600'
+                        }`}
+                      >
+                        Entra para ver tus tareas y exámenes.
+                      </p>
                     </div>
-                    <div className="pt-4 border-t border-slate-100 flex items-center justify-between text-xs font-bold text-sky-700">
-                      <span>Iniciar sesión</span>
-                      <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-                    </div>
+
+                    <span
+                      className={`inline-flex items-center gap-1.5 text-xs font-semibold transition-colors ${
+                        homeDarkMode ? 'text-sky-400' : 'text-sky-700'
+                      }`}
+                    >
+                      <span>Ingresar</span>
+                      <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-1 transition-transform" />
+                    </span>
                   </button>
 
-                  {/* Tarjeta Interactiva 2: Docente */}
+                  {/* Tarjeta 2: Docente */}
                   <button
                     type="button"
                     onClick={handleSwitchToTeacherLogin}
-                    className="group text-left bg-white hover:bg-slate-900/5 border-2 border-slate-200 hover:border-slate-900 rounded-2xl p-8 shadow-xs hover:shadow-md transition-all flex flex-col justify-between gap-8 cursor-pointer"
+                    className={`group text-center rounded-2xl p-7 sm:p-8 border transition-all duration-200 flex flex-col items-center justify-between gap-5 cursor-pointer hover:-translate-y-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600 ${
+                      homeDarkMode
+                        ? 'bg-slate-900/90 border-slate-800 hover:border-emerald-500 hover:bg-slate-900 shadow-lg shadow-black/20'
+                        : 'bg-white border-slate-200/90 hover:border-emerald-600 shadow-xs hover:shadow-md'
+                    }`}
                   >
-                    <div className="space-y-4">
-                      <div className="w-14 h-14 rounded-2xl bg-slate-100 text-slate-800 group-hover:bg-slate-900 group-hover:text-white flex items-center justify-center transition-colors">
-                        <BookOpen className="w-7 h-7" />
+                    <div className="space-y-3 flex flex-col items-center">
+                      <div
+                        className={`w-16 h-16 rounded-2xl flex items-center justify-center text-3xl transition-transform duration-200 group-hover:scale-105 ${
+                          homeDarkMode ? 'bg-emerald-950/70' : 'bg-emerald-50'
+                        }`}
+                        aria-hidden="true"
+                      >
+                        👩‍🏫
                       </div>
-                      <h2 className="text-2xl font-bold text-slate-900">
+                      <h2
+                        className={`text-xl font-bold transition-colors ${
+                          homeDarkMode
+                            ? 'text-white group-hover:text-emerald-400'
+                            : 'text-slate-900 group-hover:text-emerald-700'
+                        }`}
+                      >
                         Docente
                       </h2>
+                      <p
+                        className={`text-sm leading-relaxed ${
+                          homeDarkMode ? 'text-slate-400' : 'text-slate-600'
+                        }`}
+                      >
+                        Gestiona tus clases y notas.
+                      </p>
                     </div>
-                    <div className="pt-4 border-t border-slate-100 flex items-center justify-between text-xs font-bold text-slate-900">
-                      <span>Iniciar sesión</span>
-                      <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-                    </div>
+
+                    <span
+                      className={`inline-flex items-center gap-1.5 text-xs font-semibold transition-colors ${
+                        homeDarkMode ? 'text-emerald-400' : 'text-emerald-700'
+                      }`}
+                    >
+                      <span>Ingresar</span>
+                      <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-1 transition-transform" />
+                    </span>
                   </button>
 
-                  {/* Tarjeta Interactiva 3: Editor */}
+                  {/* Tarjeta 3: Editor */}
                   <button
                     type="button"
                     onClick={handleSwitchToEditorLogin}
-                    className="group text-left bg-white hover:bg-indigo-50/40 border-2 border-slate-200 hover:border-indigo-600 rounded-2xl p-8 shadow-xs hover:shadow-md transition-all flex flex-col justify-between gap-8 cursor-pointer"
+                    className={`group text-center rounded-2xl p-7 sm:p-8 border transition-all duration-200 flex flex-col items-center justify-between gap-5 cursor-pointer hover:-translate-y-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 ${
+                      homeDarkMode
+                        ? 'bg-slate-900/90 border-slate-800 hover:border-indigo-500 hover:bg-slate-900 shadow-lg shadow-black/20'
+                        : 'bg-white border-slate-200/90 hover:border-indigo-600 shadow-xs hover:shadow-md'
+                    }`}
                   >
-                    <div className="space-y-4">
-                      <div className="w-14 h-14 rounded-2xl bg-indigo-100 text-indigo-700 group-hover:bg-indigo-600 group-hover:text-white flex items-center justify-center transition-colors">
-                        <Sliders className="w-7 h-7" />
+                    <div className="space-y-3 flex flex-col items-center">
+                      <div
+                        className={`w-16 h-16 rounded-2xl flex items-center justify-center text-3xl transition-transform duration-200 group-hover:scale-105 ${
+                          homeDarkMode ? 'bg-indigo-950/70' : 'bg-indigo-50'
+                        }`}
+                        aria-hidden="true"
+                      >
+                        ⚙️
                       </div>
-                      <h2 className="text-2xl font-bold text-slate-900 group-hover:text-indigo-700 transition-colors">
+                      <h2
+                        className={`text-xl font-bold transition-colors ${
+                          homeDarkMode
+                            ? 'text-white group-hover:text-indigo-400'
+                            : 'text-slate-900 group-hover:text-indigo-700'
+                        }`}
+                      >
                         Editor
                       </h2>
+                      <p
+                        className={`text-sm leading-relaxed ${
+                          homeDarkMode ? 'text-slate-400' : 'text-slate-600'
+                        }`}
+                      >
+                        Modifica cursos, temarios y recursos.
+                      </p>
                     </div>
-                    <div className="pt-4 border-t border-slate-100 flex items-center justify-between text-xs font-bold text-indigo-700">
-                      <span>Iniciar sesión</span>
-                      <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-                    </div>
+
+                    <span
+                      className={`inline-flex items-center gap-1.5 text-xs font-semibold transition-colors ${
+                        homeDarkMode ? 'text-indigo-400' : 'text-indigo-700'
+                      }`}
+                    >
+                      <span>Ingresar</span>
+                      <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-1 transition-transform" />
+                    </span>
                   </button>
-                </div>
+                </section>
               </div>
+
+              {/* 4. Pie de Página (Footer) */}
+              <footer
+                className={`w-full border-t py-5 px-4 text-center text-xs transition-colors duration-200 ${
+                  homeDarkMode
+                    ? 'border-slate-800/80 bg-slate-900/50 text-slate-400'
+                    : 'border-slate-200/80 bg-white/70 text-slate-500'
+                }`}
+              >
+                Desarrollado con ❤️ por el Prof. Fenix | © 2026
+              </footer>
+
+              {/* Modal Ligero de Ayuda / Soporte */}
+              {homeSupportModalOpen && (
+                <div
+                  className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs"
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby="home-support-title"
+                >
+                  <div
+                    className={`w-full max-w-md rounded-2xl border p-6 shadow-xl space-y-4 ${
+                      homeDarkMode
+                        ? 'bg-slate-900 border-slate-800 text-slate-100'
+                        : 'bg-white border-slate-200 text-slate-900'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-2">
+                        <HelpCircle className="w-5 h-5 text-sky-600 shrink-0" />
+                        <h3 id="home-support-title" className="text-base font-bold">
+                          Ayuda Rápida en el Aula
+                        </h3>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setHomeSupportModalOpen(false)}
+                        aria-label="Cerrar ventana de ayuda"
+                        className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
+                          homeDarkMode
+                            ? 'text-slate-400 hover:bg-slate-800 hover:text-white'
+                            : 'text-slate-500 hover:bg-slate-100 hover:text-slate-900'
+                        }`}
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    <div
+                      className={`space-y-3 text-xs sm:text-sm leading-relaxed ${
+                        homeDarkMode ? 'text-slate-300' : 'text-slate-600'
+                      }`}
+                    >
+                      <div
+                        className={`p-3 rounded-xl border ${
+                          homeDarkMode
+                            ? 'bg-slate-800/60 border-slate-700'
+                            : 'bg-slate-50 border-slate-200/80'
+                        }`}
+                      >
+                        <p className="font-semibold mb-1 text-sky-600">
+                          👨‍🎓 ¿Eres estudiante y olvidaste tu código?
+                        </p>
+                        <p>
+                          Ingresa a la tarjeta <strong>Estudiante</strong>, escribe tu número de documento y usa la opción de solicitar apoyo o recuperación en sala para notificar al docente.
+                        </p>
+                      </div>
+
+                      <div
+                        className={`p-3 rounded-xl border ${
+                          homeDarkMode
+                            ? 'bg-slate-800/60 border-slate-700'
+                            : 'bg-slate-50 border-slate-200/80'
+                        }`}
+                      >
+                        <p className="font-semibold mb-1 text-emerald-600">
+                          📶 Respaldo automático sin internet
+                        </p>
+                        <p>
+                          Tus respuestas de examen y registros se guardan de forma segura en el dispositivo y se sincronizan automáticamente al restablecer la conexión.
+                        </p>
+                      </div>
+
+                      <div
+                        className={`p-3 rounded-xl border ${
+                          homeDarkMode
+                            ? 'bg-slate-800/60 border-slate-700'
+                            : 'bg-slate-50 border-slate-200/80'
+                        }`}
+                      >
+                        <p className="font-semibold mb-1 text-indigo-600">
+                          ⌨️ Atajos rápidos desde computador
+                        </p>
+                        <p>
+                          Presiona <kbd className="px-1.5 py-0.5 rounded border text-xs font-mono">1</kbd> para Estudiante,{' '}
+                          <kbd className="px-1.5 py-0.5 rounded border text-xs font-mono">2</kbd> para Docente o{' '}
+                          <kbd className="px-1.5 py-0.5 rounded border text-xs font-mono">3</kbd> para Editor.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="pt-2 flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => setHomeSupportModalOpen(false)}
+                        className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold transition-colors cursor-pointer"
+                      >
+                        Entendido
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           ) : activeView === 'estudiante' ? (
             <StudentPortal
@@ -1796,9 +2993,21 @@ function AppContent() {
               activeExamsByStudent={activeExamsByStudent}
               onSaveActiveExamBackup={handleSaveActiveExamBackup}
               onForceServerSync={() => fetchAndApplyServerState(true)}
+              onActivateCourseWorkspace={handleActivateCourseWorkspace}
             />
           ) : activeView === 'editor' ? (
-            <div className="max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-6">
+            <Suspense
+              fallback={
+                <div className="min-h-screen flex items-center justify-center px-4">
+                  <div className="bg-white border border-slate-200 rounded-2xl p-6 max-w-sm w-full text-center space-y-2 shadow-xs">
+                    <RefreshCw className="w-5 h-5 text-indigo-600 animate-spin mx-auto" />
+                    <div className="text-sm font-bold text-slate-900">
+                      Cargando Panel del Editor...
+                    </div>
+                  </div>
+                </div>
+              }
+            >
               <EditorPanel
                 config={config}
                 onUpdateConfig={handleUpdateConfig}
@@ -1824,42 +3033,58 @@ function AppContent() {
                 onGoToInitialHome={handleGoToInitialHome}
                 onForceServerSync={handleForceResyncAndClearLocalCache}
               />
-            </div>
+            </Suspense>
           ) : (
-            <TeacherPanel
-              students={students}
-              onUpdateStudents={handleUpdateStudents}
-              questions={questions}
-              onUpdateQuestions={handleUpdateQuestions}
-              previousQuestionsSnapshotCount={previousQuestionsSnapshotCount}
-              onUndoQuestionsSnapshot={handleUndoQuestionsSnapshot}
-              attempts={attempts}
-              onUpdateAttempts={handleUpdateAttempts}
-              abproEvaluations={abproEvaluations}
-              onUpdateABProEvaluations={handleUpdateABProEvaluations}
-              liveSessions={liveSessions}
-              onReleaseLiveSession={handleReleaseLiveSession}
-              config={config}
-              onUpdateConfig={handleUpdateConfig}
-              onSwitchToStudentLogin={handleSwitchToStudentLogin}
-              onSwitchToEditorLogin={handleSwitchToEditorLogin}
-              onGoToInitialHome={handleGoToInitialHome}
-              onSessionActiveChange={setTeacherSessionActive}
-              logoutSignal={logoutSignal}
-              customMiniRetos={customMiniRetos}
-              onUpdateCustomMiniRetos={handleUpdateCustomMiniRetos}
-              academicDataset={academicDataset}
-              onUpdateAcademicDataset={handleUpdateAcademicDataset}
-              onFullSystemRestore={handleFullSystemRestore}
-              onForceServerSync={handleForceResyncAndClearLocalCache}
-              lastServerSyncFormatted={lastServerSyncFormatted}
-              serverRevision={currentServerRevision}
-            />
+            <Suspense
+              fallback={
+                <div className="min-h-screen flex items-center justify-center px-4">
+                  <div className="bg-white border border-slate-200 rounded-2xl p-6 max-w-sm w-full text-center space-y-2 shadow-xs">
+                    <RefreshCw className="w-5 h-5 text-slate-800 animate-spin mx-auto" />
+                    <div className="text-sm font-bold text-slate-900">
+                      Cargando Panel del Docente...
+                    </div>
+                  </div>
+                </div>
+              }
+            >
+              <TeacherPanel
+                students={students}
+                onUpdateStudents={handleUpdateStudents}
+                questions={questions}
+                onUpdateQuestions={handleUpdateQuestions}
+                previousQuestionsSnapshotCount={previousQuestionsSnapshotCount}
+                onUndoQuestionsSnapshot={handleUndoQuestionsSnapshot}
+                attempts={attempts}
+                onUpdateAttempts={handleUpdateAttempts}
+                abproEvaluations={abproEvaluations}
+                onUpdateABProEvaluations={handleUpdateABProEvaluations}
+                liveSessions={liveSessions}
+                onReleaseLiveSession={handleReleaseLiveSession}
+                config={config}
+                onUpdateConfig={handleUpdateConfig}
+                onSwitchToStudentLogin={handleSwitchToStudentLogin}
+                onSwitchToEditorLogin={handleSwitchToEditorLogin}
+                onGoToInitialHome={handleGoToInitialHome}
+                onSessionActiveChange={setTeacherSessionActive}
+                logoutSignal={logoutSignal}
+                customMiniRetos={customMiniRetos}
+                onUpdateCustomMiniRetos={handleUpdateCustomMiniRetos}
+                academicDataset={academicDataset}
+                onUpdateAcademicDataset={handleUpdateAcademicDataset}
+                onFullSystemRestore={handleFullSystemRestore}
+                onForceServerSync={handleForceResyncAndClearLocalCache}
+                lastServerSyncFormatted={lastServerSyncFormatted}
+                serverRevision={currentServerRevision}
+                encryptedAuditLogs={encryptedAuditLogs}
+                onForceFlushEncryptedAuditLogs={handleForceFlushEncryptedAuditLogs}
+                isCourseDataHydratedOnDemand={isCourseDataHydratedOnDemand}
+              />
+            </Suspense>
           )}
         </main>
 
-        {/* Quiet Institutional Footer (Only shown when a course is configured and active) */}
-        {Boolean(activeCourseMeta.courseId) && (
+        {/* Quiet Institutional Footer (Only shown outside the initial gateway screen when a course is configured) */}
+        {Boolean(activeCourseMeta.courseId) && !(activeView === 'inicio' && !anySessionActive) && (
           <footer className="bg-white border-t border-slate-200 py-4 px-6 text-center text-xs text-slate-500 no-print">
             {activeCourseMeta.programaAcademico ? `${activeCourseMeta.programaAcademico} · ` : ''}
             {activeCourseMeta.nombreCurso}
@@ -1872,59 +3097,185 @@ function AppContent() {
   );
 }
 
+const OBSOLETE_CACHE_ERROR_PATTERNS: RegExp[] = [
+  /ArrowRight is not defined/i,
+  /onSwitchToEditorLogin is not defined/i,
+  /is not defined/i,
+  /ChunkLoadError/i,
+  /Failed to fetch dynamically imported module/i,
+  /Importing a module script failed/i,
+  /Cannot read properties of (undefined|null)/i,
+  /is not a function/i,
+  /is not iterable/i,
+  /Unexpected token/i
+];
+
+const PROTECTED_LOCAL_STORAGE_KEYS = new Set<string>([
+  'evaluaplus_encrypted_audit_logs_v1',
+  'evaluaplus_home_dark_mode',
+  STORAGE_KEYS.ACTIVE_EXAM_BACKUP
+]);
+
 class AppErrorBoundary extends React.Component<
   { children: React.ReactNode },
-  { hasError: boolean; errorMsg: string; retryCount: number }
+  {
+    hasError: boolean;
+    errorMsg: string;
+    retryCount: number;
+    autoCleanedObsoleteCache: boolean;
+  }
 > {
   constructor(props: { children: React.ReactNode }) {
     super(props);
-    this.state = { hasError: false, errorMsg: '', retryCount: 0 };
+    this.state = {
+      hasError: false,
+      errorMsg: '',
+      retryCount: 0,
+      autoCleanedObsoleteCache: false
+    };
+  }
+
+  static isObsoleteCacheError(error: any): boolean {
+    const rawMessage = String(error?.message || error || '');
+    const rawName = String(error?.name || '');
+    const rawStack = String(error?.stack || '');
+    const combined = `${rawName} ${rawMessage} ${rawStack}`;
+
+    if (rawName === 'ReferenceError' || rawName === 'SyntaxError' || rawName === 'ChunkLoadError') {
+      return true;
+    }
+
+    if (OBSOLETE_CACHE_ERROR_PATTERNS.some((pattern) => pattern.test(combined))) {
+      return true;
+    }
+
+    try {
+      const storedVersion = localStorage.getItem('evaluaplus_data_schema_version');
+      if (storedVersion && storedVersion !== CURRENT_DATA_SCHEMA_VERSION) {
+        return true;
+      }
+    } catch {
+      // ignore storage read error
+    }
+
+    return false;
+  }
+
+  static purgeObsoleteLocalStorage(reason: string): number {
+    let removedCount = 0;
+    try {
+      const keysToRemove: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (!key) continue;
+        if (PROTECTED_LOCAL_STORAGE_KEYS.has(key)) {
+          // Validate JSON integrity on protected keys (except simple string flags)
+          if (key !== 'evaluaplus_home_dark_mode') {
+            try {
+              const raw = localStorage.getItem(key);
+              if (raw) JSON.parse(raw);
+            } catch {
+              keysToRemove.push(key);
+            }
+          }
+          continue;
+        }
+        if (
+          key.startsWith('evaluaplus_') ||
+          key.startsWith('firebase:previous_websocket_failure') ||
+          key.includes('snapshot') ||
+          key.includes('cache')
+        ) {
+          keysToRemove.push(key);
+        }
+      }
+
+      keysToRemove.forEach((key) => {
+        localStorage.removeItem(key);
+        removedCount++;
+      });
+
+      stampCurrentSchemaVersion();
+
+      sessionStorage.setItem(
+        'evaluaplus_last_auto_cache_cleanup',
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          reason,
+          removedCount
+        })
+      );
+    } catch {
+      // ignore storage errors
+    }
+    return removedCount;
   }
 
   static getDerivedStateFromError(error: any) {
+    const isObsolete = AppErrorBoundary.isObsoleteCacheError(error);
     return {
       hasError: true,
-      errorMsg: error?.message || 'Error inesperado de renderizado'
+      errorMsg: error?.message || 'Error inesperado de renderizado',
+      autoCleanedObsoleteCache: isObsolete
     };
   }
 
   componentDidCatch(error: any) {
-    recordCacheDiagnosticError({
-      storageKey: 'AppErrorBoundary (Render)',
-      severity: 'error',
-      reason: error?.message || 'Excepción de renderizado capturada por ErrorBoundary',
-      missingFields: ['render_component_tree'],
-      detectedSchemaVersion: null,
-      autoRepaired: true
-    });
-    try {
-      const sanitizeArrayKey = (key: string) => {
-        const raw = localStorage.getItem(key);
-        if (!raw) return;
-        const parsed = JSON.parse(raw);
-        if (!Array.isArray(parsed)) {
-          localStorage.removeItem(key);
-        }
-      };
-      sanitizeArrayKey('evaluaplus_saved_roster_dbs_v1');
-      sanitizeArrayKey('evaluaplus_saved_question_dbs_v1');
-    } catch {
-      // ignore
+    const errorMessage = error?.message || 'Excepción de renderizado capturada por ErrorBoundary';
+    const isObsoleteCache = AppErrorBoundary.isObsoleteCacheError(error);
+
+    if (isObsoleteCache) {
+      const purgedKeys = AppErrorBoundary.purgeObsoleteLocalStorage(errorMessage);
+      recordCacheDiagnosticError({
+        storageKey: 'AppErrorBoundary (AutoPurgeObsoleteCache)',
+        severity: 'warning',
+        reason: `Autolimpieza automática de caché obsoleta ejecutada (${purgedKeys} claves depuradas) tras detectar: ${errorMessage}`,
+        missingFields: ['obsolete_cache_state'],
+        detectedSchemaVersion: CURRENT_DATA_SCHEMA_VERSION,
+        autoRepaired: true
+      });
+    } else {
+      recordCacheDiagnosticError({
+        storageKey: 'AppErrorBoundary (Render)',
+        severity: 'error',
+        reason: errorMessage,
+        missingFields: ['render_component_tree'],
+        detectedSchemaVersion: null,
+        autoRepaired: true
+      });
+
+      try {
+        const sanitizeArrayKey = (key: string) => {
+          const raw = localStorage.getItem(key);
+          if (!raw) return;
+          const parsed = JSON.parse(raw);
+          if (!Array.isArray(parsed)) {
+            localStorage.removeItem(key);
+          }
+        };
+        sanitizeArrayKey('evaluaplus_saved_roster_dbs_v1');
+        sanitizeArrayKey('evaluaplus_saved_question_dbs_v1');
+      } catch {
+        // ignore
+      }
     }
 
-    if (this.state.retryCount < 2) {
+    const maxAutoRetries = isObsoleteCache ? 3 : 2;
+    if (this.state.retryCount < maxAutoRetries) {
       setTimeout(() => {
         this.setState((prev) => ({
           hasError: false,
           errorMsg: '',
-          retryCount: prev.retryCount + 1
+          retryCount: prev.retryCount + 1,
+          autoCleanedObsoleteCache: isObsoleteCache
         }));
-      }, 40);
+      }, 30);
     }
   }
 
   render() {
-    if (this.state.hasError && this.state.retryCount >= 2) {
+    const maxAutoRetries = this.state.autoCleanedObsoleteCache ? 3 : 2;
+    if (this.state.hasError && this.state.retryCount >= maxAutoRetries) {
       return (
         <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
           <div className="bg-white border border-slate-200 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-lg text-center">
@@ -1932,12 +3283,18 @@ class AppErrorBoundary extends React.Component<
               Recuperación Automática de Vista
             </div>
             <p className="text-xs text-slate-600">
-              Se detectó un dato incompleto temporal ({this.state.errorMsg}). Pulse el botón inferior para reanudar el panel conservando sus bases de datos.
+              Se detectó y depuró automáticamente una versión de caché obsoleta ({this.state.errorMsg}). El sistema está listo para continuar.
             </p>
             <button
               type="button"
               onClick={() => {
-                this.setState({ hasError: false, errorMsg: '', retryCount: 0 });
+                AppErrorBoundary.purgeObsoleteLocalStorage(this.state.errorMsg);
+                this.setState({
+                  hasError: false,
+                  errorMsg: '',
+                  retryCount: 0,
+                  autoCleanedObsoleteCache: true
+                });
               }}
               className="w-full px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold cursor-pointer"
             >

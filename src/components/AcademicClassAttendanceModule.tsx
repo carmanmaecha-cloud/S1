@@ -5244,7 +5244,7 @@ export function AcademicClassAttendanceManager({
                   cRec.excusaEstado &&
                   cRec.excusaEstado !== 'ninguna'
                 ) {
-                  const csDef = classSessionsList.find((cs) => cs.id === cId);
+                  const csDef = effectiveClassSessions.find((cs) => cs.id === cId);
                   allExcuseItems.push({
                     studentId: s.record.studentId,
                     nombre: s.record.nombre,

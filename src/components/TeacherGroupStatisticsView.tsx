@@ -1,10 +1,11 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   StudentRecord,
   ExamAttemptResult,
   SystemConfig,
   BloomLevel,
-  ABProProjectEvaluation
+  ABProProjectEvaluation,
+  Question
 } from '../types';
 import { AcademicDataset, ClassSessionId } from '../data/classAttendanceAndGrades';
 import { OptionServerSaveBar } from './ServerSaveContext';
@@ -36,7 +37,9 @@ import {
   Users,
   CheckCircle2,
   Trophy,
-  Activity
+  Activity,
+  AlertTriangle,
+  Search
 } from 'lucide-react';
 
 interface TeacherGroupStatisticsViewProps {
@@ -45,6 +48,7 @@ interface TeacherGroupStatisticsViewProps {
   abproEvaluations: ABProProjectEvaluation[];
   config: SystemConfig;
   academicDataset?: AcademicDataset;
+  questions?: Question[];
 }
 
 const COMPETENCY_COLORS = {
@@ -60,9 +64,15 @@ export function TeacherGroupStatisticsView({
   attempts,
   abproEvaluations,
   config,
-  academicDataset
+  academicDataset,
+  questions = []
 }: TeacherGroupStatisticsViewProps) {
   const minPassing = Number(config.notaMinimaAprobacion) || 3.0;
+  const [psychometricFilter, setPsychometricFilter] = useState<
+    'all' | 'critical_fail' | 'ambiguous_disc' | 'evaluated_only'
+  >('all');
+  const [psychometricModuleFilter, setPsychometricModuleFilter] = useState<number | 'all'>('all');
+  const [psychometricSearch, setPsychometricSearch] = useState<string>('');
 
   // 1. Consolidate per-student progress, historical grades & competency level
   const studentAnalytics = useMemo(() => {
@@ -907,6 +917,474 @@ export function TeacherGroupStatisticsView({
           </div>
         </div>
       </div>
+
+      {/* ================= ANALÍTICA PSICOMÉTRICA DE ÍTEMS (DETECTOR DE PREGUNTAS CRÍTICAS) ================= */}
+      {(() => {
+        // Compute per-question psychometric metrics across all attempts + bank questions
+        const sortedAttemptsByScore = [...attempts].sort(
+          (a, b) => (Number(b.notaColombiana) || 0) - (Number(a.notaColombiana) || 0)
+        );
+        const totalAtts = sortedAttemptsByScore.length;
+        const groupSize = Math.max(1, Math.floor(totalAtts / 3));
+        const highGroupAttemptIds = new Set(
+          sortedAttemptsByScore.slice(0, groupSize).map((a) => a.attemptId)
+        );
+        const lowGroupAttemptIds = new Set(
+          sortedAttemptsByScore.slice(Math.max(0, totalAtts - groupSize)).map((a) => a.attemptId)
+        );
+
+        const itemStatsMap = new Map<
+          string,
+          {
+            questionId: string;
+            modulo: number;
+            tema: string;
+            bloom: BloomLevel;
+            enunciado: string;
+            opciones: { A: string; B: string; C: string; D: string };
+            correcta: 'A' | 'B' | 'C' | 'D';
+            totalEvaluated: number;
+            correctCount: number;
+            wrongCount: number;
+            highGroupTotal: number;
+            highGroupCorrect: number;
+            lowGroupTotal: number;
+            lowGroupCorrect: number;
+            optionCounts: { A: number; B: number; C: number; D: number; null: number };
+          }
+        >();
+
+        questions.forEach((q) => {
+          itemStatsMap.set(q.id, {
+            questionId: q.id,
+            modulo: Number(q.modulo) || 1,
+            tema: q.tema || 'General',
+            bloom: q.bloom || 'Comprensión',
+            enunciado: q.enunciado || '',
+            opciones: q.opciones || { A: '', B: '', C: '', D: '' },
+            correcta: q.respuestaCorrecta || 'A',
+            totalEvaluated: 0,
+            correctCount: 0,
+            wrongCount: 0,
+            highGroupTotal: 0,
+            highGroupCorrect: 0,
+            lowGroupTotal: 0,
+            lowGroupCorrect: 0,
+            optionCounts: { A: 0, B: 0, C: 0, D: 0, null: 0 }
+          });
+        });
+
+        attempts.forEach((att) => {
+          if (!att || !Array.isArray(att.respuestasDetalle)) return;
+          const isHigh = highGroupAttemptIds.has(att.attemptId);
+          const isLow = lowGroupAttemptIds.has(att.attemptId);
+          att.respuestasDetalle.forEach((ans) => {
+            if (!ans || !ans.questionId) return;
+            let entry = itemStatsMap.get(ans.questionId);
+            if (!entry) {
+              entry = {
+                questionId: ans.questionId,
+                modulo: Number(ans.modulo) || 1,
+                tema: ans.tema || 'General',
+                bloom: ans.bloom || 'Comprensión',
+                enunciado: ans.enunciado || '',
+                opciones: ans.opciones || { A: '', B: '', C: '', D: '' },
+                correcta: ans.correcta || 'A',
+                totalEvaluated: 0,
+                correctCount: 0,
+                wrongCount: 0,
+                highGroupTotal: 0,
+                highGroupCorrect: 0,
+                lowGroupTotal: 0,
+                lowGroupCorrect: 0,
+                optionCounts: { A: 0, B: 0, C: 0, D: 0, null: 0 }
+              };
+              itemStatsMap.set(ans.questionId, entry);
+            }
+            entry.totalEvaluated += 1;
+            if (ans.acierto) {
+              entry.correctCount += 1;
+            } else {
+              entry.wrongCount += 1;
+            }
+            if (ans.elegida && entry.optionCounts[ans.elegida] !== undefined) {
+              entry.optionCounts[ans.elegida] += 1;
+            } else {
+              entry.optionCounts.null += 1;
+            }
+            if (isHigh) {
+              entry.highGroupTotal += 1;
+              if (ans.acierto) entry.highGroupCorrect += 1;
+            }
+            if (isLow) {
+              entry.lowGroupTotal += 1;
+              if (ans.acierto) entry.lowGroupCorrect += 1;
+            }
+          });
+        });
+
+        const psychometricItems = Array.from(itemStatsMap.values()).map((it) => {
+          // Check option length ratio for structural ambiguity heuristic when empirical data is small
+          const optLengths = [
+            (it.opciones.A || '').trim().length,
+            (it.opciones.B || '').trim().length,
+            (it.opciones.C || '').trim().length,
+            (it.opciones.D || '').trim().length
+          ];
+          const correctLen = (it.opciones[it.correcta] || '').trim().length;
+          const distractorsAvg =
+            (['A', 'B', 'C', 'D'] as const)
+              .filter((k) => k !== it.correcta)
+              .reduce((acc, k) => acc + (it.opciones[k] || '').trim().length, 0) / 3;
+          const lengthRatio = distractorsAvg > 0 ? correctLen / distractorsAvg : 1;
+          const hasStructuralAmbiguity =
+            lengthRatio > 1.75 || lengthRatio < 0.55 || Math.min(...optLengths) < 12;
+
+          let failureRatePct = 0;
+          let difficultyIndexP = 0.5;
+          let discriminationIndexD = 0.35;
+
+          if (it.totalEvaluated > 0) {
+            failureRatePct = Math.round((it.wrongCount / it.totalEvaluated) * 100);
+            difficultyIndexP = Number((it.correctCount / it.totalEvaluated).toFixed(2));
+            const pHigh =
+              it.highGroupTotal > 0 ? it.highGroupCorrect / it.highGroupTotal : difficultyIndexP;
+            const pLow =
+              it.lowGroupTotal > 0 ? it.lowGroupCorrect / it.lowGroupTotal : difficultyIndexP * 0.6;
+            discriminationIndexD = Number((pHigh - pLow).toFixed(2));
+          } else {
+            // Heuristic estimation before live attempts so the teacher can still inspect critical/ambiguous items
+            const bloomBaseFail: Record<BloomLevel, number> = {
+              Conocer: 22,
+              Comprensión: 30,
+              Aplicación: 42,
+              Análisis: 58,
+              Evaluación: 68
+            };
+            failureRatePct = bloomBaseFail[it.bloom] || 35;
+            if (hasStructuralAmbiguity) {
+              discriminationIndexD = 0.11;
+            } else {
+              discriminationIndexD = 0.38;
+            }
+            difficultyIndexP = Number(((100 - failureRatePct) / 100).toFixed(2));
+          }
+
+          const isCriticalFail = failureRatePct > 75;
+          const isAmbiguous =
+            discriminationIndexD < 0.15 || (it.totalEvaluated === 0 && hasStructuralAmbiguity);
+
+          let diagnosticLabel = '✓ Reactivo Calibrado y Confiable';
+          let statusTone: 'critical' | 'ambiguous' | 'optimal' = 'optimal';
+
+          if (isCriticalFail && isAmbiguous) {
+            diagnosticLabel =
+              '🚨 CRÍTICO (>75% Fallo) + Ambiguo (Baja Discriminación D < 0.15)';
+            statusTone = 'critical';
+          } else if (isCriticalFail) {
+            diagnosticLabel = '🚨 ALERTA CRÍTICA: Más del 75% de Fallo Grupal';
+            statusTone = 'critical';
+          } else if (isAmbiguous) {
+            diagnosticLabel =
+              '⚠️ REACTIVO AMBIGUO: Baja Discriminación (D < 0.15) o Distractor Asimétrico';
+            statusTone = 'ambiguous';
+          }
+
+          return {
+            ...it,
+            failureRatePct,
+            difficultyIndexP,
+            discriminationIndexD,
+            isCriticalFail,
+            isAmbiguous,
+            hasStructuralAmbiguity,
+            diagnosticLabel,
+            statusTone
+          };
+        });
+
+        const criticalFailCount = psychometricItems.filter((i) => i.isCriticalFail).length;
+        const ambiguousCount = psychometricItems.filter((i) => i.isAmbiguous).length;
+        const evaluatedItemsCount = psychometricItems.filter((i) => i.totalEvaluated > 0).length;
+        const avgDiscrimination =
+          psychometricItems.length > 0
+            ? Number(
+                (
+                  psychometricItems.reduce((acc, i) => acc + i.discriminationIndexD, 0) /
+                  psychometricItems.length
+                ).toFixed(2)
+              )
+            : 0;
+
+        const filteredPsychometricItems = psychometricItems
+          .filter((item) => {
+            if (psychometricModuleFilter !== 'all' && item.modulo !== psychometricModuleFilter) {
+              return false;
+            }
+            if (psychometricFilter === 'critical_fail' && !item.isCriticalFail) return false;
+            if (psychometricFilter === 'ambiguous_disc' && !item.isAmbiguous) return false;
+            if (psychometricFilter === 'evaluated_only' && item.totalEvaluated === 0) return false;
+            if (psychometricSearch.trim()) {
+              const q = psychometricSearch.trim().toLowerCase();
+              return (
+                item.questionId.toLowerCase().includes(q) ||
+                item.enunciado.toLowerCase().includes(q) ||
+                item.tema.toLowerCase().includes(q)
+              );
+            }
+            return true;
+          })
+          .sort((a, b) => {
+            if (a.isCriticalFail !== b.isCriticalFail) return a.isCriticalFail ? -1 : 1;
+            if (a.isAmbiguous !== b.isAmbiguous) return a.isAmbiguous ? -1 : 1;
+            return b.failureRatePct - a.failureRatePct;
+          });
+
+        return (
+          <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-xs space-y-5">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-slate-100 pb-4">
+              <div className="space-y-1">
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-rose-50 border border-rose-200 text-rose-900 text-[11px] font-mono font-extrabold uppercase">
+                  <AlertTriangle className="w-3.5 h-3.5 text-rose-700" />
+                  <span>5. Analítica Psicométrica de Ítems · Detector de Preguntas Críticas</span>
+                </div>
+                <h3 className="text-base sm:text-lg font-bold text-slate-900">
+                  Índice de Dificultad (% Fallo Grupal) e Índice de Discriminación ($D$) por Reactivo
+                </h3>
+                <p className="text-xs text-slate-600">
+                  Detecta automáticamente cuáles preguntas presentan <strong>más del 75% de fallo grupal</strong> o son <strong>excesivamente ambiguas</strong> (Índice de Discriminación $D &lt; 0.15$ entre el grupo de alto y bajo desempeño).
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <select
+                  value={psychometricModuleFilter}
+                  onChange={(e) =>
+                    setPsychometricModuleFilter(
+                      e.target.value === 'all' ? 'all' : Number(e.target.value)
+                    )
+                  }
+                  className="px-3 py-2 rounded-xl border border-slate-300 bg-slate-50 text-xs font-bold text-slate-800"
+                >
+                  <option value="all">Todos los Módulos (1-5)</option>
+                  <option value={1}>Módulo 1</option>
+                  <option value={2}>Módulo 2</option>
+                  <option value={3}>Módulo 3</option>
+                  <option value={4}>Módulo 4</option>
+                  <option value={5}>Módulo 5</option>
+                </select>
+
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={psychometricSearch}
+                    onChange={(e) => setPsychometricSearch(e.target.value)}
+                    placeholder="Buscar ID, tema o enunciado..."
+                    className="pl-8 pr-3 py-2 rounded-xl border border-slate-300 text-xs text-slate-900 w-56"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* KPIs Psicométricos */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+              <button
+                type="button"
+                onClick={() => setPsychometricFilter('all')}
+                className={`p-4 rounded-xl border text-left transition-all cursor-pointer ${
+                  psychometricFilter === 'all'
+                    ? 'border-slate-900 bg-slate-900 text-white'
+                    : 'border-slate-200 bg-slate-50/70 hover:bg-slate-100 text-slate-900'
+                }`}
+              >
+                <div className="text-[11px] font-mono uppercase opacity-75">
+                  Reactivos Auditados en Banco
+                </div>
+                <div className="text-2xl font-extrabold font-mono mt-1">
+                  {psychometricItems.length}
+                </div>
+                <div className="text-[11px] opacity-80 mt-0.5">
+                  {evaluatedItemsCount} con respuestas empíricas en vivo
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setPsychometricFilter(
+                    psychometricFilter === 'critical_fail' ? 'all' : 'critical_fail'
+                  )
+                }
+                className={`p-4 rounded-xl border text-left transition-all cursor-pointer ${
+                  psychometricFilter === 'critical_fail'
+                    ? 'border-rose-700 bg-rose-700 text-white'
+                    : 'border-rose-200 bg-rose-50/70 hover:bg-rose-100 text-rose-950'
+                }`}
+              >
+                <div className="text-[11px] font-mono font-bold uppercase">
+                  🚨 Alerta &gt; 75% Fallo Grupal
+                </div>
+                <div className="text-2xl font-extrabold font-mono mt-1">{criticalFailCount}</div>
+                <div className="text-[11px] opacity-85 mt-0.5">
+                  Preguntas con dificultad excesiva ($P &lt; 0.25$)
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setPsychometricFilter(
+                    psychometricFilter === 'ambiguous_disc' ? 'all' : 'ambiguous_disc'
+                  )
+                }
+                className={`p-4 rounded-xl border text-left transition-all cursor-pointer ${
+                  psychometricFilter === 'ambiguous_disc'
+                    ? 'border-amber-600 bg-amber-600 text-white'
+                    : 'border-amber-200 bg-amber-50/70 hover:bg-amber-100 text-amber-950'
+                }`}
+              >
+                <div className="text-[11px] font-mono font-bold uppercase">
+                  ⚠️ Preguntas Ambiguas ($D &lt; 0.15$)
+                </div>
+                <div className="text-2xl font-extrabold font-mono mt-1">{ambiguousCount}</div>
+                <div className="text-[11px] opacity-85 mt-0.5">
+                  Baja discriminación o distractor desbalanceado
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setPsychometricFilter(
+                    psychometricFilter === 'evaluated_only' ? 'all' : 'evaluated_only'
+                  )
+                }
+                className={`p-4 rounded-xl border text-left transition-all cursor-pointer ${
+                  psychometricFilter === 'evaluated_only'
+                    ? 'border-sky-700 bg-sky-700 text-white'
+                    : 'border-sky-200 bg-sky-50/70 hover:bg-sky-100 text-sky-950'
+                }`}
+              >
+                <div className="text-[11px] font-mono font-bold uppercase">
+                  Índice Discriminación Promedio ($D$)
+                </div>
+                <div className="text-2xl font-extrabold font-mono mt-1">
+                  {avgDiscrimination.toFixed(2)}
+                </div>
+                <div className="text-[11px] opacity-85 mt-0.5">
+                  Estándar psicométrico óptimo: $D \ge 0.25$
+                </div>
+              </button>
+            </div>
+
+            {/* Tabla Psicométrica de Reactivos */}
+            <div className="w-full overflow-x-auto border border-slate-200 rounded-xl max-h-[420px] bg-white">
+              <table className="w-full text-left border-collapse text-[11px]">
+                <thead className="sticky top-0 bg-slate-50 border-b border-slate-200 font-semibold text-slate-700 z-10">
+                  <tr>
+                    <th className="py-2.5 px-3">ID / Módulo</th>
+                    <th className="py-2.5 px-3">Enunciado y Tema Evaluado</th>
+                    <th className="py-2.5 px-2.5 text-center">Muestra ($N$)</th>
+                    <th className="py-2.5 px-3 text-center">% Fallo Grupal</th>
+                    <th className="py-2.5 px-2.5 text-center">Índ. Dificultad ($P$)</th>
+                    <th className="py-2.5 px-2.5 text-center">Índ. Discriminación ($D$)</th>
+                    <th className="py-2.5 px-3">Diagnóstico Psicométrico</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200">
+                  {filteredPsychometricItems.slice(0, 60).map((item) => (
+                    <tr
+                      key={item.questionId}
+                      className={
+                        item.statusTone === 'critical'
+                          ? 'bg-rose-50/50 hover:bg-rose-50'
+                          : item.statusTone === 'ambiguous'
+                          ? 'bg-amber-50/40 hover:bg-amber-50/80'
+                          : 'hover:bg-slate-50'
+                      }
+                    >
+                      <td className="py-2.5 px-3 font-mono whitespace-nowrap">
+                        <div className="font-extrabold text-slate-900">{item.questionId}</div>
+                        <div className="text-[10px] text-slate-500">
+                          Mód. {item.modulo} · {item.bloom}
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-3 max-w-md">
+                        <div className="font-semibold text-slate-900 line-clamp-2">
+                          {item.enunciado}
+                        </div>
+                        <div className="text-[10px] text-slate-500 mt-0.5">
+                          Tema: {item.tema} · Resp. Correcta: <strong>{item.correcta}</strong>
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-2.5 text-center font-mono">
+                        {item.totalEvaluated > 0 ? (
+                          <span className="font-bold text-slate-900">
+                            {item.totalEvaluated} resp.
+                          </span>
+                        ) : (
+                          <span className="text-slate-400">Pre-análisis</span>
+                        )}
+                      </td>
+                      <td className="py-2.5 px-3">
+                        <div className="flex items-center justify-center gap-2">
+                          <div className="w-16 h-2 bg-slate-100 rounded-full overflow-hidden">
+                            <div
+                              className={`h-full rounded-full ${
+                                item.failureRatePct > 75
+                                  ? 'bg-rose-600'
+                                  : item.failureRatePct >= 50
+                                  ? 'bg-amber-500'
+                                  : 'bg-emerald-600'
+                              }`}
+                              style={{ width: `${Math.min(100, item.failureRatePct)}%` }}
+                            />
+                          </div>
+                          <span
+                            className={`font-mono font-extrabold ${
+                              item.failureRatePct > 75 ? 'text-rose-700' : 'text-slate-800'
+                            }`}
+                          >
+                            {item.failureRatePct}%
+                          </span>
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-2.5 text-center font-mono font-bold text-slate-800">
+                        {item.difficultyIndexP.toFixed(2)}
+                      </td>
+                      <td className="py-2.5 px-2.5 text-center font-mono">
+                        <span
+                          className={`px-2 py-0.5 rounded font-bold ${
+                            item.discriminationIndexD < 0.15
+                              ? 'bg-amber-100 text-amber-900'
+                              : 'bg-emerald-50 text-emerald-800'
+                          }`}
+                        >
+                          D = {item.discriminationIndexD.toFixed(2)}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-3">
+                        <span
+                          className={`px-2.5 py-1 rounded-full font-bold text-[10px] inline-block ${
+                            item.statusTone === 'critical'
+                              ? 'bg-rose-100 text-rose-900 border border-rose-300'
+                              : item.statusTone === 'ambiguous'
+                              ? 'bg-amber-100 text-amber-900 border border-amber-300'
+                              : 'bg-emerald-50 text-emerald-900 border border-emerald-200'
+                          }`}
+                        >
+                          {item.diagnosticLabel}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Tabla Detallada de Progreso y Nivel de Competencia por Estudiante */}
       <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-xs space-y-4">

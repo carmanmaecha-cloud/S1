@@ -6,6 +6,7 @@ import {
   TeacherAccountRecord,
   CustomMiniRetoTemplate,
   UniversalCourseMetadata,
+  UniversalCourseWorkspace,
   UniversalExamDefinition,
   UniversalModuleDefinition,
   UniversalModuleDocumentLink,
@@ -610,13 +611,41 @@ function getAuthenticatedTeacherIdFromStorage(): string | null {
   return null;
 }
 
+function getTeacherSelectedCourseIdFromStorage(): string | null {
+  try {
+    const rawSession =
+      (typeof sessionStorage !== 'undefined' &&
+        sessionStorage.getItem('evaluaplus_global_auth_session_v1')) ||
+      (typeof localStorage !== 'undefined' &&
+        localStorage.getItem('evaluaplus_global_auth_session_v1'));
+    if (!rawSession) return null;
+    const parsed = JSON.parse(rawSession);
+    if (parsed && parsed.teacherSessionActive && parsed.teacherSelectedCourseId) {
+      return String(parsed.teacherSelectedCourseId).trim();
+    }
+    if (parsed && parsed.studentSessionActive && parsed.studentSelectedCourseId) {
+      return String(parsed.studentSelectedCourseId).trim();
+    }
+  } catch {
+    // ignore storage read errors
+  }
+  return null;
+}
+
 export function getEffectiveCourseMetadata(
   config?: SystemConfig,
-  preferredTeacherId?: string | null
+  preferredTeacherId?: string | null,
+  preferredCourseId?: string | null
 ): UniversalCourseMetadata {
   const catalog = Array.isArray(config?.universalCoursesCatalog)
     ? config!.universalCoursesCatalog.filter((w) => w && w.meta && w.meta.courseId)
     : [];
+
+  const explicitSelectedCourseId = (
+    preferredCourseId ||
+    getTeacherSelectedCourseIdFromStorage() ||
+    ''
+  ).trim();
 
   const activeTeacherId = (preferredTeacherId || getAuthenticatedTeacherIdFromStorage() || '')
     .trim()
@@ -625,7 +654,14 @@ export function getEffectiveCourseMetadata(
 
   let raw: UniversalCourseMetadata | undefined;
 
-  if (activeTeacherId && catalog.length > 0) {
+  if (explicitSelectedCourseId && catalog.length > 0) {
+    const explicitMatch = catalog.find((w) => w.meta.courseId === explicitSelectedCourseId);
+    if (explicitMatch) {
+      raw = explicitMatch.meta;
+    }
+  }
+
+  if (!raw && activeTeacherId && catalog.length > 0) {
     const teachersList = Array.isArray(config?.registeredTeachers)
       ? config!.registeredTeachers
       : [];
@@ -654,6 +690,14 @@ export function getEffectiveCourseMetadata(
         teacherRecord &&
         Array.isArray(teacherRecord.cursosAsignadosIds) &&
         teacherRecord.cursosAsignadosIds.includes(meta.courseId)
+      ) {
+        return true;
+      }
+      if (
+        teacherRecord?.nombre &&
+        meta?.docenteResponsable &&
+        String(meta.docenteResponsable).trim().toLowerCase() ===
+          String(teacherRecord.nombre).trim().toLowerCase()
       ) {
         return true;
       }
@@ -757,6 +801,280 @@ export function getEffectiveCourseMetadata(
     modulosCurso,
     examenesCurso,
     updatedAtIso: raw.updatedAtIso || new Date().toISOString()
+  };
+}
+
+export function getEffectiveStudentsForWorkspace(
+  workspace: UniversalCourseWorkspace,
+  config?: SystemConfig,
+  liveStudents?: StudentRecord[]
+): StudentRecord[] {
+  const courseId = workspace?.meta?.courseId;
+  const isCurrentActiveCourse = Boolean(courseId && courseId === config?.activeCourseId);
+
+  if (isCurrentActiveCourse && Array.isArray(liveStudents) && liveStudents.length > 0) {
+    if (Array.isArray(workspace.students) && workspace.students.length > 0) {
+      const mergedMap = new Map<string, StudentRecord>();
+      workspace.students.forEach((s) => {
+        if (s && s.id) mergedMap.set(String(s.id).trim().replace(/[\s.-]/g, '').toUpperCase(), s);
+      });
+      liveStudents.forEach((s) => {
+        if (s && s.id) mergedMap.set(String(s.id).trim().replace(/[\s.-]/g, '').toUpperCase(), s);
+      });
+      return Array.from(mergedMap.values());
+    }
+    return liveStudents;
+  }
+
+  if (Array.isArray(workspace?.students) && workspace.students.length > 0) {
+    return workspace.students;
+  }
+
+  const rosterDbId = workspace?.meta?.selectedStudentRosterDbId;
+  if (rosterDbId && Array.isArray(config?.studentRosterDatabases)) {
+    const matchedDb = config.studentRosterDatabases.find((db) => db && db.id === rosterDbId);
+    if (matchedDb && Array.isArray(matchedDb.students) && matchedDb.students.length > 0) {
+      return matchedDb.students;
+    }
+  }
+
+  return [];
+}
+
+export function getEffectiveQuestionsForWorkspace(
+  workspace: UniversalCourseWorkspace,
+  config?: SystemConfig,
+  liveQuestions?: Question[]
+): Question[] {
+  const courseId = workspace?.meta?.courseId;
+  const isCurrentActiveCourse = Boolean(courseId && courseId === config?.activeCourseId);
+
+  if (isCurrentActiveCourse && Array.isArray(liveQuestions) && liveQuestions.length > 0) {
+    return liveQuestions;
+  }
+
+  if (Array.isArray(workspace?.questions) && workspace.questions.length > 0) {
+    return workspace.questions;
+  }
+
+  const qBankDbId = workspace?.meta?.selectedQuestionBankDbId;
+  if (qBankDbId && Array.isArray(config?.questionBankDatabases)) {
+    const matchedDb = config.questionBankDatabases.find((db) => db && db.id === qBankDbId);
+    if (matchedDb && Array.isArray(matchedDb.questions) && matchedDb.questions.length > 0) {
+      return matchedDb.questions;
+    }
+  }
+
+  return [];
+}
+
+export function getAssignedCourseWorkspacesForStudent(
+  config?: SystemConfig,
+  studentId?: string | null,
+  fallbackData?: {
+    students?: StudentRecord[];
+    questions?: Question[];
+    attempts?: any[];
+    abproEvaluations?: any[];
+    customMiniRetos?: CustomMiniRetoTemplate[];
+    academicDataset?: any;
+  }
+): UniversalCourseWorkspace[] {
+  const rawCatalog = Array.isArray(config?.universalCoursesCatalog)
+    ? config!.universalCoursesCatalog.filter((w) => w && w.meta && w.meta.courseId)
+    : [];
+
+  let catalog: UniversalCourseWorkspace[] = rawCatalog.map((w) => {
+    const effectiveStudents = getEffectiveStudentsForWorkspace(w, config, fallbackData?.students);
+    const effectiveQuestions = getEffectiveQuestionsForWorkspace(w, config, fallbackData?.questions);
+    const isCurrentActive = w.meta.courseId === config?.activeCourseId;
+    const effectiveAttempts =
+      isCurrentActive && Array.isArray(fallbackData?.attempts)
+        ? fallbackData!.attempts!
+        : Array.isArray(w.attempts)
+        ? w.attempts
+        : [];
+    const effectiveRetos =
+      isCurrentActive && Array.isArray(fallbackData?.customMiniRetos)
+        ? fallbackData!.customMiniRetos!
+        : Array.isArray(w.customMiniRetos)
+        ? w.customMiniRetos
+        : [];
+    const effectiveAbpro =
+      isCurrentActive && Array.isArray(fallbackData?.abproEvaluations)
+        ? fallbackData!.abproEvaluations!
+        : Array.isArray(w.abproEvaluations)
+        ? w.abproEvaluations
+        : [];
+    const effectiveAcademic =
+      isCurrentActive && fallbackData?.academicDataset
+        ? fallbackData.academicDataset
+        : w.academicDataset;
+
+    return {
+      ...w,
+      students: effectiveStudents,
+      questions: effectiveQuestions,
+      attempts: effectiveAttempts,
+      customMiniRetos: effectiveRetos,
+      abproEvaluations: effectiveAbpro,
+      academicDataset: effectiveAcademic,
+      studentsCount: effectiveStudents.length,
+      questionsCount: effectiveQuestions.length,
+      attemptsCount: effectiveAttempts.length,
+      retosCount: effectiveRetos.length
+    };
+  });
+
+  if (catalog.length === 0 && config?.activeCourseMeta?.courseId) {
+    const st = fallbackData?.students || [];
+    const qs = fallbackData?.questions || [];
+    const att = fallbackData?.attempts || [];
+    const ret = fallbackData?.customMiniRetos || [];
+    catalog = [
+      {
+        meta: config.activeCourseMeta,
+        studentsCount: st.length,
+        questionsCount: qs.length,
+        attemptsCount: att.length,
+        retosCount: ret.length,
+        students: st,
+        questions: qs,
+        attempts: att,
+        abproEvaluations: fallbackData?.abproEvaluations || [],
+        customMiniRetos: ret,
+        academicDataset: fallbackData?.academicDataset
+      }
+    ];
+  }
+
+  const cleanStudentId = String(studentId || '')
+    .trim()
+    .replace(/[\s.-]/g, '')
+    .toUpperCase();
+
+  if (!cleanStudentId) return catalog;
+
+  // Demo student 1000000000 can test any course in catalog
+  if (cleanStudentId === '1000000000') {
+    return catalog;
+  }
+
+  const matchedWorkspaces = catalog.filter((w) => {
+    const roster = Array.isArray(w.students) ? w.students : [];
+    return roster.some(
+      (s) => String(s?.id || '').trim().replace(/[\s.-]/g, '').toUpperCase() === cleanStudentId
+    );
+  });
+
+  if (matchedWorkspaces.length > 0) {
+    return matchedWorkspaces;
+  }
+
+  // Fallback: if student is present in liveStudents (root roster) and no catalog course explicitly had them yet, return active course
+  const inRootStudents = (fallbackData?.students || []).some(
+    (s) => String(s?.id || '').trim().replace(/[\s.-]/g, '').toUpperCase() === cleanStudentId
+  );
+  if (inRootStudents && catalog.length > 0) {
+    const activeW =
+      catalog.find((w) => w.meta.courseId === config?.activeCourseId) || catalog[0];
+    return activeW ? [activeW] : catalog;
+  }
+
+  return matchedWorkspaces;
+}
+
+export function findStudentAcrossAllCourses(
+  studentIdInput: string,
+  accessCodeInput?: string,
+  config?: SystemConfig,
+  liveStudents?: StudentRecord[]
+): {
+  student: StudentRecord | null;
+  isValidCode: boolean;
+  assignedWorkspaces: UniversalCourseWorkspace[];
+} {
+  const cleanId = String(studentIdInput || '')
+    .trim()
+    .replace(/[\s.-]/g, '')
+    .toUpperCase();
+  const cleanCode = String(accessCodeInput || '').trim().toUpperCase();
+
+  if (!cleanId) {
+    return { student: null, isValidCode: false, assignedWorkspaces: [] };
+  }
+
+  const candidateStudents: StudentRecord[] = [];
+
+  if (Array.isArray(liveStudents)) {
+    liveStudents.forEach((s) => {
+      if (
+        s &&
+        String(s.id || '').trim().replace(/[\s.-]/g, '').toUpperCase() === cleanId
+      ) {
+        candidateStudents.push(s);
+      }
+    });
+  }
+
+  const catalog = Array.isArray(config?.universalCoursesCatalog)
+    ? config!.universalCoursesCatalog.filter((w) => w && w.meta && w.meta.courseId)
+    : [];
+
+  catalog.forEach((w) => {
+    const wStudents = getEffectiveStudentsForWorkspace(w, config, liveStudents);
+    wStudents.forEach((s) => {
+      if (
+        s &&
+        String(s.id || '').trim().replace(/[\s.-]/g, '').toUpperCase() === cleanId
+      ) {
+        candidateStudents.push(s);
+      }
+    });
+  });
+
+  if (Array.isArray(config?.studentRosterDatabases)) {
+    config!.studentRosterDatabases.forEach((db) => {
+      if (Array.isArray(db?.students)) {
+        db.students.forEach((s) => {
+          if (
+            s &&
+            String(s.id || '').trim().replace(/[\s.-]/g, '').toUpperCase() === cleanId
+          ) {
+            candidateStudents.push(s);
+          }
+        });
+      }
+    });
+  }
+
+  if (candidateStudents.length === 0) {
+    return { student: null, isValidCode: false, assignedWorkspaces: [] };
+  }
+
+  const checkCodeMatches = (st: StudentRecord) => {
+    if (!cleanCode) return true;
+    const storedCode = String(st?.codigoAcceso || '').trim().toUpperCase();
+    const fallbackCode = generateDeterministicAccessCode(st.id).toUpperCase();
+    return (
+      storedCode === cleanCode ||
+      (!storedCode && fallbackCode === cleanCode) ||
+      fallbackCode === cleanCode
+    );
+  };
+
+  const matchedWithCode = candidateStudents.find(checkCodeMatches);
+  const chosenStudent = matchedWithCode || candidateStudents[0];
+  const isValidCode = Boolean(matchedWithCode);
+
+  const assignedWorkspaces = getAssignedCourseWorkspacesForStudent(config, cleanId, {
+    students: liveStudents
+  });
+
+  return {
+    student: chosenStudent,
+    isValidCode,
+    assignedWorkspaces
   };
 }
 
