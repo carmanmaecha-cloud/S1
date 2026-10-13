@@ -559,7 +559,7 @@ export function StudentPortal({
         };
       });
     }
-    return academicDataset?.classSessions;
+    return academicDataset?.classSessions || [];
   }, [activeCourseMeta.modulosCurso, academicDataset?.classSessions]);
 
   const activeModalityOptions = useMemo(() => {
@@ -3976,561 +3976,729 @@ export function StudentPortal({
           </div>
         )}
 
-        {/* ================= ESTRUCTURA HÍBRIDA DE 3 COLUMNAS EN DESKTOP + BENTO GRID / LECTURA LINEAL ================= */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-          {/* COLUMNA 1 (IZQUIERDA FIJA EN DESKTOP): ÁRBOL DE CONTENIDOS Y LABORATORIOS/ENTREGAS */}
-          <aside className="hidden lg:block lg:col-span-3 bg-white border border-slate-200 rounded-2xl p-4 space-y-5 sticky top-4">
-            <div className="space-y-1 border-b border-slate-100 pb-3">
-              <div className="text-xs font-mono text-slate-500">
-                Código: {activeCourseMeta.codigoCurso || 'CURSO'} · {studentClassSessions.length} Módulos
-              </div>
-              <div className="text-sm font-bold text-slate-900">
-                Árbol de Contenidos
-              </div>
-            </div>
+        {/* ================= CONTENEDOR PRINCIPAL DEL PANEL DEL ESTUDIANTE ================= */}
+        <div className="w-full space-y-6">
+          {studentDashboardTab === 'inicio' && (() => {
+            const activeStepSession =
+              studentClassSessions.find((s) => s.id === selectedStepperClassId) ||
+              studentClassSessions[0];
+            const stepId = (activeStepSession?.id || 1) as ClassSessionId;
+            const stepRec = currentStudentAcademicRecord.clases[stepId];
+            const stepExamMod: ExamModality =
+              stepId <= 5 ? (`mod${stepId}` as ExamModality) : 'integral';
+            const stepDocs = activeStepSession?.documentosEnlaces || [];
+            const totalDocsCount = studentClassSessions.reduce(
+              (acc, s) => acc + (s.documentosEnlaces?.length || 0),
+              0
+            );
+            const studentTickets = Array.isArray(currentStudent.solicitudesRevision)
+              ? currentStudent.solicitudesRevision
+              : [];
 
-            {/* Navegación Estructural del Curso */}
-            <div className="space-y-1">
-              <button
-                type="button"
-                onClick={handleGoHomeStudentPanel}
-                className={`w-full min-h-[44px] px-3 py-2 rounded-xl text-left text-xs font-semibold flex items-center justify-between cursor-pointer transition-colors ${
-                  studentDashboardTab === 'inicio'
-                    ? 'bg-slate-900 text-white'
-                    : 'text-slate-700 hover:bg-slate-100'
-                }`}
-              >
-                <span>Escritorio Principal (Bento)</span>
-                <LayoutGrid className="w-4 h-4 shrink-0" />
-              </button>
+            return (
+              <div className="space-y-6">
+                {/* 1. TARJETA HERO DE BIENVENIDA Y RESUMEN DEL CURSO SELECCIONADO */}
+                <div className="bg-gradient-to-br from-slate-900 via-slate-800 to-sky-950 text-white rounded-3xl p-6 sm:p-8 shadow-sm space-y-6 border border-slate-800">
+                  <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
+                    <div className="space-y-2">
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <span className="px-3 py-1 rounded-lg bg-sky-500/20 text-sky-300 font-mono font-bold border border-sky-400/30">
+                          {activeCourseMeta.codigoCurso || 'CURSO'}
+                        </span>
+                        {activeCourseMeta.periodoAcademico && (
+                          <span className="px-3 py-1 rounded-lg bg-white/10 text-slate-200 font-semibold border border-white/10">
+                            Periodo {activeCourseMeta.periodoAcademico}
+                          </span>
+                        )}
+                        <span className="px-3 py-1 rounded-lg bg-emerald-500/20 text-emerald-300 font-bold border border-emerald-400/30">
+                          Curso Activo
+                        </span>
+                      </div>
 
-              <div className="pt-2 pb-1 px-2 text-[11px] font-semibold text-slate-400">
-                Módulos y Lecciones
-              </div>
-              {studentClassSessions.map((cs) => {
-                const cId = cs.id as ClassSessionId;
-                const isSelected = selectedStepperClassId === cId;
-                const cRec = currentStudentAcademicRecord.clases[cId];
-                const isPresent =
-                  cRec?.asistenciaB1Estado === 'presente_virtual' ||
-                  cRec?.asistenciaB1Estado === 'presente_manual' ||
-                  cRec?.asistenciaB2Estado === 'presente_virtual' ||
-                  cRec?.asistenciaB2Estado === 'presente_manual';
-                return (
-                  <button
-                    key={cId}
-                    type="button"
-                    onClick={() => {
-                      setSelectedStepperClassId(cId);
-                      setSheetClassId(cId);
-                    }}
-                    className={`w-full min-h-[44px] px-3 py-2 rounded-xl text-left text-xs flex items-center justify-between gap-2 cursor-pointer transition-colors ${
-                      isSelected
-                        ? 'bg-sky-50 text-sky-950 font-bold border border-sky-200'
-                        : 'text-slate-700 hover:bg-slate-50'
-                    }`}
-                  >
-                    <span className="truncate">
-                      {cs.code} · {cs.shortTitle}
-                    </span>
-                    <span className="font-mono text-[11px] text-slate-500 shrink-0">
-                      {isPresent ? 'P' : '—'}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
+                      <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-white">
+                        {activeCourseMeta.nombreCurso || 'Curso Académico'}
+                      </h1>
 
-            {/* Accesos Directos a Laboratorios, Entregas y Evaluaciones */}
-            <div className="space-y-1.5 pt-3 border-t border-slate-100">
-              <div className="px-2 text-[11px] font-semibold text-slate-400">
-                Entregas y Evaluaciones
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setSheetClassId(selectedStepperClassId);
-                  const existingW =
-                    currentStudentAcademicRecord.clases[selectedStepperClassId];
-                  setSheetWorkText(existingW?.trabajoEntregaTexto || '');
-                  setSheetWorkLink(existingW?.trabajoEntregaEnlace || '');
-                  setSheetNotice(null);
-                  setStudentBottomSheet('entregar_trabajo');
-                }}
-                className="w-full min-h-[44px] px-3 py-2 rounded-xl text-left text-xs font-semibold text-slate-700 hover:bg-slate-100 flex items-center justify-between cursor-pointer"
-              >
-                <span>Entregar Trabajo Práctico</span>
-                <ArrowRight className="w-3.5 h-3.5 text-slate-400" />
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setSheetClassId(selectedStepperClassId);
-                  setSheetExcuseReason('');
-                  setSheetExcuseUrl('');
-                  setSheetNotice(null);
-                  setStudentBottomSheet('justificar_falla');
-                }}
-                className="w-full min-h-[44px] px-3 py-2 rounded-xl text-left text-xs font-semibold text-slate-700 hover:bg-slate-100 flex items-center justify-between cursor-pointer"
-              >
-                <span>Justificar Inasistencia</span>
-                <ArrowRight className="w-3.5 h-3.5 text-slate-400" />
-              </button>
-              <button
-                type="button"
-                onClick={() => setStudentDashboardTab('material_modulos')}
-                className={`w-full min-h-[44px] px-3 py-2 rounded-xl text-left text-xs font-semibold flex items-center justify-between cursor-pointer ${
-                  studentDashboardTab === 'material_modulos'
-                    ? 'bg-emerald-50 text-emerald-900 font-bold'
-                    : 'text-slate-700 hover:bg-slate-100'
-                }`}
-              >
-                <span>Modo Lectura de Lecciones</span>
-                <BookOpen className="w-3.5 h-3.5 text-slate-400" />
-              </button>
-              <button
-                type="button"
-                onClick={() => setStudentDashboardTab('notas_asistencia_clases')}
-                className={`w-full min-h-[44px] px-3 py-2 rounded-xl text-left text-xs font-semibold flex items-center justify-between cursor-pointer ${
-                  studentDashboardTab === 'notas_asistencia_clases'
-                    ? 'bg-indigo-50 text-indigo-900 font-bold'
-                    : 'text-slate-700 hover:bg-slate-100'
-                }`}
-              >
-                <span>Simulador y Boletín PDF</span>
-                <BarChart3 className="w-3.5 h-3.5 text-slate-400" />
-              </button>
-            </div>
-          </aside>
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-300">
+                        <span>
+                          Docente: <strong className="text-white">{activeCourseMeta.docenteResponsable || config.nombreDocente || 'Docente Titular'}</strong>
+                        </span>
+                        {activeCourseMeta.programaAcademico && (
+                          <>
+                            <span aria-hidden="true" className="text-slate-500">·</span>
+                            <span>{activeCourseMeta.programaAcademico}</span>
+                          </>
+                        )}
+                        {activeCourseMeta.institucionSede && (
+                          <>
+                            <span aria-hidden="true" className="text-slate-500">·</span>
+                            <span>{activeCourseMeta.institucionSede}</span>
+                          </>
+                        )}
+                      </div>
+                    </div>
 
-          {/* COLUMNA 2 (ESPACIO CENTRAL): BENTO GRID EN INICIO / INTERFAZ LINEAL LIMPIA EN CONTENIDO */}
-          <div
-            className={
-              studentDashboardTab === 'inicio'
-                ? 'lg:col-span-6 space-y-5'
-                : 'lg:col-span-9 space-y-5'
-            }
-          >
-            {studentDashboardTab === 'inicio' ? (
-              <div className="space-y-5">
-                {/* BENTO GRID INTERACTIVO (ESTILO WEB OS / ANDROID LAUNCHER EN EL DASHBOARD) */}
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
-                  {/* WIDGET BENTO 2x2: MÓDULO ACTIVO Y ACCESO INMEDIATO A LECCIÓN LINEAL */}
-                  {(() => {
-                    const activeStepSession =
-                      studentClassSessions.find((s) => s.id === selectedStepperClassId) ||
-                      studentClassSessions[0];
-                    const stepId = (activeStepSession?.id || 1) as ClassSessionId;
-                    const stepRec = currentStudentAcademicRecord.clases[stepId];
-                    const stepExamMod: ExamModality =
-                      stepId <= 5 ? (`mod${stepId}` as ExamModality) : 'integral';
-                    const stepDocs = activeStepSession?.documentosEnlaces || [];
+                    {/* Botón para cambiar de curso */}
+                    <div className="flex items-center gap-3 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCourseSearchQuery('');
+                          setIsCourseSelectionWindowOpen(true);
+                        }}
+                        className="px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/15 text-white text-xs font-bold flex items-center gap-2 cursor-pointer transition-colors"
+                        title="Volver al listado de cursos asignados"
+                      >
+                        <BookOpen className="w-4 h-4 text-sky-300" />
+                        <span>Mis Cursos ({assignedStudentCourses.length})</span>
+                      </button>
+                    </div>
+                  </div>
 
-                    return (
-                      <div className="col-span-2 sm:col-span-4 bg-white border border-slate-200 rounded-2xl p-5 space-y-4">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div className="text-xs text-slate-500 font-mono">
-                            <span>Módulo Activo</span>
-                            <span aria-hidden="true"> · </span>
-                            <span>{activeStepSession?.code || 'C1'}</span>
-                            <span aria-hidden="true"> · </span>
-                            <span>{stepDocs.length} recurso(s) de lectura</span>
+                  {/* 4 Métricas Clave del Estudiante en este Curso */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-white/10">
+                    <div className="p-3.5 rounded-2xl bg-white/5 border border-white/10">
+                      <div className="text-[11px] font-semibold text-sky-300 uppercase tracking-wide">
+                        Promedio Ponderado
+                      </div>
+                      <div className="text-xl sm:text-2xl font-bold font-mono text-white tabular-nums mt-0.5">
+                        {studentAcademicSummaryForChart.promedioAcumulado.toFixed(1)} <span className="text-xs text-slate-400 font-normal">/ 5.0</span>
+                      </div>
+                      <div className="text-[10px] text-slate-400 mt-0.5">
+                        Meta mínima: {minPass.toFixed(1)}
+                      </div>
+                    </div>
+
+                    <div className="p-3.5 rounded-2xl bg-white/5 border border-white/10">
+                      <div className="text-[11px] font-semibold text-emerald-300 uppercase tracking-wide">
+                        Exámenes Oficiales
+                      </div>
+                      <div className="text-xl sm:text-2xl font-bold font-mono text-white tabular-nums mt-0.5">
+                        {completedExamsCount} <span className="text-xs text-slate-400 font-normal">/ {modalitiesOverview.length}</span>
+                      </div>
+                      <div className="text-[10px] text-slate-400 mt-0.5">
+                        Mejor nota: {studentBestOverallGrade > 0 ? `${studentBestOverallGrade.toFixed(1)}/5.0` : '—'}
+                      </div>
+                    </div>
+
+                    <div className="p-3.5 rounded-2xl bg-white/5 border border-white/10">
+                      <div className="text-[11px] font-semibold text-amber-300 uppercase tracking-wide">
+                        Mini Retos e Insignias
+                      </div>
+                      <div className="text-xl sm:text-2xl font-bold font-mono text-white tabular-nums mt-0.5">
+                        {unlockedBadgesCount} <span className="text-xs text-slate-400 font-normal">/ {totalCourseModulesCount}</span>
+                      </div>
+                      <div className="text-[10px] text-slate-400 mt-0.5">
+                        Insignias desbloqueadas
+                      </div>
+                    </div>
+
+                    <div className="p-3.5 rounded-2xl bg-white/5 border border-white/10">
+                      <div className="text-[11px] font-semibold text-violet-300 uppercase tracking-wide">
+                        Asistencia a Clases
+                      </div>
+                      <div className="text-xl sm:text-2xl font-bold font-mono text-white tabular-nums mt-0.5">
+                        {studentAcademicSummaryForChart.porcentajeAsistencia}%
+                      </div>
+                      <div className="text-[10px] text-slate-400 mt-0.5">
+                        Sábana C1 a C6
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 2. HUB DE TARJETAS INTERACTIVAS ORGANIZADAS */}
+                <div className="space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div>
+                      <h2 className="text-lg sm:text-xl font-bold text-slate-900 tracking-tight">
+                        Tarjetas Interactivas del Curso
+                      </h2>
+                      <p className="text-xs text-slate-500">
+                        Acceda a los recursos de estudio, evaluaciones oficiales, retos de práctica, expediente académico y entregas.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+                    {/* TARJETA INTERACTIVA 1: RECURSOS DEL CURSO (LECCIONES Y MATERIAL) */}
+                    <div className="bg-white rounded-2xl p-6 border-2 border-emerald-100 hover:border-emerald-500 transition-all flex flex-col justify-between gap-5 shadow-xs hover:shadow-md group">
+                      <div className="space-y-3.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="w-12 h-12 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center shrink-0">
+                            <BookOpen className="w-6 h-6" />
                           </div>
-                          {/* Selector táctil compacto de módulo (48x48px min) */}
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            {studentClassSessions.map((cs) => {
-                              const cId = cs.id as ClassSessionId;
-                              const active = selectedStepperClassId === cId;
-                              return (
-                                <button
-                                  key={cId}
-                                  type="button"
-                                  onClick={() => setSelectedStepperClassId(cId)}
-                                  className={`min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-xl font-mono text-xs font-bold cursor-pointer active:scale-95 transition-transform ${
-                                    active
-                                      ? 'bg-slate-900 text-white'
-                                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                                  }`}
-                                >
-                                  {cs.code}
-                                </button>
-                              );
-                            })}
-                          </div>
+                          <span className="px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] font-bold">
+                            {activeCourseMeta.cantidadModulos} Módulos de Estudio
+                          </span>
                         </div>
 
                         <div className="space-y-1">
-                          <h1 className="text-lg sm:text-xl font-bold text-slate-900">
-                            {activeStepSession?.fullTitle || 'Módulo en Curso'}
-                          </h1>
-                          <p className="text-xs text-slate-600">
-                            Asistencia Hoy:{' '}
-                            <strong>
-                              {stepRec?.asistenciaB1Estado === 'presente_virtual' ||
-                              stepRec?.asistenciaB1Estado === 'presente_manual'
-                                ? 'Presente (Bloque A)'
-                                : stepRec?.asistenciaB1Estado === 'falla'
-                                ? 'Falla registrada'
-                                : 'Pendiente'}
-                            </strong>{' '}
-                            · Trabajo Práctico:{' '}
-                            <strong>
+                          <h3 className="text-base font-bold text-slate-900 group-hover:text-emerald-700 transition-colors">
+                            Recursos del Curso (Lecciones y Material)
+                          </h3>
+                          <p className="text-xs text-slate-600 leading-relaxed">
+                            Guías temáticas de lectura, diapositivas oficiales, normativas y recursos descargables en formato PDF de cada módulo o clase.
+                          </p>
+                        </div>
+
+                        <div className="bg-slate-50 rounded-xl p-3 border border-slate-200/80 text-xs space-y-1 text-slate-600">
+                          <div className="flex items-center justify-between">
+                            <span>Material disponible:</span>
+                            <strong className="text-slate-900 font-mono">
+                              {totalDocsCount} recurso(s)
+                            </strong>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span>Modo de estudio:</span>
+                            <span className="font-semibold text-emerald-700">Lectura lineal y descargas</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => setStudentDashboardTab('material_modulos')}
+                        className="w-full min-h-[44px] py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-center gap-2 cursor-pointer transition-colors shadow-2xs"
+                      >
+                        <span>Abrir Lecciones y Descargas</span>
+                        <ArrowRight className="w-4 h-4 group-hover:translate-x-0.5 transition-transform" />
+                      </button>
+                    </div>
+
+                    {/* TARJETA INTERACTIVA 2: EXÁMENES / EVALUACIONES */}
+                    <div className="bg-white rounded-2xl p-6 border-2 border-sky-100 hover:border-sky-500 transition-all flex flex-col justify-between gap-5 shadow-xs hover:shadow-md group">
+                      <div className="space-y-3.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="w-12 h-12 rounded-xl bg-sky-50 text-sky-700 flex items-center justify-center shrink-0">
+                            <GraduationCap className="w-6 h-6" />
+                          </div>
+                          <span className="px-2.5 py-1 rounded-lg bg-sky-50 border border-sky-200 text-sky-800 text-[11px] font-bold">
+                            {completedExamsCount}/{modalitiesOverview.length} Realizados
+                          </span>
+                        </div>
+
+                        <div className="space-y-1">
+                          <h3 className="text-base font-bold text-slate-900 group-hover:text-sky-700 transition-colors">
+                            Exámenes y Evaluaciones
+                          </h3>
+                          <p className="text-xs text-slate-600 leading-relaxed">
+                            Evaluaciones oficiales por módulo y Examen Integral final. Sistema con 2 intentos, preguntas aleatorias equilibradas y nota Math.max.
+                          </p>
+                        </div>
+
+                        <div className="bg-slate-50 rounded-xl p-3 border border-slate-200/80 text-xs space-y-1 text-slate-600">
+                          <div className="flex items-center justify-between">
+                            <span>Mejor calificación:</span>
+                            <strong className="text-sky-700 font-mono">
+                              {studentBestOverallGrade > 0 ? `${studentBestOverallGrade.toFixed(1)} / 5.0` : 'Sin presentar'}
+                            </strong>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span>Intentos permitidos:</span>
+                            <span className="font-semibold text-slate-700">2 intentos oficiales</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        <button
+                          type="button"
+                          onClick={() => setStudentDashboardTab('modalidades')}
+                          className="w-full min-h-[44px] py-2.5 px-4 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs flex items-center justify-center gap-2 cursor-pointer transition-colors shadow-2xs"
+                        >
+                          <span>Ir a Exámenes Oficiales</span>
+                          <ArrowRight className="w-4 h-4 group-hover:translate-x-0.5 transition-transform" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setZeroTrialModalOpen(true)}
+                          className="w-full min-h-[36px] py-1.5 px-3 rounded-xl border border-sky-200 bg-sky-50 hover:bg-sky-100 text-sky-900 font-bold text-[11px] flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+                        >
+                          <PlayCircle className="w-3.5 h-3.5 text-sky-700" />
+                          <span>Ensayo Modo Cero (Sin Afectar Nota)</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* TARJETA INTERACTIVA 3: MINI RETOS E INSIGNIAS */}
+                    <div className="bg-white rounded-2xl p-6 border-2 border-amber-100 hover:border-amber-500 transition-all flex flex-col justify-between gap-5 shadow-xs hover:shadow-md group">
+                      <div className="space-y-3.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="w-12 h-12 rounded-xl bg-amber-50 text-amber-700 flex items-center justify-center shrink-0">
+                            <Trophy className="w-6 h-6" />
+                          </div>
+                          <span className="px-2.5 py-1 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-[11px] font-bold">
+                            {unlockedBadgesCount}/{totalCourseModulesCount} Insignias
+                          </span>
+                        </div>
+
+                        <div className="space-y-1">
+                          <h3 className="text-base font-bold text-slate-900 group-hover:text-amber-700 transition-colors">
+                            Mini Retos e Insignias
+                          </h3>
+                          <p className="text-xs text-slate-600 leading-relaxed">
+                            Entrenamiento interactivo con preguntas contrarreloj, retroalimentación formativa inmediata, rachas de aciertos y medallas coleccionables.
+                          </p>
+                        </div>
+
+                        <div className="bg-slate-50 rounded-xl p-3 border border-slate-200/80 text-xs space-y-1 text-slate-600">
+                          <div className="flex items-center justify-between">
+                            <span>Insignias desbloqueadas:</span>
+                            <strong className="text-amber-700 font-mono">
+                              {unlockedBadgesCount} de {totalCourseModulesCount}
+                            </strong>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span>Retos por módulo:</span>
+                            <span className="font-semibold text-slate-700">Gamificación activa</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => setStudentDashboardTab('mini_retos')}
+                        className="w-full min-h-[44px] py-2.5 px-4 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold text-xs flex items-center justify-center gap-2 cursor-pointer transition-colors shadow-2xs"
+                      >
+                        <Trophy className="w-4 h-4 shrink-0" />
+                        <span>Jugar Mini Retos Ahora</span>
+                        <ArrowRight className="w-4 h-4 group-hover:translate-x-0.5 transition-transform" />
+                      </button>
+                    </div>
+
+                    {/* TARJETA INTERACTIVA 4: PROGRESO ACADÉMICO Y EXPEDIENTE */}
+                    <div className="bg-white rounded-2xl p-6 border-2 border-indigo-100 hover:border-indigo-500 transition-all flex flex-col justify-between gap-5 shadow-xs hover:shadow-md group">
+                      <div className="space-y-3.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="w-12 h-12 rounded-xl bg-indigo-50 text-indigo-700 flex items-center justify-center shrink-0">
+                            <BarChart3 className="w-6 h-6" />
+                          </div>
+                          <span className="px-2.5 py-1 rounded-lg bg-indigo-50 border border-indigo-200 text-indigo-800 text-[11px] font-bold">
+                            {studentAcademicSummaryForChart.porcentajeAsistencia}% Asistencia
+                          </span>
+                        </div>
+
+                        <div className="space-y-1">
+                          <h3 className="text-base font-bold text-slate-900 group-hover:text-indigo-700 transition-colors">
+                            Progreso Académico y Expediente
+                          </h3>
+                          <p className="text-xs text-slate-600 leading-relaxed">
+                            Sábana consolidada de notas C1–C6, registro de asistencia a clases por bloques A/B, simulador interactivo y descarga de boletín en PDF.
+                          </p>
+                        </div>
+
+                        <div className="bg-slate-50 rounded-xl p-3 border border-slate-200/80 text-xs space-y-1 text-slate-600">
+                          <div className="flex items-center justify-between">
+                            <span>Promedio general:</span>
+                            <strong className="text-indigo-700 font-mono">
+                              {studentAcademicSummaryForChart.promedioAcumulado.toFixed(1)} / 5.0
+                            </strong>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span>Sábana de clases:</span>
+                            <span className="font-semibold text-slate-700">Sesiones C1 a C6</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => setStudentDashboardTab('notas_asistencia_clases')}
+                        className="w-full min-h-[44px] py-2.5 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs flex items-center justify-center gap-2 cursor-pointer transition-colors shadow-2xs"
+                      >
+                        <span>Ver Expediente y Asistencia</span>
+                        <ArrowRight className="w-4 h-4 group-hover:translate-x-0.5 transition-transform" />
+                      </button>
+                    </div>
+
+                    {/* TARJETA INTERACTIVA 5: TALLERES Y ENTREGAS PRÁCTICAS */}
+                    <div className="bg-white rounded-2xl p-6 border-2 border-cyan-100 hover:border-cyan-500 transition-all flex flex-col justify-between gap-5 shadow-xs hover:shadow-md group">
+                      <div className="space-y-3.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="w-12 h-12 rounded-xl bg-cyan-50 text-cyan-700 flex items-center justify-center shrink-0">
+                            <FileCheck2 className="w-6 h-6" />
+                          </div>
+                          <span className="px-2.5 py-1 rounded-lg bg-cyan-50 border border-cyan-200 text-cyan-800 text-[11px] font-bold">
+                            Taller Clase {activeStepSession?.code || 'C1'}
+                          </span>
+                        </div>
+
+                        <div className="space-y-1">
+                          <h3 className="text-base font-bold text-slate-900 group-hover:text-cyan-700 transition-colors">
+                            Talleres y Entregas Prácticas
+                          </h3>
+                          <p className="text-xs text-slate-600 leading-relaxed">
+                            Radique sus trabajos prácticos, evidencias de taller o enlaces de repositorios (Drive, GitHub, Canva) para revisión y calificación docente.
+                          </p>
+                        </div>
+
+                        <div className="bg-slate-50 rounded-xl p-3 border border-slate-200/80 text-xs space-y-1 text-slate-600">
+                          <div className="flex items-center justify-between">
+                            <span>Estado en {activeStepSession?.code || 'C1'}:</span>
+                            <strong className="text-cyan-800 font-semibold">
                               {stepRec?.trabajoCalificado
                                 ? `${stepRec.trabajoPractico.toFixed(1)} / 5.0`
                                 : stepRec?.trabajoEstado === 'pendiente_revision'
                                 ? 'En revisión'
                                 : 'Sin entregar'}
                             </strong>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span>Modalidad de entrega:</span>
+                            <span className="font-semibold text-slate-700">Resumen y enlace web</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSheetClassId(stepId);
+                          setSheetWorkText(stepRec?.trabajoEntregaTexto || '');
+                          setSheetWorkLink(stepRec?.trabajoEntregaEnlace || '');
+                          setSheetNotice(null);
+                          setStudentBottomSheet('entregar_trabajo');
+                        }}
+                        className="w-full min-h-[44px] py-2.5 px-4 rounded-xl bg-cyan-600 hover:bg-cyan-700 text-white font-bold text-xs flex items-center justify-center gap-2 cursor-pointer transition-colors shadow-2xs"
+                      >
+                        <FileCheck2 className="w-4 h-4 shrink-0" />
+                        <span>Entregar Taller Práctico</span>
+                        <ArrowRight className="w-4 h-4 group-hover:translate-x-0.5 transition-transform" />
+                      </button>
+                    </div>
+
+                    {/* TARJETA INTERACTIVA 6: REVISIÓN DE NOTAS Y EXCUSAS (TICKETS) */}
+                    <div className="bg-white rounded-2xl p-6 border-2 border-rose-100 hover:border-rose-500 transition-all flex flex-col justify-between gap-5 shadow-xs hover:shadow-md group">
+                      <div className="space-y-3.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="w-12 h-12 rounded-xl bg-rose-50 text-rose-700 flex items-center justify-center shrink-0">
+                            <ShieldCheck className="w-6 h-6" />
+                          </div>
+                          <span className="px-2.5 py-1 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-[11px] font-bold">
+                            {studentTickets.length} Radicado(s)
+                          </span>
+                        </div>
+
+                        <div className="space-y-1">
+                          <h3 className="text-base font-bold text-slate-900 group-hover:text-rose-700 transition-colors">
+                            Revisión de Notas y Excusas
+                          </h3>
+                          <p className="text-xs text-slate-600 leading-relaxed">
+                            Radique solicitudes formales de recalificación de exámenes, aclaración de preguntas o justificación médica de inasistencias con trazabilidad docente.
                           </p>
                         </div>
 
-                        {/* Acciones Táctiles en Tarjetas Interactivas del Módulo Actual */}
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-                          <button
-                            type="button"
-                            onClick={() => setStudentDashboardTab('material_modulos')}
-                            className="p-3.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-left flex items-center justify-between gap-3 cursor-pointer active:scale-[0.98] transition-all"
-                          >
-                            <div className="flex items-center gap-3 min-w-0">
-                              <div className="w-9 h-9 rounded-lg bg-white/15 flex items-center justify-center shrink-0">
-                                <BookOpen className="w-4 h-4 text-sky-300" />
-                              </div>
-                              <div className="min-w-0">
-                                <div className="text-xs font-bold">Leer Lección</div>
-                                <div className="text-[11px] text-slate-300 truncate">
-                                  Guía y material ({stepDocs.length} doc.)
-                                </div>
-                              </div>
-                            </div>
-                            <ArrowRight className="w-4 h-4 text-sky-300 shrink-0" />
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSheetClassId(stepId);
-                              setSheetWorkText(stepRec?.trabajoEntregaTexto || '');
-                              setSheetWorkLink(stepRec?.trabajoEntregaEnlace || '');
-                              setSheetNotice(null);
-                              setStudentBottomSheet('entregar_trabajo');
-                            }}
-                            className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/70 hover:bg-sky-50/60 hover:border-sky-300 text-slate-900 text-left flex items-center justify-between gap-3 cursor-pointer active:scale-[0.98] transition-all"
-                          >
-                            <div className="flex items-center gap-3 min-w-0">
-                              <div className="w-9 h-9 rounded-lg bg-sky-100 text-sky-700 flex items-center justify-center shrink-0">
-                                <FileCheck2 className="w-4 h-4" />
-                              </div>
-                              <div className="min-w-0">
-                                <div className="text-xs font-bold">Entregar Trabajo</div>
-                                <div className="text-[11px] text-slate-500 truncate">
-                                  Taller práctico {activeStepSession?.code}
-                                </div>
-                              </div>
-                            </div>
-                            <ArrowRight className="w-4 h-4 text-slate-400 shrink-0" />
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (stepId <= 5) {
-                                setSelectedRetoModuloJump(stepId as 1 | 2 | 3 | 4 | 5);
-                              }
-                              setStudentDashboardTab('mini_retos');
-                            }}
-                            className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/70 hover:bg-amber-50/60 hover:border-amber-300 text-slate-900 text-left flex items-center justify-between gap-3 cursor-pointer active:scale-[0.98] transition-all"
-                          >
-                            <div className="flex items-center gap-3 min-w-0">
-                              <div className="w-9 h-9 rounded-lg bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
-                                <Trophy className="w-4 h-4" />
-                              </div>
-                              <div className="min-w-0">
-                                <div className="text-xs font-bold">Mini Reto</div>
-                                <div className="text-[11px] text-slate-500 truncate">
-                                  Práctica e insignia {activeStepSession?.code}
-                                </div>
-                              </div>
-                            </div>
-                            <ArrowRight className="w-4 h-4 text-slate-400 shrink-0" />
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSelectedModality(stepExamMod);
-                              setStudentDashboardTab('modalidades');
-                            }}
-                            className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/70 hover:bg-indigo-50/60 hover:border-indigo-300 text-slate-900 text-left flex items-center justify-between gap-3 cursor-pointer active:scale-[0.98] transition-all"
-                          >
-                            <div className="flex items-center gap-3 min-w-0">
-                              <div className="w-9 h-9 rounded-lg bg-indigo-100 text-indigo-700 flex items-center justify-center shrink-0">
-                                <GraduationCap className="w-4 h-4" />
-                              </div>
-                              <div className="min-w-0">
-                                <div className="text-xs font-bold">
-                                  Examen {activeStepSession?.code}
-                                </div>
-                                <div className="text-[11px] text-slate-500 truncate">
-                                  Evaluación oficial del módulo
-                                </div>
-                              </div>
-                            </div>
-                            <ArrowRight className="w-4 h-4 text-slate-400 shrink-0" />
-                          </button>
+                        <div className="bg-slate-50 rounded-xl p-3 border border-slate-200/80 text-xs space-y-1 text-slate-600">
+                          <div className="flex items-center justify-between">
+                            <span>Historial de tickets:</span>
+                            <strong className="text-rose-800 font-mono">
+                              {studentTickets.length} solicitud(es)
+                            </strong>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span>Respuesta docente:</span>
+                            <span className="font-semibold text-slate-700">Trazabilidad oficial</span>
+                          </div>
                         </div>
                       </div>
-                    );
-                  })()}
 
-                  {/* TARJETA DE RESUMEN DE RENDIMIENTO ACADÉMICO CON RECHARTS (NOTAS POR MÓDULO DEL CURSO ACTUAL) */}
-                  <div className="col-span-2 sm:col-span-4 bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-4">
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3.5">
-                      <div className="space-y-0.5">
-                        <div className="inline-flex items-center gap-1.5 text-[11px] font-bold text-sky-700 uppercase tracking-wider">
-                          <BarChart3 className="w-4 h-4" />
-                          <span>Analítica Visual Recharts · Curso Actual</span>
-                        </div>
-                        <h2 className="text-base sm:text-lg font-bold text-slate-900">
-                          Resumen de Rendimiento Académico
-                        </h2>
-                        <p className="text-xs text-slate-500">
-                          Calificaciones obtenidas en los diferentes módulos de{' '}
-                          <strong className="text-slate-700">{activeCourseMeta.nombreCurso}</strong>{' '}
-                          (escala 0.0 a 5.0).
-                        </p>
-                      </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          openFormalReviewTicketModal({
+                            tipo: 'RECALIFICACION_EXAMEN',
+                            targetId: 'integral',
+                            targetLabel: 'Examen Integral Final',
+                            notaActual: 0.0
+                          })
+                        }
+                        className="w-full min-h-[44px] py-2.5 px-4 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs flex items-center justify-center gap-2 cursor-pointer transition-colors shadow-2xs"
+                      >
+                        <ShieldCheck className="w-4 h-4 shrink-0" />
+                        <span>Radicar Ticket o Excusa</span>
+                        <ArrowRight className="w-4 h-4 group-hover:translate-x-0.5 transition-transform" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
 
-                      <div className="flex flex-wrap items-center gap-2 text-xs font-mono shrink-0">
-                        <div className="px-3 py-1.5 rounded-xl bg-sky-50 border border-sky-200 text-sky-900">
-                          <span className="block text-[10px] font-sans font-semibold text-sky-700 uppercase">
-                            Promedio Curso
-                          </span>
-                          <strong className="text-sm">
-                            {studentAcademicSummaryForChart.promedioAcumulado.toFixed(1)} / 5.0
-                          </strong>
-                        </div>
-                        <div className="px-3 py-1.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900">
-                          <span className="block text-[10px] font-sans font-semibold text-emerald-700 uppercase">
-                            Módulos con Nota
-                          </span>
-                          <strong className="text-sm">
-                            {evaluatedModulesInChartCount} / {moduleGradesBarData.length}
-                          </strong>
-                        </div>
+                {/* 3. RESUMEN DE RENDIMIENTO ACADÉMICO CON RECHARTS */}
+                <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 shadow-xs space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3.5">
+                    <div className="space-y-0.5">
+                      <div className="inline-flex items-center gap-1.5 text-[11px] font-bold text-sky-700 uppercase tracking-wider">
+                        <BarChart3 className="w-4 h-4" />
+                        <span>Analítica Visual · Curso Actual</span>
                       </div>
+                      <h2 className="text-base sm:text-lg font-bold text-slate-900">
+                        Resumen de Rendimiento Académico por Módulos
+                      </h2>
+                      <p className="text-xs text-slate-500">
+                        Calificaciones obtenidas en los diferentes módulos de{' '}
+                        <strong className="text-slate-700">{activeCourseMeta.nombreCurso}</strong>{' '}
+                        (escala 0.0 a 5.0).
+                      </p>
                     </div>
 
-                    <div className="w-full h-64">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <BarChart
-                          data={moduleGradesBarData}
-                          margin={{ top: 10, right: 16, left: -12, bottom: 5 }}
+                    <div className="flex flex-wrap items-center gap-2 text-xs font-mono shrink-0">
+                      <div className="px-3 py-1.5 rounded-xl bg-sky-50 border border-sky-200 text-sky-900">
+                        <span className="block text-[10px] font-sans font-semibold text-sky-700 uppercase">
+                          Promedio Curso
+                        </span>
+                        <strong className="text-sm">
+                          {studentAcademicSummaryForChart.promedioAcumulado.toFixed(1)} / 5.0
+                        </strong>
+                      </div>
+                      <div className="px-3 py-1.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900">
+                        <span className="block text-[10px] font-sans font-semibold text-emerald-700 uppercase">
+                          Módulos con Nota
+                        </span>
+                        <strong className="text-sm">
+                          {evaluatedModulesInChartCount} / {moduleGradesBarData.length}
+                        </strong>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="w-full h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart
+                        data={moduleGradesBarData}
+                        margin={{ top: 10, right: 16, left: -12, bottom: 5 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                        <XAxis
+                          dataKey="modulo"
+                          tick={{ fontSize: 11, fill: '#334155', fontWeight: 700 }}
+                        />
+                        <YAxis
+                          domain={[0, 5]}
+                          ticks={[0, 1, 2, 3, 4, 5]}
+                          tick={{ fontSize: 11, fill: '#475569' }}
+                        />
+                        <Tooltip
+                          formatter={(value: any, name: any) => [
+                            `${Number(value || 0).toFixed(2)} / 5.0`,
+                            name
+                          ]}
+                          labelFormatter={(label, payload) => {
+                            const item = payload?.[0]?.payload;
+                            return item
+                              ? `${item.modulo} — ${item.nombreModulo}`
+                              : `Módulo ${label}`;
+                          }}
+                          contentStyle={{
+                            backgroundColor: '#ffffff',
+                            borderColor: '#cbd5e1',
+                            borderRadius: '12px',
+                            fontSize: '12px',
+                            boxShadow: '0 4px 12px rgba(15, 23, 42, 0.08)'
+                          }}
+                        />
+                        <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '6px' }} />
+                        <ReferenceLine
+                          y={minPass}
+                          stroke="#ef4444"
+                          strokeDasharray="4 4"
+                          label={{
+                            value: `Mín. ${minPass.toFixed(1)}`,
+                            position: 'insideTopRight',
+                            fill: '#dc2626',
+                            fontSize: 10
+                          }}
+                        />
+                        <Bar
+                          dataKey="notaModulo"
+                          name="Nota del Módulo"
+                          fill="#0284c7"
+                          radius={[6, 6, 0, 0]}
+                          maxBarSize={34}
+                        />
+                        <Bar
+                          dataKey="notaExamen"
+                          name="Examen del Módulo"
+                          fill="#4f46e5"
+                          radius={[6, 6, 0, 0]}
+                          maxBarSize={28}
+                        />
+                        <Bar
+                          dataKey="notaPracticaReto"
+                          name="Trabajo / Mini Reto"
+                          fill="#10b981"
+                          radius={[6, 6, 0, 0]}
+                          maxBarSize={28}
+                        />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+
+                  {/* Selector rápido por módulo debajo de la gráfica */}
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2 pt-1">
+                    {moduleGradesBarData.map((mItem) => {
+                      const isSelectedMod = selectedStepperClassId === mItem.classId;
+                      const isPassing = mItem.notaModulo >= minPass;
+                      return (
+                        <button
+                          key={mItem.classId}
+                          type="button"
+                          onClick={() => setSelectedStepperClassId(mItem.classId)}
+                          className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                            isSelectedMod
+                              ? 'bg-sky-50 border-sky-400 ring-1 ring-sky-400/30'
+                              : 'bg-slate-50/80 border-slate-200 hover:border-slate-300'
+                          }`}
                         >
-                          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                          <XAxis
-                            dataKey="modulo"
-                            tick={{ fontSize: 11, fill: '#334155', fontWeight: 700 }}
-                          />
-                          <YAxis
-                            domain={[0, 5]}
-                            ticks={[0, 1, 2, 3, 4, 5]}
-                            tick={{ fontSize: 11, fill: '#475569' }}
-                          />
-                          <Tooltip
-                            formatter={(value: number, name: string) => [
-                              `${Number(value || 0).toFixed(2)} / 5.0`,
-                              name
-                            ]}
-                            labelFormatter={(label, payload) => {
-                              const item = payload?.[0]?.payload;
-                              return item
-                                ? `${item.modulo} — ${item.nombreModulo}`
-                                : `Módulo ${label}`;
-                            }}
-                            contentStyle={{
-                              backgroundColor: '#ffffff',
-                              borderColor: '#cbd5e1',
-                              borderRadius: '12px',
-                              fontSize: '12px',
-                              boxShadow: '0 4px 12px rgba(15, 23, 42, 0.08)'
-                            }}
-                          />
-                          <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '6px' }} />
-                          <ReferenceLine
-                            y={minPass}
-                            stroke="#ef4444"
-                            strokeDasharray="4 4"
-                            label={{
-                              value: `Mín. ${minPass.toFixed(1)}`,
-                              position: 'insideTopRight',
-                              fill: '#dc2626',
-                              fontSize: 10
-                            }}
-                          />
-                          <Bar
-                            dataKey="notaModulo"
-                            name="Nota del Módulo"
-                            fill="#0284c7"
-                            radius={[6, 6, 0, 0]}
-                            maxBarSize={34}
-                          />
-                          <Bar
-                            dataKey="notaExamen"
-                            name="Examen del Módulo"
-                            fill="#4f46e5"
-                            radius={[6, 6, 0, 0]}
-                            maxBarSize={28}
-                          />
-                          <Bar
-                            dataKey="notaPracticaReto"
-                            name="Trabajo / Mini Reto"
-                            fill="#10b981"
-                            radius={[6, 6, 0, 0]}
-                            maxBarSize={28}
-                          />
-                        </BarChart>
-                      </ResponsiveContainer>
-                    </div>
+                          <div className="flex items-center justify-between gap-1">
+                            <span className="font-mono text-[11px] font-bold text-slate-900">
+                              {mItem.modulo}
+                            </span>
+                            <span
+                              className={`font-mono text-[11px] font-extrabold ${
+                                mItem.notaModulo === 0
+                                  ? 'text-slate-400'
+                                  : isPassing
+                                  ? 'text-emerald-700'
+                                  : 'text-amber-700'
+                              }`}
+                            >
+                              {mItem.notaModulo > 0 ? mItem.notaModulo.toFixed(1) : '—'}
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-slate-500 truncate mt-0.5">
+                            {mItem.nombreModulo}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
 
-                    {/* Tarjetas rápidas por módulo debajo de la gráfica */}
-                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2 pt-1">
-                      {moduleGradesBarData.map((mItem) => {
-                        const isSelectedMod = selectedStepperClassId === mItem.classId;
-                        const isPassing = mItem.notaModulo >= minPass;
+                {/* 4. MÓDULO ACTIVO EN CURSO Y ACCIONES DIRECTAS */}
+                <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-4 shadow-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
+                    <div className="text-xs text-slate-500 font-mono">
+                      <span>Módulo Activo Seleccionado</span>
+                      <span aria-hidden="true"> · </span>
+                      <span>{activeStepSession?.code || 'C1'}</span>
+                      <span aria-hidden="true"> · </span>
+                      <span>{stepDocs.length} recurso(s) de lectura</span>
+                    </div>
+                    {/* Selector de módulo */}
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {studentClassSessions.map((cs) => {
+                        const cId = cs.id as ClassSessionId;
+                        const active = selectedStepperClassId === cId;
                         return (
                           <button
-                            key={mItem.classId}
+                            key={cId}
                             type="button"
-                            onClick={() => setSelectedStepperClassId(mItem.classId)}
-                            className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
-                              isSelectedMod
-                                ? 'bg-sky-50 border-sky-400 ring-1 ring-sky-400/30'
-                                : 'bg-slate-50/80 border-slate-200 hover:border-slate-300'
+                            onClick={() => setSelectedStepperClassId(cId)}
+                            className={`min-h-[40px] min-w-[40px] px-3 py-1.5 rounded-xl font-mono text-xs font-bold cursor-pointer active:scale-95 transition-transform ${
+                              active
+                                ? 'bg-slate-900 text-white'
+                                : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                             }`}
                           >
-                            <div className="flex items-center justify-between gap-1">
-                              <span className="font-mono text-[11px] font-bold text-slate-900">
-                                {mItem.modulo}
-                              </span>
-                              <span
-                                className={`font-mono text-[11px] font-extrabold ${
-                                  mItem.notaModulo === 0
-                                    ? 'text-slate-400'
-                                    : isPassing
-                                    ? 'text-emerald-700'
-                                    : 'text-amber-700'
-                                }`}
-                              >
-                                {mItem.notaModulo > 0 ? mItem.notaModulo.toFixed(1) : '—'}
-                              </span>
-                            </div>
-                            <div className="text-[10px] text-slate-500 truncate mt-0.5">
-                              {mItem.nombreModulo}
-                            </div>
+                            {cs.code}
                           </button>
                         );
                       })}
                     </div>
                   </div>
 
-                  {/* APP BENTO 1: LECCIONES Y MATERIAL DE ESTUDIO */}
-                  <button
-                    type="button"
-                    onClick={() => setStudentDashboardTab('material_modulos')}
-                    className="col-span-1 sm:col-span-2 min-h-[128px] p-4 rounded-2xl border border-slate-200 bg-white hover:border-slate-400 text-left flex flex-col justify-between cursor-pointer active:scale-[0.98] transition-all"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="w-11 h-11 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center">
-                        <BookOpen className="w-5 h-5" />
-                      </div>
-                      <span className="text-xs font-mono text-slate-500 tabular-nums">
-                        {activeCourseMeta.cantidadModulos} módulos
-                      </span>
-                    </div>
-                    <div className="pt-3">
-                      <div className="text-sm font-bold text-slate-900">
-                        Lecciones y Material
-                      </div>
-                      <div className="text-xs text-slate-500">
-                        Modo lectura lineal y descargas
-                      </div>
-                    </div>
-                  </button>
+                  <div className="space-y-1">
+                    <h3 className="text-base sm:text-lg font-bold text-slate-900">
+                      {activeStepSession?.fullTitle || 'Módulo en Curso'}
+                    </h3>
+                    <p className="text-xs text-slate-600">
+                      Asistencia registrada:{' '}
+                      <strong>
+                        {stepRec?.asistenciaB1Estado === 'presente_virtual' ||
+                        stepRec?.asistenciaB1Estado === 'presente_manual'
+                          ? 'Presente (Bloque A)'
+                          : stepRec?.asistenciaB1Estado === 'falla'
+                          ? 'Falla registrada'
+                          : 'Sin registrar'}
+                      </strong>{' '}
+                      · Taller práctico:{' '}
+                      <strong>
+                        {stepRec?.trabajoCalificado
+                          ? `${stepRec.trabajoPractico.toFixed(1)} / 5.0`
+                          : stepRec?.trabajoEstado === 'pendiente_revision'
+                          ? 'En revisión docente'
+                          : 'Sin entregar'}
+                      </strong>
+                    </p>
+                  </div>
 
-                  {/* APP BENTO 2: EVALUACIONES OFICIALES */}
-                  <button
-                    type="button"
-                    onClick={() => setStudentDashboardTab('modalidades')}
-                    className="col-span-1 sm:col-span-2 min-h-[128px] p-4 rounded-2xl border border-slate-200 bg-white hover:border-slate-400 text-left flex flex-col justify-between cursor-pointer active:scale-[0.98] transition-all"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="w-11 h-11 rounded-xl bg-sky-50 text-sky-700 flex items-center justify-center">
-                        <GraduationCap className="w-5 h-5" />
+                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setStudentDashboardTab('material_modulos')}
+                      className="p-3 rounded-xl border border-slate-200 bg-slate-50 hover:bg-emerald-50 hover:border-emerald-300 text-slate-900 text-left flex items-center justify-between gap-2 cursor-pointer transition-colors"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <BookOpen className="w-4 h-4 text-emerald-600 shrink-0" />
+                        <span className="text-xs font-bold truncate">Lección {activeStepSession?.code}</span>
                       </div>
-                      <span className="text-xs font-mono text-slate-500 tabular-nums">
-                        {completedExamsCount}/{modalitiesOverview.length} listos
-                      </span>
-                    </div>
-                    <div className="pt-3">
-                      <div className="text-sm font-bold text-slate-900">
-                        Exámenes Oficiales
-                      </div>
-                      <div className="text-xs text-slate-500">
-                        Presentar examen o ensayo cero
-                      </div>
-                    </div>
-                  </button>
+                      <ArrowRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                    </button>
 
-                  {/* APP BENTO 3: MINI RETOS E INSIGNIAS */}
-                  <button
-                    type="button"
-                    onClick={() => setStudentDashboardTab('mini_retos')}
-                    className="col-span-1 sm:col-span-2 min-h-[128px] p-4 rounded-2xl border border-slate-200 bg-white hover:border-slate-400 text-left flex flex-col justify-between cursor-pointer active:scale-[0.98] transition-all"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="w-11 h-11 rounded-xl bg-amber-50 text-amber-700 flex items-center justify-center">
-                        <Trophy className="w-5 h-5" />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (stepId <= 5) {
+                          setSelectedRetoModuloJump(stepId as 1 | 2 | 3 | 4 | 5);
+                        }
+                        setStudentDashboardTab('mini_retos');
+                      }}
+                      className="p-3 rounded-xl border border-slate-200 bg-slate-50 hover:bg-amber-50 hover:border-amber-300 text-slate-900 text-left flex items-center justify-between gap-2 cursor-pointer transition-colors"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <Trophy className="w-4 h-4 text-amber-600 shrink-0" />
+                        <span className="text-xs font-bold truncate">Reto {activeStepSession?.code}</span>
                       </div>
-                      <span className="text-xs font-mono text-slate-500 tabular-nums">
-                        {unlockedBadgesCount}/{totalCourseModulesCount} insignias
-                      </span>
-                    </div>
-                    <div className="pt-3">
-                      <div className="text-sm font-bold text-slate-900">
-                        Mini Retos e Insignias
-                      </div>
-                      <div className="text-xs text-slate-500">
-                        Práctica gamificada por módulo
-                      </div>
-                    </div>
-                  </button>
+                      <ArrowRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                    </button>
 
-                  {/* APP BENTO 4: EXPEDIENTE, SIMULADOR DE NOTA Y BOLETÍN PDF */}
-                  <button
-                    type="button"
-                    onClick={() => setStudentDashboardTab('notas_asistencia_clases')}
-                    className="col-span-1 sm:col-span-2 min-h-[128px] p-4 rounded-2xl border border-slate-200 bg-white hover:border-slate-400 text-left flex flex-col justify-between cursor-pointer active:scale-[0.98] transition-all"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="w-11 h-11 rounded-xl bg-indigo-50 text-indigo-700 flex items-center justify-center">
-                        <BarChart3 className="w-5 h-5" />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedModality(stepExamMod);
+                        setStudentDashboardTab('modalidades');
+                      }}
+                      className="p-3 rounded-xl border border-slate-200 bg-slate-50 hover:bg-sky-50 hover:border-sky-300 text-slate-900 text-left flex items-center justify-between gap-2 cursor-pointer transition-colors"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <GraduationCap className="w-4 h-4 text-sky-600 shrink-0" />
+                        <span className="text-xs font-bold truncate">Examen {activeStepSession?.code}</span>
                       </div>
-                      <span className="text-xs font-mono text-slate-500 tabular-nums">
-                        Máx: {studentBestOverallGrade.toFixed(1)} / 5.0
-                      </span>
-                    </div>
-                    <div className="pt-3">
-                      <div className="text-sm font-bold text-slate-900">
-                        Expediente y Simulador
+                      <ArrowRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSheetClassId(stepId);
+                        setSheetWorkText(stepRec?.trabajoEntregaTexto || '');
+                        setSheetWorkLink(stepRec?.trabajoEntregaEnlace || '');
+                        setSheetNotice(null);
+                        setStudentBottomSheet('entregar_trabajo');
+                      }}
+                      className="p-3 rounded-xl border border-slate-200 bg-slate-50 hover:bg-cyan-50 hover:border-cyan-300 text-slate-900 text-left flex items-center justify-between gap-2 cursor-pointer transition-colors"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <FileCheck2 className="w-4 h-4 text-cyan-600 shrink-0" />
+                        <span className="text-xs font-bold truncate">Entregar Taller</span>
                       </div>
-                      <div className="text-xs text-slate-500">
-                        Notas C1–C6, asistencia y PDF
-                      </div>
-                    </div>
-                  </button>
+                      <ArrowRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                    </button>
+                  </div>
                 </div>
               </div>
-            ) : null}
+            );
+          })()}
 
         {/* ================= SUB-VISTA: MODIFICAR MIS DATOS ================= */}
         {studentDashboardTab === 'modificar_datos' && (
@@ -5935,79 +6103,6 @@ export function StudentPortal({
             }}
           />
         )}
-          </div>
-
-          {/* COLUMNA 3 (INSPECTOR CONTEXTUAL DERECHO EN DESKTOP): ESTADO EN VIVO Y ACCIONES RÁPIDAS */}
-          {studentDashboardTab === 'inicio' && (
-            <aside className="hidden lg:block lg:col-span-3 bg-white border border-slate-200 rounded-2xl p-5 space-y-5 sticky top-4">
-              <div className="space-y-1 border-b border-slate-100 pb-3">
-                <div className="text-xs font-mono text-slate-500">
-                  ID: {currentStudent.id}
-                </div>
-                <div className="text-sm font-bold text-slate-900 truncate">
-                  {currentStudent.nombre}
-                </div>
-              </div>
-
-              <div className="space-y-3 text-xs">
-                <div className="flex items-center justify-between py-1.5 border-b border-slate-100">
-                  <span className="text-slate-500">Nota Más Alta</span>
-                  <span className="font-mono font-bold text-slate-900 tabular-nums">
-                    {studentBestOverallGrade.toFixed(1)} / 5.0
-                  </span>
-                </div>
-                <div className="flex items-center justify-between py-1.5 border-b border-slate-100">
-                  <span className="text-slate-500">Exámenes Realizados</span>
-                  <span className="font-mono font-bold text-slate-900 tabular-nums">
-                    {completedExamsCount} / {modalitiesOverview.length}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between py-1.5 border-b border-slate-100">
-                  <span className="text-slate-500">Insignias Ganadas</span>
-                  <span className="font-mono font-bold text-slate-900 tabular-nums">
-                    {unlockedBadgesCount} / {totalCourseModulesCount}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between py-1.5">
-                  <span className="text-slate-500">Mínimo Aprobatorio</span>
-                  <span className="font-mono font-bold text-slate-900 tabular-nums">
-                    {minPass.toFixed(1)} / 5.0
-                  </span>
-                </div>
-              </div>
-
-              <div className="space-y-2 pt-2 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSheetClassId(selectedStepperClassId);
-                    const existingW =
-                      currentStudentAcademicRecord.clases[selectedStepperClassId];
-                    setSheetWorkText(existingW?.trabajoEntregaTexto || '');
-                    setSheetWorkLink(existingW?.trabajoEntregaEnlace || '');
-                    setSheetNotice(null);
-                    setStudentBottomSheet('entregar_trabajo');
-                  }}
-                  className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold cursor-pointer active:scale-95 transition-transform"
-                >
-                  Entregar Trabajo Práctico
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSheetClassId(selectedStepperClassId);
-                    setSheetExcuseReason('');
-                    setSheetExcuseUrl('');
-                    setSheetNotice(null);
-                    setStudentBottomSheet('justificar_falla');
-                  }}
-                  className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 text-xs font-bold cursor-pointer active:scale-95 transition-transform"
-                >
-                  Solicitar Excusa de Falla
-                </button>
-              </div>
-            </aside>
-          )}
         </div>
 
         {/* BOTTOM SHEETS DESLIZABLES (HOJAS INFERIORES TÁCTILES PARA ENTREGA DE TRABAJO, EXCUSA Y PERFIL) */}

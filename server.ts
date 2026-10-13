@@ -276,37 +276,84 @@ function loadCentralDbFromDisk(): CentralDatabaseState {
       const raw = fs.readFileSync(CENTRAL_DB_PATH, 'utf-8');
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === 'object') {
-        if (parsed.emptyInitialV3Reset === true) {
-          return parseRawDbObject(parsed);
-        }
-        previousRevision = Math.max(100, (Number(parsed.revision) || 1) + 50);
+        // SEGURO ANTI-REINICIO: Si el archivo ya existe en disco, se cargan siempre los datos existentes
+        // respetando todos los cursos creados, nóminas, bancos de preguntas y configuraciones del Editor.
+        return parseRawDbObject(parsed);
       }
     }
   } catch (err) {
-    console.error('Error loading central DB from disk, initializing defaults:', err);
+    console.error('Error loading central DB from disk, inspecting modular shards:', err);
+  }
+
+  // Si no existe CENTRAL_DB_PATH, intentar recuperar de los shards modulares existentes antes de inicializar vacío
+  let shardConfig = DEFAULT_SERVER_CONFIG;
+  let shardStudents: StudentRecord[] = [];
+  let shardQuestions: Question[] = [];
+  let shardDataset: AcademicDataset = buildInitialAcademicDataset([]);
+  let shardAttempts: ExamAttemptResult[] = [];
+  let hasRecoveredShards = false;
+
+  try {
+    if (fs.existsSync(SHARDS.COURSES_CONFIG)) {
+      const parsedCfg = JSON.parse(fs.readFileSync(SHARDS.COURSES_CONFIG, 'utf-8'));
+      if (parsedCfg && typeof parsedCfg === 'object') {
+        shardConfig = { ...DEFAULT_SERVER_CONFIG, ...parsedCfg };
+        hasRecoveredShards = true;
+      }
+    }
+    if (fs.existsSync(SHARDS.STUDENTS)) {
+      const parsedSt = JSON.parse(fs.readFileSync(SHARDS.STUDENTS, 'utf-8'));
+      if (Array.isArray(parsedSt) && parsedSt.length > 0) {
+        shardStudents = parsedSt;
+        hasRecoveredShards = true;
+      }
+    }
+    if (fs.existsSync(SHARDS.QUESTIONS)) {
+      const parsedQ = JSON.parse(fs.readFileSync(SHARDS.QUESTIONS, 'utf-8'));
+      if (Array.isArray(parsedQ) && parsedQ.length > 0) {
+        shardQuestions = normalizeQuestionList(parsedQ);
+        hasRecoveredShards = true;
+      }
+    }
+    if (fs.existsSync(SHARDS.ACADEMIC_DATASET)) {
+      const parsedAc = JSON.parse(fs.readFileSync(SHARDS.ACADEMIC_DATASET, 'utf-8'));
+      if (parsedAc && typeof parsedAc === 'object') {
+        shardDataset = parsedAc;
+        hasRecoveredShards = true;
+      }
+    }
+    if (fs.existsSync(SHARDS.ATTEMPTS)) {
+      const parsedAtt = JSON.parse(fs.readFileSync(SHARDS.ATTEMPTS, 'utf-8'));
+      if (Array.isArray(parsedAtt)) {
+        shardAttempts = parsedAtt;
+      }
+    }
+  } catch (shardErr) {
+    console.warn('Advertencia al inspeccionar shards:', shardErr);
   }
 
   const initialDb: CentralDatabaseState = {
     initialized: true,
     migratedFromClient: true,
-    emptyInitialV3Reset: true,
+    emptyInitialV3Reset: !hasRecoveredShards,
     revision: previousRevision,
     questionsRevision: previousRevision,
     lastModifiedIso: new Date().toISOString(),
-    questionsBankExplicitlyCleared: true,
-    studentsExplicitlyCleared: true,
-    students: [],
-    questions: [],
-    attempts: [],
+    questionsBankExplicitlyCleared: shardQuestions.length === 0,
+    studentsExplicitlyCleared: shardStudents.length === 0,
+    students: shardStudents,
+    questions: shardQuestions,
+    attempts: shardAttempts,
     abproEvaluations: [],
     liveSessions: [],
-    config: DEFAULT_SERVER_CONFIG,
+    config: shardConfig,
     customMiniRetos: [],
     activeExamsByStudent: {},
-    academicDataset: buildInitialAcademicDataset([])
+    academicDataset: normalizeAndSyncAcademicDataset(shardDataset, shardStudents)
   };
-  saveCentralDbToDisk(initialDb, 'AutoSync', 'Inicialización local vacía por defecto v3', {
-    includeQuestions: true,
+
+  saveCentralDbToDisk(initialDb, 'AutoSync', 'Inicialización protegida con persistencia segura', {
+    includeQuestions: shardQuestions.length > 0,
     syncCloud: true
   });
   return initialDb;
