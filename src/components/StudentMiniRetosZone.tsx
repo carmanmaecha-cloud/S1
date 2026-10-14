@@ -170,10 +170,12 @@ export function StudentMiniRetosZone({
 }: StudentMiniRetosZoneProps) {
   const { handleExecuteServerSave } = useServerSave();
   const [selectedModulo, setSelectedModulo] = useState<1 | 2 | 3 | 4 | 5>(initialModulo || 1);
+  const [selectedRetoIndex, setSelectedRetoIndex] = useState<number>(1);
 
   useEffect(() => {
     if (initialModulo && initialModulo >= 1 && initialModulo <= 5) {
       setSelectedModulo(initialModulo);
+      setSelectedRetoIndex(1);
     }
   }, [initialModulo]);
   const [selectedMechanicFilter, setSelectedMechanicFilter] = useState<
@@ -278,10 +280,102 @@ export function StudentMiniRetosZone({
     [config]
   );
 
-  // Count unlocked badges
+  // Helper to extract specific progress for any individual badge / reto
+  const getRetoBadgeProgress = useCallback(
+    (b: OfficialBadgeDefinition): StudentRetoModuleProgress => {
+      const defaults = getDefaultRetoProgress();
+      const baseDefault = defaults[b.modulo] || defaults[1];
+      const rawProg = student?.progresoRetos as Record<string, any> | undefined;
+      if (!rawProg || typeof rawProg !== 'object') return baseDefault;
+
+      const specificKey = b.badgeKey || `m${b.realModuloId || b.modulo}_r${b.retoIndexInModule || 1}`;
+      if (rawProg[specificKey] && typeof rawProg[specificKey] === 'object') {
+        return { ...baseDefault, ...rawProg[specificKey] };
+      }
+      const altKey = `${b.realModuloId || b.modulo}_r${b.retoIndexInModule || 1}`;
+      if (rawProg[altKey] && typeof rawProg[altKey] === 'object') {
+        return { ...baseDefault, ...rawProg[altKey] };
+      }
+      if ((b.retoIndexInModule ?? 1) === 1 && rawProg[b.modulo] && typeof rawProg[b.modulo] === 'object') {
+        return { ...baseDefault, ...rawProg[b.modulo] };
+      }
+      return baseDefault;
+    },
+    [student?.progresoRetos]
+  );
+
+  // Group badges by distinct course modules
+  const courseDistinctModules = useMemo(() => {
+    const map = new Map<
+      number,
+      {
+        modId: 1 | 2 | 3 | 4 | 5;
+        shortTitle: string;
+        fullTitle: string;
+        retosCount: number;
+        badges: OfficialBadgeDefinition[];
+        allPassed: boolean;
+        anySuspended: boolean;
+        bestScore: number;
+        conqueredCount: number;
+      }
+    >();
+
+    effectiveCourseBadges.forEach((b) => {
+      const mId = (b.realModuloId || b.modulo) as 1 | 2 | 3 | 4 | 5;
+      const prog = getRetoBadgeProgress(b);
+      const isWon = Boolean(prog.insigniaDesbloqueada);
+      const isSusp = Boolean(prog.suspendidoPorTrampa);
+      const score = Number(prog.mejorPorcentaje) || 0;
+
+      const existing = map.get(mId);
+      if (!existing) {
+        map.set(mId, {
+          modId: mId,
+          shortTitle: (b.tituloPrincipal || '').split('·')[0].trim() || `Módulo ${mId}`,
+          fullTitle: b.subtitulo || `Módulo ${mId}`,
+          retosCount: b.retosCountInModule || 1,
+          badges: [b],
+          allPassed: isWon,
+          anySuspended: isSusp,
+          bestScore: score,
+          conqueredCount: isWon ? 1 : 0
+        });
+      } else {
+        existing.badges.push(b);
+        existing.retosCount = Math.max(existing.retosCount, b.retosCountInModule || existing.badges.length);
+        if (!isWon) existing.allPassed = false;
+        if (isSusp) existing.anySuspended = true;
+        existing.bestScore = Math.max(existing.bestScore, score);
+        if (isWon) existing.conqueredCount += 1;
+      }
+    });
+
+    if (map.size === 0) {
+      ([1, 2, 3, 4, 5] as const).forEach((m) => {
+        const b = OFFICIAL_BADGES[m - 1] || OFFICIAL_BADGES[0];
+        const prog = retoProgressMap[m];
+        map.set(m, {
+          modId: m,
+          shortTitle: b.tituloPrincipal,
+          fullTitle: b.subtitulo,
+          retosCount: 1,
+          badges: [b],
+          allPassed: Boolean(prog.insigniaDesbloqueada),
+          anySuspended: Boolean(prog.suspendidoPorTrampa),
+          bestScore: prog.mejorPorcentaje || 0,
+          conqueredCount: prog.insigniaDesbloqueada ? 1 : 0
+        });
+      });
+    }
+
+    return Array.from(map.values());
+  }, [effectiveCourseBadges, getRetoBadgeProgress, retoProgressMap]);
+
+  // Count total unlocked badges in the course
   const unlockedBadgesCount = useMemo(() => {
-    return effectiveCourseBadges.filter((b) => retoProgressMap[b.modulo].insigniaDesbloqueada).length;
-  }, [retoProgressMap, effectiveCourseBadges]);
+    return effectiveCourseBadges.filter((b) => getRetoBadgeProgress(b).insigniaDesbloqueada).length;
+  }, [effectiveCourseBadges, getRetoBadgeProgress]);
 
   const allFiveUnlocked =
     effectiveCourseBadges.length > 0 && unlockedBadgesCount === effectiveCourseBadges.length;
@@ -300,21 +394,48 @@ export function StudentMiniRetosZone({
   ]);
 
   const enabledModulesForStudent = useMemo(() => {
-    return effectiveCourseBadges
-      .map((b) => b.modulo)
+    return courseDistinctModules
+      .map((m) => m.modId)
       .filter((m) => !blockedModulesForStudent.includes(m));
-  }, [effectiveCourseBadges, blockedModulesForStudent]);
+  }, [courseDistinctModules, blockedModulesForStudent]);
 
   useEffect(() => {
     if (
-      effectiveCourseBadges.length > 0 &&
-      !effectiveCourseBadges.some((b) => b.modulo === selectedModulo)
+      courseDistinctModules.length > 0 &&
+      !courseDistinctModules.some((m) => m.modId === selectedModulo)
     ) {
-      setSelectedModulo(effectiveCourseBadges[0].modulo);
+      setSelectedModulo(courseDistinctModules[0].modId);
+      setSelectedRetoIndex(1);
     }
-  }, [effectiveCourseBadges, selectedModulo]);
+  }, [courseDistinctModules, selectedModulo]);
 
   const isSelectedModuloDisabledByTeacher = blockedModulesForStudent.includes(selectedModulo);
+
+  // Badges of the currently selected module
+  const selectedModuleBadges = useMemo(() => {
+    const list = effectiveCourseBadges.filter(
+      (b) => (b.realModuloId || b.modulo) === selectedModulo
+    );
+    return list.length > 0 ? list : [OFFICIAL_BADGES[selectedModulo - 1] || OFFICIAL_BADGES[0]];
+  }, [effectiveCourseBadges, selectedModulo]);
+
+  // Active badge definition according to selectedRetoIndex
+  const currentBadgeDef = useMemo(() => {
+    return (
+      selectedModuleBadges.find((b) => (b.retoIndexInModule ?? 1) === selectedRetoIndex) ||
+      selectedModuleBadges[0] ||
+      OFFICIAL_BADGES[selectedModulo - 1] ||
+      OFFICIAL_BADGES[0]
+    );
+  }, [selectedModuleBadges, selectedRetoIndex, selectedModulo]);
+
+  const currentModProgress = useMemo(() => {
+    return getRetoBadgeProgress(currentBadgeDef);
+  }, [getRetoBadgeProgress, currentBadgeDef]);
+
+  const isModuleFullyConquered = useMemo(() => {
+    return selectedModuleBadges.every((b) => getRetoBadgeProgress(b).insigniaDesbloqueada);
+  }, [selectedModuleBadges, getRetoBadgeProgress]);
 
   // Verify access permissions (Global + Per-Student + Schedule + Suspension)
   const accessStatus = useMemo(() => {
@@ -343,10 +464,6 @@ export function StudentMiniRetosZone({
     return { allowed: true, reason: 'Disponible' };
   }, [config, student.id, student.suspendido, student.conceptoInfraccion]);
 
-  const currentModProgress = retoProgressMap[selectedModulo];
-  const currentBadgeDef =
-    effectiveCourseBadges.find((b) => b.modulo === selectedModulo) ||
-    OFFICIAL_BADGES.find((b) => b.modulo === selectedModulo)!;
   const thresholdPct = Math.max(50, Math.min(95, Number(config.umbralAprobacionMiniRetoPct) || 60));
 
   // Count words in open answer

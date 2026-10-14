@@ -13,6 +13,7 @@ export interface OfficialBadgeDefinition {
   realModuloId?: number;
   retoIndexInModule?: number;
   retosCountInModule?: number;
+  badgeKey?: string;
   shortCode?: string;
   icono: string;
   tituloPrincipal: string;
@@ -125,17 +126,15 @@ export function getEffectiveBadgesForCourse(config?: SystemConfig): OfficialBadg
       const modId = Number(mod.id) || 1;
       const retosInMod =
         typeof mod.retosCount === 'number' && !Number.isNaN(mod.retosCount)
-          ? Math.max(0, Math.min(5, mod.retosCount))
+          ? Math.max(1, Math.min(10, mod.retosCount))
           : 1;
       const modTitle = (mod.shortTitle || mod.fullTitle || '').trim() || `Módulo ${modId}`;
       const modFull = (mod.fullTitle || mod.shortTitle || '').trim() || modTitle;
       const customBadgeTitle = (mod.retoBadgeTitle || '').trim();
 
       for (let rIdx = 1; rIdx <= retosInMod; rIdx++) {
-        if (builtBadges.length >= 5) break;
         const slotIndex = builtBadges.length;
-        const slotModulo = (slotIndex + 1) as 1 | 2 | 3 | 4 | 5;
-        const styleTemplate = OFFICIAL_BADGES[slotIndex] || OFFICIAL_BADGES[0];
+        const styleTemplate = OFFICIAL_BADGES[slotIndex % OFFICIAL_BADGES.length] || OFFICIAL_BADGES[0];
         const shortCode = retosInMod > 1 ? `M${modId}·R${rIdx}` : `M${modId}`;
         const tituloPrincipal = customBadgeTitle
           ? retosInMod > 1
@@ -151,10 +150,11 @@ export function getEffectiveBadgesForCourse(config?: SystemConfig): OfficialBadg
 
         builtBadges.push({
           ...styleTemplate,
-          modulo: slotModulo,
+          modulo: (Math.min(5, Math.max(1, modId))) as 1 | 2 | 3 | 4 | 5,
           realModuloId: modId,
           retoIndexInModule: rIdx,
           retosCountInModule: retosInMod,
+          badgeKey: `m${modId}_r${rIdx}`,
           shortCode,
           tituloPrincipal,
           subtitulo,
@@ -165,7 +165,6 @@ export function getEffectiveBadgesForCourse(config?: SystemConfig): OfficialBadg
               }Módulo ${modId} (${modFull}) en el curso «${meta?.nombreCurso || 'Curso'}».`
         });
       }
-      if (builtBadges.length >= 5) break;
     }
 
     if (builtBadges.length > 0) {
@@ -173,8 +172,8 @@ export function getEffectiveBadgesForCourse(config?: SystemConfig): OfficialBadg
     }
   }
 
-  const retoCount = Math.min(5, Math.max(1, Number(meta?.cantidadRetos) || 5));
-  return OFFICIAL_BADGES.slice(0, retoCount);
+  const retoCount = Math.max(1, Number(meta?.cantidadRetos) || 5);
+  return OFFICIAL_BADGES.slice(0, Math.min(OFFICIAL_BADGES.length, retoCount));
 }
 
 export function getEffectiveSpecialDistinctionBadge(config?: SystemConfig) {

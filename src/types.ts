@@ -92,6 +92,8 @@ export interface GeneratedMiniRetoInstance {
   questionId?: string;
   sourceQuestionId: string;
   modulo: 1 | 2 | 3 | 4 | 5;
+  retoIndex?: number;
+  badgeKey?: string;
   tema: string;
   rap?: string;
   familia: MiniRetoFamily;
@@ -119,6 +121,8 @@ export interface MiniRetoAttemptRecord {
   studentId: string;
   studentName: string;
   modulo: 1 | 2 | 3 | 4 | 5;
+  retoIndex?: number;
+  badgeKey?: string;
   intentoNumero: 1 | 2 | 3;
   mecanicaId: MiniRetoMechanicId;
   mecanicaNombre: string;
