@@ -343,6 +343,8 @@ export interface StudentRecord {
   preguntasUsadasPorModalidad?: Partial<Record<ExamModality, string[]>>;
   examenesBloqueados?: ExamModality[]; // Bloqueo / Desbloqueo de Examen Por Estudiante (específico, varios o todos)
   modulosRetosBloqueados?: (1 | 2 | 3 | 4 | 5)[]; // Módulos de Mini Retos (1 al 5) deshabilitados específicamente para este estudiante
+  bloqueadoExamenesDocente?: boolean; // Bloqueo total de exámenes por el docente
+  bloqueadoRetosDocente?: boolean; // Bloqueo total de mini retos por el docente
   progresoRetos?: Partial<Record<1 | 2 | 3 | 4 | 5, StudentRetoModuleProgress>>;
   historialIntentosRetos?: MiniRetoAttemptRecord[];
   historialLlamadosAtencion?: any[];
@@ -625,8 +627,9 @@ export interface UniversalModuleDocumentLink {
 export interface UniversalModuleGradingWeights {
   comportamientoPct: number; // default: 10 (%)
   participacionPct: number; // default: 15 (%) (Sustentación / Participación)
-  examenPct: number; // default: 35 (%)
-  trabajoPct: number; // default: 40 (%) (Reto/s / Trabajo)
+  examenPct: number; // default: 30 (%)
+  retoPct?: number; // default: 5 (%) (Reto / s)
+  trabajoPct: number; // default: 40 (%) (Trabajos / Talleres)
 }
 
 export interface UniversalModuleDefinition {

@@ -52,20 +52,44 @@ const CENTRAL_DB_PATH = path.join(DATA_DIR, 'evaluaplus-central-db.json');
 const AUDIT_LOG_PATH = path.join(DATA_DIR, 'evaluaplus-save-audit.json');
 const SNAPSHOT_DB_PATH = path.join(DATA_DIR, 'evaluaplus-questions-snapshot.json');
 
-// Modular Shards for low-latency isolated persistence
+// Modular Shards for low-latency isolated persistence & indestructible editor database insurance
 const SHARDS = {
   COURSES_CONFIG: path.join(DATA_DIR, 'courses_config.json'),
   STUDENTS: path.join(DATA_DIR, 'students.json'),
   QUESTIONS: path.join(DATA_DIR, 'questions.json'),
   ACADEMIC_DATASET: path.join(DATA_DIR, 'academic_dataset.json'),
-  ATTEMPTS: path.join(DATA_DIR, 'attempts.json')
+  ATTEMPTS: path.join(DATA_DIR, 'attempts.json'),
+  EDITOR_ROSTERS: path.join(DATA_DIR, 'editor_roster_databases.json'),
+  EDITOR_QUESTION_BANKS: path.join(DATA_DIR, 'editor_question_banks.json'),
+  COURSES_CATALOG: path.join(DATA_DIR, 'courses_catalog.json'),
+  REGISTERED_TEACHERS: path.join(DATA_DIR, 'registered_teachers.json')
 };
 
 function saveShardToDisk(filePath: string, data: unknown): void {
   try {
     ensureDataDir();
+    // Seguro automático: generar copia de respaldo previa (.backup)
+    if (fs.existsSync(filePath)) {
+      try {
+        fs.copyFileSync(filePath, `${filePath}.backup`);
+      } catch {
+        // ignore backup copy failure
+      }
+      // Candado estricto anti-vaciado accidental: si llega un array vacío pero el shard en disco tenía elementos, proteger los existentes
+      if (Array.isArray(data) && data.length === 0) {
+        try {
+          const existing = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+          if (Array.isArray(existing) && existing.length > 0) {
+            console.log(`[Seguro Anti-Reseteo] Conservando ${existing.length} elementos en ${path.basename(filePath)} contra vaciado accidental.`);
+            return;
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
     const tmp = `${filePath}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(data), 'utf-8');
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf-8');
     fs.renameSync(tmp, filePath);
   } catch (err) {
     console.error(`Error saving shard ${path.basename(filePath)}:`, err);
@@ -221,10 +245,9 @@ function ensureDataDir() {
 ensureDataDir();
 
 function parseRawDbObject(parsed: any): CentralDatabaseState {
-  const explicitlyCleared = Boolean(parsed.questionsBankExplicitlyCleared ?? true);
-  const studentsExplicitlyCleared = Boolean(
-    parsed.studentsExplicitlyCleared ?? true
-  );
+  // SEGURO ESTRICTO: Solo es explícitamente limpiado si viene estrictamente boolean true
+  const explicitlyCleared = Boolean(parsed.questionsBankExplicitlyCleared === true);
+  const studentsExplicitlyCleared = Boolean(parsed.studentsExplicitlyCleared === true);
   const loadedQuestions = Array.isArray(parsed.questions)
     ? parsed.questions.length > 0
       ? normalizeQuestionList(parsed.questions)
@@ -235,7 +258,22 @@ function parseRawDbObject(parsed: any): CentralDatabaseState {
     ? parsed.students
     : [];
   const rawAttempts: ExamAttemptResult[] = Array.isArray(parsed.attempts) ? parsed.attempts : [];
-  const mergedConfig: SystemConfig = { ...DEFAULT_SERVER_CONFIG, ...(parsed.config || {}) };
+  const mergedConfig: SystemConfig = {
+    ...DEFAULT_SERVER_CONFIG,
+    ...(parsed.config || {}),
+    studentRosterDatabases: Array.isArray(parsed.config?.studentRosterDatabases)
+      ? parsed.config.studentRosterDatabases
+      : [],
+    questionBankDatabases: Array.isArray(parsed.config?.questionBankDatabases)
+      ? parsed.config.questionBankDatabases
+      : [],
+    universalCoursesCatalog: Array.isArray(parsed.config?.universalCoursesCatalog)
+      ? parsed.config.universalCoursesCatalog
+      : [],
+    registeredTeachers: Array.isArray(parsed.config?.registeredTeachers)
+      ? parsed.config.registeredTeachers
+      : []
+  };
   const enrichedStudents = enrichStudentsWithServerSummary(
     rawStudents,
     rawAttempts,
@@ -245,7 +283,7 @@ function parseRawDbObject(parsed: any): CentralDatabaseState {
   return {
     initialized: true,
     migratedFromClient: Boolean(parsed.migratedFromClient ?? true),
-    emptyInitialV3Reset: Boolean(parsed.emptyInitialV3Reset),
+    emptyInitialV3Reset: false,
     revision: Number(parsed.revision) || 1,
     questionsRevision: Number(parsed.questionsRevision) || 1,
     lastModifiedIso: parsed.lastModifiedIso || new Date().toISOString(),
@@ -270,92 +308,155 @@ function parseRawDbObject(parsed: any): CentralDatabaseState {
 
 function loadCentralDbFromDisk(): CentralDatabaseState {
   ensureDataDir();
-  let previousRevision = 100;
+  let candidateDb: CentralDatabaseState | null = null;
+
+  // 1. Intentar cargar desde CENTRAL_DB_PATH
   try {
     if (fs.existsSync(CENTRAL_DB_PATH)) {
       const raw = fs.readFileSync(CENTRAL_DB_PATH, 'utf-8');
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === 'object') {
-        // SEGURO ANTI-REINICIO: Si el archivo ya existe en disco, se cargan siempre los datos existentes
-        // respetando todos los cursos creados, nóminas, bancos de preguntas y configuraciones del Editor.
-        return parseRawDbObject(parsed);
+        candidateDb = parseRawDbObject(parsed);
       }
     }
   } catch (err) {
-    console.error('Error loading central DB from disk, inspecting modular shards:', err);
+    console.error('Error loading central DB from disk, inspecting backup:', err);
+    try {
+      const backupPath = `${CENTRAL_DB_PATH}.backup`;
+      if (fs.existsSync(backupPath)) {
+        const rawBkp = fs.readFileSync(backupPath, 'utf-8');
+        const parsedBkp = JSON.parse(rawBkp);
+        if (parsedBkp && typeof parsedBkp === 'object') {
+          candidateDb = parseRawDbObject(parsedBkp);
+          console.log('✓ Estado recuperado con éxito desde copia de respaldo .backup');
+        }
+      }
+    } catch {
+      // ignore
+    }
   }
 
-  // Si no existe CENTRAL_DB_PATH, intentar recuperar de los shards modulares existentes antes de inicializar vacío
-  let shardConfig = DEFAULT_SERVER_CONFIG;
+  // 2. SEGURO ANTI-REINICIO: Inspeccionar shards modulares del Editor para que NUNCA se pierda nada
+  let shardRosters: StudentRosterDatabaseEntry[] = [];
+  let shardQuestionBanks: QuestionBankDatabaseEntry[] = [];
+  let shardCatalog: UniversalCourseWorkspace[] = [];
+  let shardTeachers: TeacherAccountRecord[] = [];
   let shardStudents: StudentRecord[] = [];
   let shardQuestions: Question[] = [];
   let shardDataset: AcademicDataset = buildInitialAcademicDataset([]);
   let shardAttempts: ExamAttemptResult[] = [];
-  let hasRecoveredShards = false;
+  let shardConfig = candidateDb?.config || DEFAULT_SERVER_CONFIG;
 
   try {
+    if (fs.existsSync(SHARDS.EDITOR_ROSTERS)) {
+      const p = JSON.parse(fs.readFileSync(SHARDS.EDITOR_ROSTERS, 'utf-8'));
+      if (Array.isArray(p) && p.length > 0) shardRosters = p;
+    }
+    if (fs.existsSync(SHARDS.EDITOR_QUESTION_BANKS)) {
+      const p = JSON.parse(fs.readFileSync(SHARDS.EDITOR_QUESTION_BANKS, 'utf-8'));
+      if (Array.isArray(p) && p.length > 0) shardQuestionBanks = p;
+    }
+    if (fs.existsSync(SHARDS.COURSES_CATALOG)) {
+      const p = JSON.parse(fs.readFileSync(SHARDS.COURSES_CATALOG, 'utf-8'));
+      if (Array.isArray(p) && p.length > 0) shardCatalog = p;
+    }
+    if (fs.existsSync(SHARDS.REGISTERED_TEACHERS)) {
+      const p = JSON.parse(fs.readFileSync(SHARDS.REGISTERED_TEACHERS, 'utf-8'));
+      if (Array.isArray(p) && p.length > 0) shardTeachers = p;
+    }
     if (fs.existsSync(SHARDS.COURSES_CONFIG)) {
-      const parsedCfg = JSON.parse(fs.readFileSync(SHARDS.COURSES_CONFIG, 'utf-8'));
-      if (parsedCfg && typeof parsedCfg === 'object') {
-        shardConfig = { ...DEFAULT_SERVER_CONFIG, ...parsedCfg };
-        hasRecoveredShards = true;
-      }
+      const p = JSON.parse(fs.readFileSync(SHARDS.COURSES_CONFIG, 'utf-8'));
+      if (p && typeof p === 'object') shardConfig = { ...DEFAULT_SERVER_CONFIG, ...p };
     }
     if (fs.existsSync(SHARDS.STUDENTS)) {
-      const parsedSt = JSON.parse(fs.readFileSync(SHARDS.STUDENTS, 'utf-8'));
-      if (Array.isArray(parsedSt) && parsedSt.length > 0) {
-        shardStudents = parsedSt;
-        hasRecoveredShards = true;
-      }
+      const p = JSON.parse(fs.readFileSync(SHARDS.STUDENTS, 'utf-8'));
+      if (Array.isArray(p) && p.length > 0) shardStudents = p;
     }
     if (fs.existsSync(SHARDS.QUESTIONS)) {
-      const parsedQ = JSON.parse(fs.readFileSync(SHARDS.QUESTIONS, 'utf-8'));
-      if (Array.isArray(parsedQ) && parsedQ.length > 0) {
-        shardQuestions = normalizeQuestionList(parsedQ);
-        hasRecoveredShards = true;
-      }
+      const p = JSON.parse(fs.readFileSync(SHARDS.QUESTIONS, 'utf-8'));
+      if (Array.isArray(p) && p.length > 0) shardQuestions = normalizeQuestionList(p);
     }
     if (fs.existsSync(SHARDS.ACADEMIC_DATASET)) {
-      const parsedAc = JSON.parse(fs.readFileSync(SHARDS.ACADEMIC_DATASET, 'utf-8'));
-      if (parsedAc && typeof parsedAc === 'object') {
-        shardDataset = parsedAc;
-        hasRecoveredShards = true;
-      }
+      const p = JSON.parse(fs.readFileSync(SHARDS.ACADEMIC_DATASET, 'utf-8'));
+      if (p && typeof p === 'object') shardDataset = p;
     }
     if (fs.existsSync(SHARDS.ATTEMPTS)) {
-      const parsedAtt = JSON.parse(fs.readFileSync(SHARDS.ATTEMPTS, 'utf-8'));
-      if (Array.isArray(parsedAtt)) {
-        shardAttempts = parsedAtt;
-      }
+      const p = JSON.parse(fs.readFileSync(SHARDS.ATTEMPTS, 'utf-8'));
+      if (Array.isArray(p)) shardAttempts = p;
     }
   } catch (shardErr) {
     console.warn('Advertencia al inspeccionar shards:', shardErr);
   }
 
+  // 3. FUSIÓN Y CONSOLIDACIÓN BLINDADA (CANDADO ANTI-RESETEO DEL EDITOR):
+  // Combinar por identificadores únicos para que NUNCA se descarte ninguna base de datos del editor
+  const rosterMap = new Map<string, StudentRosterDatabaseEntry>();
+  (shardRosters || []).forEach((r) => { if (r && r.id) rosterMap.set(r.id, r); });
+  (candidateDb?.config?.studentRosterDatabases || []).forEach((r) => { if (r && r.id) rosterMap.set(r.id, r); });
+  const mergedRosters = Array.from(rosterMap.values());
+
+  const bankMap = new Map<string, QuestionBankDatabaseEntry>();
+  (shardQuestionBanks || []).forEach((b) => { if (b && b.id) bankMap.set(b.id, b); });
+  (candidateDb?.config?.questionBankDatabases || []).forEach((b) => { if (b && b.id) bankMap.set(b.id, b); });
+  const mergedBanks = Array.from(bankMap.values());
+
+  const catalogMap = new Map<string, UniversalCourseWorkspace>();
+  (shardCatalog || []).forEach((c) => { if (c && c.meta?.courseId) catalogMap.set(c.meta.courseId, c); });
+  (candidateDb?.config?.universalCoursesCatalog || []).forEach((c) => { if (c && c.meta?.courseId) catalogMap.set(c.meta.courseId, c); });
+  const mergedCatalog = Array.from(catalogMap.values());
+
+  const teacherMap = new Map<string, TeacherAccountRecord>();
+  (shardTeachers || []).forEach((t) => { if (t && t.id) teacherMap.set(t.id, t); });
+  (candidateDb?.config?.registeredTeachers || []).forEach((t) => { if (t && t.id) teacherMap.set(t.id, t); });
+  const mergedTeachers = Array.from(teacherMap.values());
+
+  if (candidateDb) {
+    candidateDb.config = {
+      ...candidateDb.config,
+      studentRosterDatabases: mergedRosters,
+      questionBankDatabases: mergedBanks,
+      universalCoursesCatalog: mergedCatalog,
+      registeredTeachers: mergedTeachers
+    };
+
+    if (candidateDb.students.length === 0 && shardStudents.length > 0) {
+      candidateDb.students = shardStudents;
+    }
+    if (candidateDb.questions.length === 0 && shardQuestions.length > 0) {
+      candidateDb.questions = shardQuestions;
+    }
+
+    return candidateDb;
+  }
+
+  // 4. Si no existía base central previa, construir con lo que esté en los shards modulares
   const initialDb: CentralDatabaseState = {
     initialized: true,
     migratedFromClient: true,
-    emptyInitialV3Reset: !hasRecoveredShards,
-    revision: previousRevision,
-    questionsRevision: previousRevision,
+    emptyInitialV3Reset: false,
+    revision: 100,
+    questionsRevision: 100,
     lastModifiedIso: new Date().toISOString(),
-    questionsBankExplicitlyCleared: shardQuestions.length === 0,
-    studentsExplicitlyCleared: shardStudents.length === 0,
+    questionsBankExplicitlyCleared: false,
+    studentsExplicitlyCleared: false,
     students: shardStudents,
     questions: shardQuestions,
     attempts: shardAttempts,
     abproEvaluations: [],
     liveSessions: [],
-    config: shardConfig,
+    config: {
+      ...shardConfig,
+      studentRosterDatabases: mergedRosters,
+      questionBankDatabases: mergedBanks,
+      universalCoursesCatalog: mergedCatalog,
+      registeredTeachers: mergedTeachers
+    },
     customMiniRetos: [],
     activeExamsByStudent: {},
     academicDataset: normalizeAndSyncAcademicDataset(shardDataset, shardStudents)
   };
 
-  saveCentralDbToDisk(initialDb, 'AutoSync', 'Inicialización protegida con persistencia segura', {
-    includeQuestions: shardQuestions.length > 0,
-    syncCloud: true
-  });
+  saveCentralDbToDisk(initialDb, 'AutoSync', 'Inicialización blindada contra reinicios');
   return initialDb;
 }
 
@@ -369,13 +470,75 @@ function saveCentralDbToDisk(
   }
 ): void {
   ensureDataDir();
-  // Always keep every student's server academic summary (completed exams, missing exams, grades, questions, retos) up-to-date in the database
+
+  // CANDADO SEGURO ANTI-BORRADO ACCIDENTAL:
+  // Si en el archivo físico existente ya había estudiantes o cursos o bancos de preguntas creados por el editor,
+  // y por alguna razón accidental llega un payload vacío sin ser un borrado explícito solicitado, conservar los existentes.
+  try {
+    if (fs.existsSync(CENTRAL_DB_PATH)) {
+      const existingRaw = JSON.parse(fs.readFileSync(CENTRAL_DB_PATH, 'utf-8'));
+      if (existingRaw && typeof existingRaw === 'object') {
+        if (
+          Array.isArray(existingRaw.students) &&
+          existingRaw.students.length > 0 &&
+          (!Array.isArray(db.students) || db.students.length === 0) &&
+          !db.studentsExplicitlyCleared
+        ) {
+          db.students = existingRaw.students;
+        }
+        if (
+          Array.isArray(existingRaw.questions) &&
+          existingRaw.questions.length > 0 &&
+          (!Array.isArray(db.questions) || db.questions.length === 0) &&
+          !db.questionsBankExplicitlyCleared
+        ) {
+          db.questions = existingRaw.questions;
+        }
+        // Proteger colecciones del Editor
+        const prevCfg = existingRaw.config || {};
+        if (
+          Array.isArray(prevCfg.studentRosterDatabases) &&
+          prevCfg.studentRosterDatabases.length > 0 &&
+          (!Array.isArray(db.config?.studentRosterDatabases) || db.config.studentRosterDatabases.length === 0)
+        ) {
+          db.config.studentRosterDatabases = prevCfg.studentRosterDatabases;
+        }
+        if (
+          Array.isArray(prevCfg.questionBankDatabases) &&
+          prevCfg.questionBankDatabases.length > 0 &&
+          (!Array.isArray(db.config?.questionBankDatabases) || db.config.questionBankDatabases.length === 0)
+        ) {
+          db.config.questionBankDatabases = prevCfg.questionBankDatabases;
+        }
+        if (
+          Array.isArray(prevCfg.universalCoursesCatalog) &&
+          prevCfg.universalCoursesCatalog.length > 0 &&
+          (!Array.isArray(db.config?.universalCoursesCatalog) || db.config.universalCoursesCatalog.length === 0)
+        ) {
+          db.config.universalCoursesCatalog = prevCfg.universalCoursesCatalog;
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  // Generar copia de respaldo física (.backup) antes de cada sobrescritura
+  try {
+    if (fs.existsSync(CENTRAL_DB_PATH)) {
+      fs.copyFileSync(CENTRAL_DB_PATH, `${CENTRAL_DB_PATH}.backup`);
+    }
+  } catch {
+    // ignore
+  }
+
+  // Always keep every student's server academic summary up-to-date
   db.students = enrichStudentsWithServerSummary(
     db.students,
     db.attempts,
     db.config?.notaMinimaAprobacion ?? 3.0
   );
-  const serialized = JSON.stringify(db);
+  const serialized = JSON.stringify(db, null, 2);
   try {
     const tmpPath = `${CENTRAL_DB_PATH}.tmp`;
     fs.writeFileSync(tmpPath, serialized, 'utf-8');
@@ -384,11 +547,25 @@ function saveCentralDbToDisk(
     console.error('Error saving central DB to disk:', err);
   }
 
-  // Persist modular shards asynchronously / safely for granular isolation
+  // Persistir shards modulares inmediatamente
   try {
-    if (db.config) saveShardToDisk(SHARDS.COURSES_CONFIG, db.config);
+    if (db.config) {
+      saveShardToDisk(SHARDS.COURSES_CONFIG, db.config);
+      if (Array.isArray(db.config.studentRosterDatabases)) {
+        saveShardToDisk(SHARDS.EDITOR_ROSTERS, db.config.studentRosterDatabases);
+      }
+      if (Array.isArray(db.config.questionBankDatabases)) {
+        saveShardToDisk(SHARDS.EDITOR_QUESTION_BANKS, db.config.questionBankDatabases);
+      }
+      if (Array.isArray(db.config.universalCoursesCatalog)) {
+        saveShardToDisk(SHARDS.COURSES_CATALOG, db.config.universalCoursesCatalog);
+      }
+      if (Array.isArray(db.config.registeredTeachers)) {
+        saveShardToDisk(SHARDS.REGISTERED_TEACHERS, db.config.registeredTeachers);
+      }
+    }
     if (db.students) saveShardToDisk(SHARDS.STUDENTS, db.students);
-    if (options.includeQuestions && db.questions) {
+    if ((options.includeQuestions || (db.questions && db.questions.length > 0)) && db.questions) {
       saveShardToDisk(SHARDS.QUESTIONS, db.questions);
     }
     if (db.academicDataset) saveShardToDisk(SHARDS.ACADEMIC_DATASET, db.academicDataset);
@@ -470,9 +647,240 @@ function saveQuestionsSnapshotToDisk(snapshot: Question[] | null): void {
   }
 }
 
+/**
+ * CRITICAL BACKEND PERSISTENCE RECONCILIATION:
+ * Compara las marcas de tiempo (timestamps) de los archivos locales de base de datos
+ * con los registros autoritativos en Firestore.
+ * Si un archivo local está vacío, no existe o fue recién creado (o si Firestore tiene
+ * datos más recientes o mayor revisión), el sistema prioriza la carga de la última
+ * versión válida de los datos desde Firestore para evitar el reseteo involuntario
+ * al iniciar o reiniciar el servidor.
+ */
+export async function reconcileDatabaseWithFirestoreTimestampComparison(): Promise<{
+  action: 'PRIORITIZED_FIRESTORE' | 'KEPT_LOCAL_HYDRATED' | 'LOCAL_NEWER_SAVED_TO_CLOUD' | 'NO_CLOUD_RECORD';
+  localTimestamp?: string;
+  cloudTimestamp?: string;
+  localRevision: number;
+  cloudRevision?: number;
+  reason: string;
+}> {
+  ensureDataDir();
+
+  // 1. Metadatos del archivo físico central local
+  let localStat: fs.Stats | null = null;
+  let localMtimeMs = 0;
+  let localIso = '';
+  let localRevision = Number(centralDb.revision) || 0;
+  let localStudentsCount = Array.isArray(centralDb.students) ? centralDb.students.length : 0;
+  let localQuestionsCount = Array.isArray(centralDb.questions) ? centralDb.questions.length : 0;
+  let localCoursesCount = Array.isArray(centralDb.config?.universalCoursesCatalog)
+    ? centralDb.config.universalCoursesCatalog.length
+    : 0;
+  let localRostersCount = Array.isArray(centralDb.config?.studentRosterDatabases)
+    ? centralDb.config.studentRosterDatabases.length
+    : 0;
+  let localAttemptsCount = Array.isArray(centralDb.attempts) ? centralDb.attempts.length : 0;
+
+  try {
+    if (fs.existsSync(CENTRAL_DB_PATH)) {
+      localStat = fs.statSync(CENTRAL_DB_PATH);
+      localMtimeMs = Math.max(localMtimeMs, localStat.mtimeMs);
+      localIso = localStat.mtime.toISOString();
+      if (localStat.size > 20) {
+        const raw = fs.readFileSync(CENTRAL_DB_PATH, 'utf-8');
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          localRevision = Number(parsed.revision) || localRevision;
+          if (parsed.lastModifiedIso) {
+            localIso = parsed.lastModifiedIso;
+          }
+          localStudentsCount = Array.isArray(parsed.students) ? parsed.students.length : localStudentsCount;
+          localQuestionsCount = Array.isArray(parsed.questions) ? parsed.questions.length : localQuestionsCount;
+          localCoursesCount = Array.isArray(parsed.config?.universalCoursesCatalog)
+            ? parsed.config.universalCoursesCatalog.length
+            : localCoursesCount;
+          localRostersCount = Array.isArray(parsed.config?.studentRosterDatabases)
+            ? parsed.config.studentRosterDatabases.length
+            : localRostersCount;
+          localAttemptsCount = Array.isArray(parsed.attempts) ? parsed.attempts.length : localAttemptsCount;
+        }
+      }
+    }
+
+    // Inspeccionar también todos los archivos locales modulares (shards)
+    const shardEntries = [
+      { path: SHARDS.STUDENTS, key: 'students' },
+      { path: SHARDS.COURSES_CONFIG, key: 'config' },
+      { path: SHARDS.QUESTIONS, key: 'questions' },
+      { path: SHARDS.ACADEMIC_DATASET, key: 'academicDataset' },
+      { path: SHARDS.ATTEMPTS, key: 'attempts' },
+      { path: SHARDS.EDITOR_ROSTERS, key: 'rosters' },
+      { path: SHARDS.EDITOR_QUESTION_BANKS, key: 'banks' },
+      { path: SHARDS.COURSES_CATALOG, key: 'catalog' }
+    ];
+
+    for (const shard of shardEntries) {
+      if (fs.existsSync(shard.path)) {
+        try {
+          const sStat = fs.statSync(shard.path);
+          if (sStat.mtimeMs > localMtimeMs) {
+            localMtimeMs = sStat.mtimeMs;
+            localIso = sStat.mtime.toISOString();
+          }
+          if (sStat.size > 15) {
+            const rawShard = fs.readFileSync(shard.path, 'utf-8');
+            const parsedShard = JSON.parse(rawShard);
+            if (shard.key === 'students' && Array.isArray(parsedShard)) {
+              localStudentsCount = Math.max(localStudentsCount, parsedShard.length);
+            } else if (shard.key === 'questions' && Array.isArray(parsedShard)) {
+              localQuestionsCount = Math.max(localQuestionsCount, parsedShard.length);
+            } else if (shard.key === 'attempts' && Array.isArray(parsedShard)) {
+              localAttemptsCount = Math.max(localAttemptsCount, parsedShard.length);
+            } else if (shard.key === 'rosters' && Array.isArray(parsedShard)) {
+              localRostersCount = Math.max(localRostersCount, parsedShard.length);
+            } else if (shard.key === 'catalog' && Array.isArray(parsedShard)) {
+              localCoursesCount = Math.max(localCoursesCount, parsedShard.length);
+            }
+          }
+        } catch {
+          // ignore corrupted individual shard read during check
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[Reconciliation] Error inspeccionando archivo local central y shards:', err);
+  }
+
+  // Verificar si el archivo local está vacío, no existe, o fue recién creado sin datos válidos
+  const fileAgeMinutes = localStat ? (Date.now() - localStat.mtimeMs) / (1000 * 60) : 999999;
+  const localHasZeroData =
+    localStudentsCount === 0 &&
+    localCoursesCount === 0 &&
+    localAttemptsCount === 0 &&
+    localRostersCount === 0;
+
+  const isLocalEmptyOrNewlyCreated =
+    !localStat ||
+    localStat.size < 60 ||
+    (fileAgeMinutes < 60 && localHasZeroData) ||
+    localHasZeroData;
+
+  // 2. Consultar el registro autoritativo en Firestore
+  let cloudState: any = null;
+  try {
+    cloudState = await loadCentralStateFromFirestore({ includeQuestions: true });
+  } catch (fErr) {
+    console.warn('[Reconciliation] Error al leer Firestore para reconciliación:', fErr);
+  }
+
+  if (!cloudState || typeof cloudState !== 'object') {
+    return {
+      action: 'NO_CLOUD_RECORD',
+      localTimestamp: localIso,
+      localRevision,
+      reason: 'No hay registros en Firestore o la conexión aún no está lista.'
+    };
+  }
+
+  const cloudRevision = Number(cloudState.revision) || 0;
+  const cloudIso = cloudState.lastModifiedIso || cloudState.updatedIso || '';
+  const cloudTimeMs = cloudIso ? new Date(cloudIso).getTime() : 0;
+  const cloudStudentsCount = Array.isArray(cloudState.students) ? cloudState.students.length : 0;
+  const cloudQuestionsCount = Array.isArray(cloudState.questions) ? cloudState.questions.length : 0;
+  const cloudCoursesCount = Array.isArray(cloudState.config?.universalCoursesCatalog)
+    ? cloudState.config.universalCoursesCatalog.length
+    : 0;
+  const cloudRostersCount = Array.isArray(cloudState.config?.studentRosterDatabases)
+    ? cloudState.config.studentRosterDatabases.length
+    : 0;
+  const cloudAttemptsCount = Array.isArray(cloudState.attempts) ? cloudState.attempts.length : 0;
+
+  const hasValidCloudData =
+    cloudStudentsCount > 0 ||
+    cloudCoursesCount > 0 ||
+    cloudAttemptsCount > 0 ||
+    cloudRostersCount > 0 ||
+    cloudQuestionsCount > 0 ||
+    cloudRevision > 1;
+
+  // 3. Comparación de marcas temporales y decisión de prioridad
+  // Regla crítica: Si el archivo local está vacío/recién creado y la nube tiene datos,
+  // O si el timestamp de Firestore es más reciente que el archivo local,
+  // O si la revisión de Firestore es superior,
+  // O si local tiene 0 datos mientras la nube tiene registros válidos:
+  // -> PRIORIZAR FIRESTORE
+  const shouldPrioritizeFirestore =
+    (isLocalEmptyOrNewlyCreated && hasValidCloudData) ||
+    (localHasZeroData && hasValidCloudData) ||
+    cloudTimeMs > localMtimeMs ||
+    cloudRevision > localRevision;
+
+  if (shouldPrioritizeFirestore) {
+    const reasonMsg = isLocalEmptyOrNewlyCreated
+      ? `Archivo local vacío o recién creado (${localStat?.size || 0}B, edad ${fileAgeMinutes.toFixed(1)}m). Priorizando última versión válida en Firestore.`
+      : localHasZeroData && hasValidCloudData
+      ? `Archivo local sin registros pero Firestore posee datos válidos (${cloudStudentsCount} est, ${cloudCoursesCount} cursos).`
+      : cloudTimeMs > localMtimeMs
+      ? `Timestamp de Firestore (${cloudIso}) es más reciente que el archivo local (${localIso}).`
+      : `Revisión de Firestore (${cloudRevision}) es superior a la local (${localRevision}).`;
+
+    console.log(
+      `[CRITICAL_PERSISTENCE] 🛡️ PRIORIDAD FIRESTORE APLICADA: ${reasonMsg} -> Restaurando datos para prevenir reseteo involuntario al iniciar servidor.`
+    );
+
+    const parsedCloud = parseRawDbObject({
+      ...cloudState,
+      questions: cloudState.questions && cloudState.questions.length > 0 ? cloudState.questions : centralDb.questions,
+      emptyInitialV3Reset: true
+    });
+
+    centralDb = parsedCloud;
+
+    // Escribir inmediatamente a disco local y shards para que el servidor local quede sincronizado
+    saveCentralDbToDisk(
+      centralDb,
+      'ReconciliationStartup',
+      'Restauración prioritaria desde Firestore al iniciar el servidor (Anti-Reset)',
+      { includeQuestions: true, syncCloud: false }
+    );
+
+    return {
+      action: 'PRIORITIZED_FIRESTORE',
+      localTimestamp: localIso,
+      cloudTimestamp: cloudIso,
+      localRevision,
+      cloudRevision,
+      reason: reasonMsg
+    };
+  } else {
+    // Si el archivo local es válido, más reciente o igual a Firestore, conservar local y sincronizar hacia Firestore
+    console.log(
+      `[CRITICAL_PERSISTENCE] ✓ Archivo local verificado y vigente (Local: ${localIso}, Rev: ${localRevision}). Asegurando sincronización con Firestore.`
+    );
+    void saveCentralStateToFirestore(centralDb, { includeQuestions: false });
+
+    return {
+      action: 'KEPT_LOCAL_HYDRATED',
+      localTimestamp: localIso,
+      cloudTimestamp: cloudIso,
+      localRevision,
+      cloudRevision,
+      reason: 'El archivo local es válido y su marca de tiempo es igual o más reciente que Firestore.'
+    };
+  }
+}
+
 let centralDb: CentralDatabaseState = loadCentralDbFromDisk();
 let questionsSnapshotCache: Question[] | null = loadQuestionsSnapshotFromDisk();
 let lastRedisSyncMs = 0;
+
+// Reconciliación inmediata al cargar el servidor para garantizar que si los archivos locales
+// están vacíos o recién creados, se cargue primero la última versión autoritativa desde Firestore
+try {
+  await reconcileDatabaseWithFirestoreTimestampComparison();
+} catch (recStartupErr) {
+  console.warn('[Startup] Advertencia en reconciliación inicial de Firestore:', recStartupErr);
+}
 
 async function syncFromUpstashIfConfigured(force = false): Promise<void> {
   const now = Date.now();
@@ -481,6 +889,7 @@ async function syncFromUpstashIfConfigured(force = false): Promise<void> {
 
   // 1. Sync from Permanent Cloud Firestore Database (Primary on Vercel & Multi-Instance)
   try {
+    await reconcileDatabaseWithFirestoreTimestampComparison();
     const cloudState = await loadCentralStateFromFirestore({
       includeQuestions: force || !centralDb.migratedFromClient
     });
@@ -670,6 +1079,34 @@ app.use('/api/state', async (req, res, next) => {
       });
     } catch {
       return res.json({ ok: true, revision: centralDb.revision, logs: [] });
+    }
+  });
+
+  // 1D. GET & POST /api/reconcile-database & /api/state/reconcile — Endpoint explícito de verificación y sincronización Firestore
+  app.get('/api/reconcile-database', async (_req, res) => {
+    try {
+      const result = await reconcileDatabaseWithFirestoreTimestampComparison();
+      return res.json({ ok: true, result });
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, error: err?.message || String(err) });
+    }
+  });
+
+  app.post('/api/reconcile-database', async (_req, res) => {
+    try {
+      const result = await reconcileDatabaseWithFirestoreTimestampComparison();
+      return res.json({ ok: true, result });
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, error: err?.message || String(err) });
+    }
+  });
+
+  app.get('/api/state/reconcile', async (_req, res) => {
+    try {
+      const result = await reconcileDatabaseWithFirestoreTimestampComparison();
+      return res.json({ ok: true, result });
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, error: err?.message || String(err) });
     }
   });
 
@@ -1701,7 +2138,63 @@ app.use('/api/state', async (req, res, next) => {
       switch (entity) {
         case 'config': {
           if (data && typeof data === 'object') {
-            centralDb.config = { ...centralDb.config, ...data };
+            const currentRosters = centralDb.config.studentRosterDatabases || [];
+            const currentBanks = centralDb.config.questionBankDatabases || [];
+            const currentCatalog = centralDb.config.universalCoursesCatalog || [];
+            const currentTeachers = centralDb.config.registeredTeachers || [];
+
+            centralDb.config = {
+              ...centralDb.config,
+              ...data,
+              studentRosterDatabases:
+                Array.isArray(data.studentRosterDatabases) && data.studentRosterDatabases.length > 0
+                  ? data.studentRosterDatabases
+                  : currentRosters,
+              questionBankDatabases:
+                Array.isArray(data.questionBankDatabases) && data.questionBankDatabases.length > 0
+                  ? data.questionBankDatabases
+                  : currentBanks,
+              universalCoursesCatalog:
+                Array.isArray(data.universalCoursesCatalog) && data.universalCoursesCatalog.length > 0
+                  ? data.universalCoursesCatalog
+                  : currentCatalog,
+              registeredTeachers:
+                Array.isArray(data.registeredTeachers) && data.registeredTeachers.length > 0
+                  ? data.registeredTeachers
+                  : currentTeachers
+            };
+            saveShardToDisk(SHARDS.COURSES_CONFIG, centralDb.config);
+          }
+          break;
+        }
+        case 'studentRosterDatabases': {
+          if (Array.isArray(data)) {
+            centralDb.config.studentRosterDatabases = data;
+            saveShardToDisk(SHARDS.EDITOR_ROSTERS, data);
+            saveShardToDisk(SHARDS.COURSES_CONFIG, centralDb.config);
+          }
+          break;
+        }
+        case 'questionBankDatabases': {
+          if (Array.isArray(data)) {
+            centralDb.config.questionBankDatabases = data;
+            saveShardToDisk(SHARDS.EDITOR_QUESTION_BANKS, data);
+            saveShardToDisk(SHARDS.COURSES_CONFIG, centralDb.config);
+          }
+          break;
+        }
+        case 'universalCoursesCatalog': {
+          if (Array.isArray(data)) {
+            centralDb.config.universalCoursesCatalog = data;
+            saveShardToDisk(SHARDS.COURSES_CATALOG, data);
+            saveShardToDisk(SHARDS.COURSES_CONFIG, centralDb.config);
+          }
+          break;
+        }
+        case 'registeredTeachers': {
+          if (Array.isArray(data)) {
+            centralDb.config.registeredTeachers = data;
+            saveShardToDisk(SHARDS.REGISTERED_TEACHERS, data);
             saveShardToDisk(SHARDS.COURSES_CONFIG, centralDb.config);
           }
           break;
@@ -1751,6 +2244,24 @@ app.use('/api/state', async (req, res, next) => {
           return res.status(400).json({ error: `Entidad desconocida para diferencial: ${entity}` });
       }
 
+      // Si en el cuerpo vienen colecciones del editor acompañando otra mutación, persistirlas siempre
+      if (Array.isArray(req.body.studentRosterDatabases)) {
+        centralDb.config.studentRosterDatabases = req.body.studentRosterDatabases;
+        saveShardToDisk(SHARDS.EDITOR_ROSTERS, req.body.studentRosterDatabases);
+      }
+      if (Array.isArray(req.body.questionBankDatabases)) {
+        centralDb.config.questionBankDatabases = req.body.questionBankDatabases;
+        saveShardToDisk(SHARDS.EDITOR_QUESTION_BANKS, req.body.questionBankDatabases);
+      }
+      if (Array.isArray(req.body.universalCoursesCatalog)) {
+        centralDb.config.universalCoursesCatalog = req.body.universalCoursesCatalog;
+        saveShardToDisk(SHARDS.COURSES_CATALOG, req.body.universalCoursesCatalog);
+      }
+      if (Array.isArray(req.body.registeredTeachers)) {
+        centralDb.config.registeredTeachers = req.body.registeredTeachers;
+        saveShardToDisk(SHARDS.REGISTERED_TEACHERS, req.body.registeredTeachers);
+      }
+
       centralDb.migratedFromClient = true;
       centralDb.revision += 1;
       centralDb.lastModifiedIso = new Date().toISOString();
@@ -1773,6 +2284,100 @@ app.use('/api/state', async (req, res, next) => {
       return res.status(500).json({
         error: err?.message || 'Error en guardado diferencial del servidor.'
       });
+    }
+  });
+
+  // 14C. GET /api/editor/databases — Obtener todas las bases de datos creadas por el editor
+  app.get('/api/editor/databases', (_req, res) => {
+    try {
+      return res.json({
+        ok: true,
+        studentRosterDatabases: centralDb.config?.studentRosterDatabases || [],
+        questionBankDatabases: centralDb.config?.questionBankDatabases || [],
+        universalCoursesCatalog: centralDb.config?.universalCoursesCatalog || [],
+        registeredTeachers: centralDb.config?.registeredTeachers || [],
+        activeCourseId: centralDb.config?.activeCourseId,
+        activeCourseMeta: centralDb.config?.activeCourseMeta
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || 'Error al consultar bases del editor.' });
+    }
+  });
+
+  // 14D. POST /api/editor/databases — Guardado directo y blindado de colecciones del editor
+  app.post('/api/editor/databases', (req, res) => {
+    try {
+      const {
+        studentRosterDatabases,
+        questionBankDatabases,
+        universalCoursesCatalog,
+        registeredTeachers,
+        activeCourseId,
+        activeCourseMeta,
+        section = 'EditorBasesDatos',
+        description = 'Guardado atómico blindado de bases de datos del editor'
+      } = req.body || {};
+
+      const curConfig = centralDb.config || DEFAULT_SERVER_CONFIG;
+
+      if (Array.isArray(studentRosterDatabases)) {
+        const map = new Map<string, StudentRosterDatabaseEntry>();
+        (curConfig.studentRosterDatabases || []).forEach((d) => { if (d && d.id) map.set(d.id, d); });
+        studentRosterDatabases.forEach((d) => { if (d && d.id) map.set(d.id, d); });
+        const merged = Array.from(map.values());
+        curConfig.studentRosterDatabases = merged;
+        saveShardToDisk(SHARDS.EDITOR_ROSTERS, merged);
+      }
+      if (Array.isArray(questionBankDatabases)) {
+        const map = new Map<string, QuestionBankDatabaseEntry>();
+        (curConfig.questionBankDatabases || []).forEach((d) => { if (d && d.id) map.set(d.id, d); });
+        questionBankDatabases.forEach((d) => { if (d && d.id) map.set(d.id, d); });
+        const merged = Array.from(map.values());
+        curConfig.questionBankDatabases = merged;
+        saveShardToDisk(SHARDS.EDITOR_QUESTION_BANKS, merged);
+      }
+      if (Array.isArray(universalCoursesCatalog)) {
+        const map = new Map<string, UniversalCourseWorkspace>();
+        (curConfig.universalCoursesCatalog || []).forEach((c) => { if (c && c.meta?.courseId) map.set(c.meta.courseId, c); });
+        universalCoursesCatalog.forEach((c) => { if (c && c.meta?.courseId) map.set(c.meta.courseId, c); });
+        const merged = Array.from(map.values());
+        curConfig.universalCoursesCatalog = merged;
+        saveShardToDisk(SHARDS.COURSES_CATALOG, merged);
+      }
+      if (Array.isArray(registeredTeachers)) {
+        const map = new Map<string, TeacherAccountRecord>();
+        (curConfig.registeredTeachers || []).forEach((t) => { if (t && t.id) map.set(t.id, t); });
+        registeredTeachers.forEach((t) => { if (t && t.id) map.set(t.id, t); });
+        const merged = Array.from(map.values());
+        curConfig.registeredTeachers = merged;
+        saveShardToDisk(SHARDS.REGISTERED_TEACHERS, merged);
+      }
+      if (activeCourseId) {
+        curConfig.activeCourseId = activeCourseId;
+      }
+      if (activeCourseMeta && typeof activeCourseMeta === 'object') {
+        curConfig.activeCourseMeta = activeCourseMeta;
+      }
+
+      centralDb.config = curConfig;
+      centralDb.revision += 1;
+      centralDb.lastModifiedIso = new Date().toISOString();
+
+      saveCentralDbToDisk(centralDb, section, description, { syncCloud: true });
+
+      return res.json({
+        ok: true,
+        revision: centralDb.revision,
+        savedAtFormatted: new Date().toLocaleTimeString('es-CO'),
+        counts: {
+          rosters: centralDb.config.studentRosterDatabases?.length || 0,
+          questionBanks: centralDb.config.questionBankDatabases?.length || 0,
+          courses: centralDb.config.universalCoursesCatalog?.length || 0,
+          teachers: centralDb.config.registeredTeachers?.length || 0
+        }
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || 'Error al persistir bases del editor.' });
     }
   });
 
@@ -2274,7 +2879,12 @@ async function startServer() {
     const vitePkg = 'vite';
     const { createServer: createViteServer } = await import(vitePkg);
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        watch: {
+          ignored: ['**/data/**', '**/data/**/*', '**/*.backup*', '**/*.tmp*']
+        }
+      },
       appType: 'spa'
     });
     app.use((req, res, next) => {

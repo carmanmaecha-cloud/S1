@@ -94,7 +94,11 @@ const STORAGE_KEYS = {
   CUSTOM_MINI_RETOS: 'evaluaplus_custom_mini_retos_v1',
   ACADEMIC_DATASET: 'evaluaplus_academic_class_dataset_v1',
   LEGACY_SNAPSHOT: 'evaluaplus_prev_questions_snapshot_v1',
-  ACTIVE_EXAM_BACKUP: 'evaluaplus_active_exam_backup_v2'
+  ACTIVE_EXAM_BACKUP: 'evaluaplus_active_exam_backup_v2',
+  EDITOR_STUDENT_ROSTERS: 'evaluaplus_editor_rosters_v1',
+  EDITOR_QUESTION_BANKS: 'evaluaplus_editor_qbanks_v1',
+  EDITOR_COURSES_CATALOG: 'evaluaplus_editor_catalog_v1',
+  EDITOR_TEACHERS: 'evaluaplus_editor_teachers_v1'
 };
 
 const DEFAULT_CONFIG: SystemConfig = {
@@ -141,7 +145,13 @@ const DEFAULT_CONFIG: SystemConfig = {
   miniRetosDiasPermitidos: [1, 2, 3, 4, 5, 6],
   miniRetosHoraInicio: '07:00',
   miniRetosHoraFin: '22:00',
-  umbralAprobacionMiniRetoPct: 60
+  umbralAprobacionMiniRetoPct: 60,
+  studentRosterDatabases: [],
+  questionBankDatabases: [],
+  universalCoursesCatalog: [],
+  registeredTeachers: [],
+  deletedStudentRosterDbIds: [],
+  deletedQuestionBankDbIds: []
 };
 
 function safeWriteLocalStorage(key: string, value: unknown) {
@@ -707,10 +717,24 @@ function AppContent() {
       let clearedKeysCount = 0;
       if (purgeLocalCache) {
         try {
-          const keysToPurge = new Set<string>(Object.values(STORAGE_KEYS));
+          const protectedEditorKeys = new Set<string>([
+            STORAGE_KEYS.EDITOR_STUDENT_ROSTERS,
+            STORAGE_KEYS.EDITOR_QUESTION_BANKS,
+            STORAGE_KEYS.EDITOR_COURSES_CATALOG,
+            STORAGE_KEYS.EDITOR_TEACHERS,
+            'evaluaplus_global_auth_session_v1'
+          ]);
+          const keysToPurge = new Set<string>(
+            Object.values(STORAGE_KEYS).filter((k) => !protectedEditorKeys.has(k))
+          );
           for (let i = 0; i < localStorage.length; i++) {
             const k = localStorage.key(i);
-            if (k && k.startsWith('evaluaplus_') && k !== 'evaluaplus_global_auth_session_v1') {
+            if (
+              k &&
+              k.startsWith('evaluaplus_') &&
+              !protectedEditorKeys.has(k) &&
+              !k.startsWith('evaluaplus_editor_')
+            ) {
               keysToPurge.add(k);
             }
           }
@@ -941,10 +965,103 @@ function AppContent() {
         }
 
         if (data.config && typeof data.config === 'object') {
-          const mergedConfig = { ...DEFAULT_CONFIG, ...data.config };
+          // SEGURO ANTI-REINICIO Y AUTO-RECUPERACIÓN:
+          // Si el servidor aún no tiene alguna colección del editor pero el cliente local sí, conservarla
+          let localRosters: any[] = [];
+          let localBanks: any[] = [];
+          let localCatalog: any[] = [];
+          let localTeachers: any[] = [];
+          try {
+            const rawR = localStorage.getItem(STORAGE_KEYS.EDITOR_STUDENT_ROSTERS);
+            if (rawR) localRosters = JSON.parse(rawR);
+            const rawB = localStorage.getItem(STORAGE_KEYS.EDITOR_QUESTION_BANKS);
+            if (rawB) localBanks = JSON.parse(rawB);
+            const rawC = localStorage.getItem(STORAGE_KEYS.EDITOR_COURSES_CATALOG);
+            if (rawC) localCatalog = JSON.parse(rawC);
+            const rawT = localStorage.getItem(STORAGE_KEYS.EDITOR_TEACHERS);
+            if (rawT) localTeachers = JSON.parse(rawT);
+          } catch {
+            // ignore
+          }
+
+          const serverRosters = Array.isArray(data.config.studentRosterDatabases)
+            ? data.config.studentRosterDatabases
+            : [];
+          const serverBanks = Array.isArray(data.config.questionBankDatabases)
+            ? data.config.questionBankDatabases
+            : [];
+          const serverCatalog = Array.isArray(data.config.universalCoursesCatalog)
+            ? data.config.universalCoursesCatalog
+            : [];
+          const serverTeachers = Array.isArray(data.config.registeredTeachers)
+            ? data.config.registeredTeachers
+            : [];
+
+          const mergedRosters =
+            serverRosters.length > 0
+              ? serverRosters
+              : localRosters.length > 0
+              ? localRosters
+              : stateRef.current.config.studentRosterDatabases || [];
+          const mergedBanks =
+            serverBanks.length > 0
+              ? serverBanks
+              : localBanks.length > 0
+              ? localBanks
+              : stateRef.current.config.questionBankDatabases || [];
+          const mergedCatalog =
+            serverCatalog.length > 0
+              ? serverCatalog
+              : localCatalog.length > 0
+              ? localCatalog
+              : stateRef.current.config.universalCoursesCatalog || [];
+          const mergedTeachers =
+            serverTeachers.length > 0
+              ? serverTeachers
+              : localTeachers.length > 0
+              ? localTeachers
+              : stateRef.current.config.registeredTeachers || [];
+
+          if (mergedRosters.length > 0) {
+            safeWriteLocalStorage(STORAGE_KEYS.EDITOR_STUDENT_ROSTERS, mergedRosters);
+          }
+          if (mergedBanks.length > 0) {
+            safeWriteLocalStorage(STORAGE_KEYS.EDITOR_QUESTION_BANKS, mergedBanks);
+          }
+          if (mergedCatalog.length > 0) {
+            safeWriteLocalStorage(STORAGE_KEYS.EDITOR_COURSES_CATALOG, mergedCatalog);
+          }
+          if (mergedTeachers.length > 0) {
+            safeWriteLocalStorage(STORAGE_KEYS.EDITOR_TEACHERS, mergedTeachers);
+          }
+
+          const mergedConfig = {
+            ...DEFAULT_CONFIG,
+            ...data.config,
+            studentRosterDatabases: mergedRosters,
+            questionBankDatabases: mergedBanks,
+            universalCoursesCatalog: mergedCatalog,
+            registeredTeachers: mergedTeachers
+          };
           setConfig(mergedConfig);
           stateRef.current.config = mergedConfig;
           safeWriteLocalStorage(STORAGE_KEYS.CONFIG, mergedConfig);
+
+          // Si recuperamos colecciones locales que el servidor aún no tenía, auto-sincronizarlas al servidor
+          if (
+            mergedRosters.length > serverRosters.length ||
+            mergedBanks.length > serverBanks.length ||
+            mergedCatalog.length > serverCatalog.length
+          ) {
+            void pushServerMutation('/api/editor/databases', 'POST', {
+              studentRosterDatabases: mergedRosters,
+              questionBankDatabases: mergedBanks,
+              universalCoursesCatalog: mergedCatalog,
+              registeredTeachers: mergedTeachers,
+              section: 'AutoHealSync',
+              description: 'Auto-recuperación de bases del editor hacia el servidor'
+            });
+          }
         }
 
         if (Array.isArray(data.students)) {
@@ -1211,7 +1328,46 @@ function AppContent() {
         bc.onmessage = (event) => {
           const msg = event?.data;
           if (!msg || typeof msg !== 'object') return;
-          if (msg.type === 'ACADEMIC_DATASET_UPDATED' && msg.academicDataset) {
+          if (msg.type === 'SYNC_STATE_TO_CLOUD') {
+            const actionType = msg.actionType;
+            // 1. Asistencia de clase
+            if (msg.academicDataset) {
+              applyRealtimeAcademicDataset(msg.academicDataset);
+            }
+            // 2. Bloqueos y Notas en Estudiantes
+            if (Array.isArray(msg.students)) {
+              const enriched = enrichStudentsWithServerSummary(
+                msg.students,
+                msg.attempts || stateRef.current.attempts,
+                msg.config || stateRef.current.config
+              );
+              stateRef.current.students = enriched;
+              setStudents(enriched);
+              safeWriteLocalStorage(STORAGE_KEYS.STUDENTS, enriched);
+            }
+            // 3. Notas en Intentos
+            if (Array.isArray(msg.attempts)) {
+              stateRef.current.attempts = msg.attempts;
+              setAttempts(msg.attempts);
+              safeWriteLocalStorage(STORAGE_KEYS.ATTEMPTS, msg.attempts);
+            }
+            // 4. Bloqueos de Examen y Configuración
+            if (msg.config && typeof msg.config === 'object') {
+              stateRef.current.config = msg.config;
+              setConfig(msg.config);
+              safeWriteLocalStorage(STORAGE_KEYS.CONFIG, msg.config);
+            }
+            // 5. Evaluaciones ABPro
+            if (Array.isArray(msg.abproEvaluations)) {
+              stateRef.current.abproEvaluations = msg.abproEvaluations;
+              setAbproEvaluations(msg.abproEvaluations);
+              safeWriteLocalStorage(STORAGE_KEYS.ABPRO, msg.abproEvaluations);
+            }
+            // Verificación autoritativa de segundo plano
+            if (actionType === 'BLOCKS' || actionType === 'NOTES' || actionType === 'ATTENDANCE') {
+              void fetchAndApplyServerState(false);
+            }
+          } else if (msg.type === 'ACADEMIC_DATASET_UPDATED' && msg.academicDataset) {
             applyRealtimeAcademicDataset(msg.academicDataset);
           } else if (msg.type === 'FORCE_PULL') {
             fetchAndApplyServerState(false);
@@ -2355,19 +2511,50 @@ function AppContent() {
             questionsBankExplicitlyCleared: stateRef.current.questionsBankExplicitlyCleared
           });
         } else {
+          // Si es una acción del panel del editor, sincronizar directamente las colecciones a /api/editor/databases y shards
+          if (sectionKey.includes('editor') || sectionKey.includes('nomina') || sectionKey.includes('banco') || sectionKey.includes('curso')) {
+            const currentCfg = stateRef.current.config;
+            if (Array.isArray(currentCfg.studentRosterDatabases) && currentCfg.studentRosterDatabases.length > 0) {
+              safeWriteLocalStorage(STORAGE_KEYS.EDITOR_STUDENT_ROSTERS, currentCfg.studentRosterDatabases);
+            }
+            if (Array.isArray(currentCfg.questionBankDatabases) && currentCfg.questionBankDatabases.length > 0) {
+              safeWriteLocalStorage(STORAGE_KEYS.EDITOR_QUESTION_BANKS, currentCfg.questionBankDatabases);
+            }
+            if (Array.isArray(currentCfg.universalCoursesCatalog) && currentCfg.universalCoursesCatalog.length > 0) {
+              safeWriteLocalStorage(STORAGE_KEYS.EDITOR_COURSES_CATALOG, currentCfg.universalCoursesCatalog);
+            }
+            if (Array.isArray(currentCfg.registeredTeachers) && currentCfg.registeredTeachers.length > 0) {
+              safeWriteLocalStorage(STORAGE_KEYS.EDITOR_TEACHERS, currentCfg.registeredTeachers);
+            }
+
+            // Guardar colecciones completas del editor atómicamente en el servidor
+            void pushServerMutation('/api/editor/databases', 'POST', {
+              studentRosterDatabases: currentCfg.studentRosterDatabases,
+              questionBankDatabases: currentCfg.questionBankDatabases,
+              universalCoursesCatalog: currentCfg.universalCoursesCatalog,
+              registeredTeachers: currentCfg.registeredTeachers,
+              activeCourseId: currentCfg.activeCourseId,
+              activeCourseMeta: currentCfg.activeCourseMeta,
+              section: sectionKey,
+              description
+            });
+          }
+
           // Ultra-fast granular differential save (only transmits the modified entity, reducing payload from 1.5MB to ~2KB)
           let entity = 'config';
           let payloadData: any = stateRef.current.config;
 
-          if (sectionKey.includes('pregunta') || sectionKey.includes('banco')) {
+          if (sectionKey.includes('pregunta') && !sectionKey.includes('panel_editor_banco')) {
             entity = 'questions';
             payloadData = stateRef.current.questions;
             safeWriteLocalStorage(STORAGE_KEYS.QUESTIONS, stateRef.current.questions);
-          } else if (
-            sectionKey.includes('nomina') ||
-            sectionKey.includes('estudiante') ||
-            sectionKey.includes('student')
-          ) {
+          } else if (sectionKey === 'panel_editor_banco_preguntas' || sectionKey.includes('editor_banco')) {
+            entity = 'questionBankDatabases';
+            payloadData = stateRef.current.config.questionBankDatabases || [];
+          } else if (sectionKey === 'panel_editor_nominas_estudiantes' || sectionKey.includes('editor_nomina')) {
+            entity = 'studentRosterDatabases';
+            payloadData = stateRef.current.config.studentRosterDatabases || [];
+          } else if (sectionKey.includes('nomina') || sectionKey.includes('estudiante') || sectionKey.includes('student')) {
             entity = 'students';
             payloadData = stateRef.current.students;
           } else if (
@@ -2383,6 +2570,9 @@ function AppContent() {
           } else if (sectionKey.includes('mini_reto') || sectionKey.includes('reto')) {
             entity = 'customMiniRetos';
             payloadData = stateRef.current.customMiniRetos;
+          } else if (sectionKey.includes('curso') || sectionKey.includes('catalog')) {
+            entity = 'universalCoursesCatalog';
+            payloadData = stateRef.current.config.universalCoursesCatalog || [];
           }
 
           data = await pushServerMutation('/api/state/differential', 'POST', {

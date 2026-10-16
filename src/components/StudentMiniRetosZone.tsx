@@ -13,6 +13,7 @@ import {
 } from '../types';
 import { getEffectiveMaxLlamadosAtencion } from '../utils/academicServerSummary';
 import {
+  OfficialBadgeDefinition,
   OFFICIAL_BADGES,
   SPECIAL_DISTINCTION_BADGE,
   getEffectiveBadgesForCourse,
@@ -284,7 +285,7 @@ export function StudentMiniRetosZone({
   const getRetoBadgeProgress = useCallback(
     (b: OfficialBadgeDefinition): StudentRetoModuleProgress => {
       const defaults = getDefaultRetoProgress();
-      const baseDefault = defaults[b.modulo] || defaults[1];
+      const baseDefault = defaults[(b.modulo as 1 | 2 | 3 | 4 | 5)] || defaults[1];
       const rawProg = student?.progresoRetos as Record<string, any> | undefined;
       if (!rawProg || typeof rawProg !== 'object') return baseDefault;
 

@@ -520,21 +520,38 @@ export function TeacherPanel({
       : undefined;
 
     const resolvedStudents =
-      isCurrentlyActive && students.length > 0
+      matchedRosterDb && Array.isArray(matchedRosterDb.students) && matchedRosterDb.students.length > 0
+        ? matchedRosterDb.students.map((base) => {
+            const cleanId = String(base?.id || '').trim().replace(/[\s.-]/g, '').toUpperCase();
+            const sourceWs = Array.isArray(ws.students) ? ws.students : [];
+            const sourceLive = isCurrentlyActive && Array.isArray(students) ? students : [];
+            const wsMatch = sourceWs.find(
+              (s) => String(s?.id || '').trim().replace(/[\s.-]/g, '').toUpperCase() === cleanId
+            );
+            const liveMatch = sourceLive.find(
+              (s) => String(s?.id || '').trim().replace(/[\s.-]/g, '').toUpperCase() === cleanId
+            );
+            return {
+              ...base,
+              ...(wsMatch || {}),
+              ...(liveMatch || {}),
+              id: base.id,
+              nombre: liveMatch?.nombre || wsMatch?.nombre || base.nombre
+            };
+          })
+        : isCurrentlyActive && students.length > 0
         ? students
         : Array.isArray(ws.students) && ws.students.length > 0
         ? ws.students
-        : matchedRosterDb && Array.isArray(matchedRosterDb.students)
-        ? matchedRosterDb.students
         : [];
 
     const resolvedQuestions =
-      isCurrentlyActive && questions.length > 0
+      matchedQBankDb && Array.isArray(matchedQBankDb.questions) && matchedQBankDb.questions.length > 0
+        ? matchedQBankDb.questions
+        : isCurrentlyActive && questions.length > 0
         ? questions
         : Array.isArray(ws.questions) && ws.questions.length > 0
         ? ws.questions
-        : matchedQBankDb && Array.isArray(matchedQBankDb.questions)
-        ? matchedQBankDb.questions
         : [];
 
     const resolvedAttempts =
@@ -2722,6 +2739,40 @@ export function TeacherPanel({
     commitTeacherStudentsUpdate(nextStudents);
     setBatchExamBlockNotice(
       `✓ Se han ${blockAll ? 'BLOQUEADO TODOS los exámenes' : 'DESBLOQUEADO / HABILITADO TODOS los exámenes'} para los ${selectedStudentIdsForBatch.length} estudiante(s) seleccionado(s).`
+    );
+  };
+
+  // Batch Lock / Unlock Mini Retos for All Selected Students
+  const handleBatchBlockOrUnblockAllRetos = (blockAll: boolean) => {
+    if (selectedStudentIdsForBatch.length === 0) return;
+    const selectedSet = new Set(selectedStudentIdsForBatch);
+    const nextStudents = students.map((s) => {
+      if (!selectedSet.has(s.id)) return s;
+      return {
+        ...s,
+        bloqueadoRetosDocente: blockAll
+      };
+    });
+    commitTeacherStudentsUpdate(nextStudents);
+    setStudentUpdateBanner(
+      `✓ Se han ${blockAll ? 'BLOQUEADO los Mini Retos' : 'DESBLOQUEADO los Mini Retos'} para ${selectedStudentIdsForBatch.length} estudiante(s) seleccionado(s).`
+    );
+  };
+
+  // Toggle Mini Retos Lock / Unlock for an individual student
+  const handleToggleStudentRetosBlock = (studentId: string) => {
+    const st = students.find((s) => s.id === studentId);
+    if (!st) return;
+    const currentlyBlocked = Boolean(
+      st.bloqueadoRetosDocente || (config.estudiantesSinMiniRetos || []).includes(st.id)
+    );
+    const nextState = !currentlyBlocked;
+    const nextStudents = students.map((s) =>
+      s.id === studentId ? { ...s, bloqueadoRetosDocente: nextState } : s
+    );
+    commitTeacherStudentsUpdate(nextStudents);
+    setStudentUpdateBanner(
+      `✓ Se ha ${nextState ? 'BLOQUEADO' : 'DESBLOQUEADO'} el acceso a Mini Retos para ${st.nombre}.`
     );
   };
 
@@ -7891,11 +7942,98 @@ function doPost(e) {
             </div>
           </div>
 
+          {/* BARRA DE ACCIONES MASIVAS CUANDO HAY ESTUDIANTES SELECCIONADOS */}
+          {selectedStudentIdsForBatch.length > 0 && (
+            <div className="bg-sky-50 border-2 border-sky-400 rounded-xl p-3.5 shadow-sm flex flex-wrap items-center justify-between gap-3 animate-in fade-in">
+              <div className="flex items-center gap-2">
+                <span className="w-7 h-7 rounded-lg bg-sky-600 text-white font-bold flex items-center justify-center text-xs">
+                  {selectedStudentIdsForBatch.length}
+                </span>
+                <div className="text-xs font-bold text-sky-950">
+                  {selectedStudentIdsForBatch.length} estudiante(s) seleccionado(s) para acciones en lote:
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Bloquear / Desbloquear Exámenes */}
+                <button
+                  type="button"
+                  onClick={() => handleBatchBlockOrUnblockAllExams(true)}
+                  className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                  title="Bloquear todos los exámenes para los estudiantes seleccionados"
+                >
+                  <Lock className="w-3.5 h-3.5" />
+                  <span>Bloquear Exámenes ({selectedStudentIdsForBatch.length})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleBatchBlockOrUnblockAllExams(false)}
+                  className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                  title="Desbloquear / Habilitar exámenes para los estudiantes seleccionados"
+                >
+                  <Unlock className="w-3.5 h-3.5" />
+                  <span>Desbloquear Exámenes ({selectedStudentIdsForBatch.length})</span>
+                </button>
+
+                {/* Bloquear / Desbloquear Mini Retos */}
+                <button
+                  type="button"
+                  onClick={() => handleBatchBlockOrUnblockAllRetos(true)}
+                  className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                  title="Bloquear acceso a Mini Retos para los estudiantes seleccionados"
+                >
+                  <Lock className="w-3.5 h-3.5" />
+                  <span>Bloquear Mini Retos ({selectedStudentIdsForBatch.length})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleBatchBlockOrUnblockAllRetos(false)}
+                  className="px-3 py-1.5 rounded-lg bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                  title="Desbloquear acceso a Mini Retos para los estudiantes seleccionados"
+                >
+                  <Unlock className="w-3.5 h-3.5" />
+                  <span>Desbloquear Mini Retos ({selectedStudentIdsForBatch.length})</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setSelectedStudentIdsForBatch([])}
+                  className="px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold cursor-pointer"
+                >
+                  Deseleccionar todos
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Students Table — Ajustada al 100% del ancho en modo consulta / supervisión oficial */}
           <div className="w-full border border-slate-200 rounded-xl overflow-hidden bg-white">
             <table className="w-full table-auto text-left border-collapse">
               <thead>
                 <tr className="bg-slate-50 border-b border-slate-200 text-[11px] font-bold text-slate-700 leading-tight">
+                  <th className="py-2.5 px-2 text-center w-[40px]">
+                    <input
+                      type="checkbox"
+                      checked={
+                        filteredStudents.length > 0 &&
+                        filteredStudents.every((s) => selectedStudentIdsForBatch.includes(s.id))
+                      }
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setSelectedStudentIdsForBatch(
+                            Array.from(new Set([...selectedStudentIdsForBatch, ...filteredStudents.map((s) => s.id)]))
+                          );
+                        } else {
+                          const filteredIdSet = new Set(filteredStudents.map((s) => s.id));
+                          setSelectedStudentIdsForBatch(
+                            selectedStudentIdsForBatch.filter((id) => !filteredIdSet.has(id))
+                          );
+                        }
+                      }}
+                      className="w-4 h-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500 cursor-pointer"
+                      title="Seleccionar o deseleccionar todos los estudiantes visibles"
+                    />
+                  </th>
                   <th className="py-2.5 px-2.5 w-[96px]">ID Estudiante</th>
                   <th className="py-2.5 px-2.5 min-w-[155px]">
                     <div>Nombre Completo</div>
@@ -7926,6 +8064,18 @@ function doPost(e) {
                   ).length;
                   return (
                     <tr key={st.id} className="hover:bg-slate-50/80 transition-colors align-middle">
+                      <td className="py-2 px-2 text-center">
+                        <input
+                          type="checkbox"
+                          checked={selectedStudentIdsForBatch.includes(st.id)}
+                          onChange={() => {
+                            setSelectedStudentIdsForBatch((prev) =>
+                              prev.includes(st.id) ? prev.filter((id) => id !== st.id) : [...prev, st.id]
+                            );
+                          }}
+                          className="w-4 h-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500 cursor-pointer"
+                        />
+                      </td>
                       <td className="py-2 px-2.5 font-mono font-semibold text-slate-900 break-all">
                         {st.id}
                       </td>
@@ -8224,6 +8374,32 @@ function doPost(e) {
                               {blockedCount > 0 ? `Bloq. (${blockedCount})` : 'Exámenes'}
                             </span>
                           </button>
+
+                          {/* Bloqueo / Desbloqueo de Mini Retos Por Estudiante */}
+                          {(() => {
+                            const isRetosBlocked = Boolean(
+                              st.bloqueadoRetosDocente || (config.estudiantesSinMiniRetos || []).includes(st.id)
+                            );
+                            return (
+                              <button
+                                type="button"
+                                onClick={() => handleToggleStudentRetosBlock(st.id)}
+                                className={`px-2 py-1 rounded-md border font-medium inline-flex items-center gap-1 text-[10px] cursor-pointer transition-colors ${
+                                  isRetosBlocked
+                                    ? 'border-amber-400 bg-amber-50 text-amber-900 font-bold'
+                                    : 'border-slate-200 text-slate-700 hover:bg-slate-100'
+                                }`}
+                                title={isRetosBlocked ? 'Desbloquear acceso a Mini Retos' : 'Bloquear acceso a Mini Retos'}
+                              >
+                                {isRetosBlocked ? (
+                                  <Lock className="w-3 h-3 text-amber-600 shrink-0" />
+                                ) : (
+                                  <Trophy className="w-3 h-3 text-amber-500 shrink-0" />
+                                )}
+                                <span>{isRetosBlocked ? 'Retos Bloq.' : 'Retos'}</span>
+                              </button>
+                            );
+                          })()}
                         </div>
                       </td>
                     </tr>

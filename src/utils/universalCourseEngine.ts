@@ -17,7 +17,8 @@ import { generateDeterministicAccessCode } from '../data/students';
 export const DEFAULT_MODULE_GRADING_WEIGHTS: UniversalModuleGradingWeights = {
   comportamientoPct: 10,
   participacionPct: 15,
-  examenPct: 35,
+  examenPct: 30,
+  retoPct: 5,
   trabajoPct: 40
 };
 
@@ -809,6 +810,25 @@ export function getEffectiveStudentsForWorkspace(
   config?: SystemConfig,
   liveStudents?: StudentRecord[]
 ): StudentRecord[] {
+  const rosterDbId = workspace?.meta?.selectedStudentRosterDbId;
+  if (rosterDbId && Array.isArray(config?.studentRosterDatabases)) {
+    const matchedDb = config.studentRosterDatabases.find((db) => db && db.id === rosterDbId);
+    if (matchedDb && Array.isArray(matchedDb.students) && matchedDb.students.length > 0) {
+      if (Array.isArray(liveStudents) && liveStudents.length > 0) {
+        const liveMap = new Map<string, StudentRecord>();
+        liveStudents.forEach((s) => {
+          if (s && s.id) liveMap.set(String(s.id).trim().replace(/[\s.-]/g, '').toUpperCase(), s);
+        });
+        return matchedDb.students.map((st) => {
+          const cleanId = String(st.id || '').trim().replace(/[\s.-]/g, '').toUpperCase();
+          const live = liveMap.get(cleanId);
+          return live ? { ...st, ...live } : st;
+        });
+      }
+      return matchedDb.students;
+    }
+  }
+
   const courseId = workspace?.meta?.courseId;
   const isCurrentActiveCourse = Boolean(courseId && courseId === config?.activeCourseId);
 
@@ -830,14 +850,6 @@ export function getEffectiveStudentsForWorkspace(
     return workspace.students;
   }
 
-  const rosterDbId = workspace?.meta?.selectedStudentRosterDbId;
-  if (rosterDbId && Array.isArray(config?.studentRosterDatabases)) {
-    const matchedDb = config.studentRosterDatabases.find((db) => db && db.id === rosterDbId);
-    if (matchedDb && Array.isArray(matchedDb.students) && matchedDb.students.length > 0) {
-      return matchedDb.students;
-    }
-  }
-
   return [];
 }
 
@@ -846,23 +858,23 @@ export function getEffectiveQuestionsForWorkspace(
   config?: SystemConfig,
   liveQuestions?: Question[]
 ): Question[] {
-  const courseId = workspace?.meta?.courseId;
-  const isCurrentActiveCourse = Boolean(courseId && courseId === config?.activeCourseId);
-
-  if (isCurrentActiveCourse && Array.isArray(liveQuestions) && liveQuestions.length > 0) {
-    return liveQuestions;
-  }
-
-  if (Array.isArray(workspace?.questions) && workspace.questions.length > 0) {
-    return workspace.questions;
-  }
-
   const qBankDbId = workspace?.meta?.selectedQuestionBankDbId;
   if (qBankDbId && Array.isArray(config?.questionBankDatabases)) {
     const matchedDb = config.questionBankDatabases.find((db) => db && db.id === qBankDbId);
     if (matchedDb && Array.isArray(matchedDb.questions) && matchedDb.questions.length > 0) {
       return matchedDb.questions;
     }
+  }
+
+  if (Array.isArray(workspace?.questions) && workspace.questions.length > 0) {
+    return workspace.questions;
+  }
+
+  const courseId = workspace?.meta?.courseId;
+  const isCurrentActiveCourse = Boolean(courseId && courseId === config?.activeCourseId);
+
+  if (isCurrentActiveCourse && Array.isArray(liveQuestions) && liveQuestions.length > 0) {
+    return liveQuestions;
   }
 
   return [];

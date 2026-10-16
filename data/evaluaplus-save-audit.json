@@ -1,0 +1,80 @@
+[
+  {
+    "section": "ReconciliationStartup",
+    "description": "Restauración prioritaria desde Firestore al iniciar el servidor (Anti-Reset)",
+    "revision": 112,
+    "saved_at": "2026-10-16T14:44:21.972Z"
+  },
+  {
+    "section": "panel_editor_cursos_docentes",
+    "description": "Actualización automática en «Panel de Editores»",
+    "revision": 112,
+    "saved_at": "2026-10-16T14:44:21.972Z"
+  },
+  {
+    "section": "panel_editor_cursos_docentes",
+    "description": "Actualización automática en «Panel de Editores»",
+    "revision": 111,
+    "saved_at": "2026-10-16T14:44:21.965Z"
+  },
+  {
+    "section": "panel_editor_banco_preguntas",
+    "description": "Base de datos de Banco de preguntas eliminada en ventana Banco de preguntas",
+    "revision": 110,
+    "saved_at": "2026-10-16T14:44:20.472Z"
+  },
+  {
+    "section": "panel_editor_banco_preguntas",
+    "description": "Base de datos de Banco de preguntas eliminada en ventana Banco de preguntas",
+    "revision": 109,
+    "saved_at": "2026-10-16T14:44:20.464Z"
+  },
+  {
+    "section": "ConfiguracionCurso",
+    "description": "Configuración del curso y sistema actualizada (Curso Activo)",
+    "revision": 108,
+    "saved_at": "2026-10-16T14:44:20.455Z"
+  },
+  {
+    "section": "panel_editor_cursos_docentes",
+    "description": "Actualización automática en «Panel de Editores»",
+    "revision": 107,
+    "saved_at": "2026-10-16T14:44:18.017Z"
+  },
+  {
+    "section": "panel_editor_cursos_docentes",
+    "description": "Actualización automática en «Panel de Editores»",
+    "revision": 106,
+    "saved_at": "2026-10-16T14:44:18.009Z"
+  },
+  {
+    "section": "panel_editor_nominas_estudiantes",
+    "description": "Base de datos de Nómina eliminada en ventana Nominas de estudiantes",
+    "revision": 105,
+    "saved_at": "2026-10-16T14:44:16.138Z"
+  },
+  {
+    "section": "panel_editor_nominas_estudiantes",
+    "description": "Base de datos de Nómina eliminada en ventana Nominas de estudiantes",
+    "revision": 104,
+    "saved_at": "2026-10-16T14:44:16.131Z"
+  },
+  {
+    "section": "ConfiguracionCurso",
+    "description": "Configuración del curso y sistema actualizada (Curso Activo)",
+    "revision": 103,
+    "saved_at": "2026-10-16T14:44:16.122Z"
+  },
+  {
+    "section": "panel_editor_cursos_docentes",
+    "description": "Actualización automática en «Panel de Editores»",
+    "revision": 102,
+    "saved_at": "2026-10-16T14:44:08.675Z"
+  },
+  {
+    "section": "panel_editor_cursos_docentes",
+    "description": "Actualización automática en «Panel de Editores»",
+    "revision": 101,
+    "saved_at": "2026-10-16T14:44:08.649Z"
+  }
+]

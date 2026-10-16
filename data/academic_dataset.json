@@ -1,0 +1,56 @@
+{
+  "version": 3,
+  "cleanZeroPresetSchemaV3": true,
+  "updatedAtIso": "2026-10-16T14:26:43.888Z",
+  "sessionTitles": {
+    "1": "Clase 1: Fundamentos y Entorno Digital",
+    "2": "Clase 2: Comportamiento del Consumidor Online",
+    "3": "Clase 3: Mapeo de Mercado y Segmentación",
+    "4": "Clase 4: Métricas Digitales y Analítica",
+    "5": "Clase 5: Estrategias de Atracción y Conversión",
+    "6": "Clase 6: Proyecto Integral y Sustentación"
+  },
+  "funcionLlamadoAsistenciaHabilitada": true,
+  "aperturaAutomaticaHorarioActiva": true,
+  "bloquesHorariosRecurrentes": [
+    {
+      "id": "SCHED-BLOCK-A-SAB",
+      "asignaturaNombre": "Marketing Digital Estratégico",
+      "claseId": 1,
+      "bloqueAsistencia": "A",
+      "etiquetaBloque": "Bloque A · Jornada Mañana (Apertura Escolar)",
+      "diasSemana": [
+        6
+      ],
+      "fechaInicioVigencia": "2026-02-01",
+      "fechaFinVigencia": "2026-12-15",
+      "fechaEspecifica": "",
+      "horaApertura": "08:00",
+      "horaCierre": "08:20",
+      "duracionLlamadoMinutos": 15,
+      "metodoLlamadoAuto": "alerta_panel",
+      "autoIniciarLlamado": true,
+      "activo": true
+    },
+    {
+      "id": "SCHED-BLOCK-B-SAB",
+      "asignaturaNombre": "Marketing Digital Estratégico",
+      "claseId": 1,
+      "bloqueAsistencia": "B",
+      "etiquetaBloque": "Bloque B · Jornada Tarde (Control Post-Receso)",
+      "diasSemana": [
+        6
+      ],
+      "fechaInicioVigencia": "2026-02-01",
+      "fechaFinVigencia": "2026-12-15",
+      "fechaEspecifica": "",
+      "horaApertura": "14:00",
+      "horaCierre": "14:20",
+      "duracionLlamadoMinutos": 15,
+      "metodoLlamadoAuto": "codigo_unico_wa_email",
+      "autoIniciarLlamado": true,
+      "activo": true
+    }
+  ],
+  "records": []
+}

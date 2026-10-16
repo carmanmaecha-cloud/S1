@@ -55,6 +55,7 @@ import { OptionServerSaveBar, useServerSave } from './ServerSaveContext';
 import type { ForceServerResyncResult } from '../App';
 import {
   ShieldAlert,
+  ShieldCheck,
   FolderPlus,
   Users,
   Key,
@@ -7034,18 +7035,22 @@ export function EditorPanel({
               </div>
             </div>
 
-            {/* 3. Ponderación Porcentual Global del curso */}
-            <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs space-y-3">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div>
-                  <h3 className="text-base font-bold text-slate-900">
-                    Ponderación Porcentual Global del curso
+            {/* 3. SECCIÓN INDEPENDIENTE: DISTRIBUCIÓN DE CALIFICACIONES EN % */}
+            <div className="bg-white border-2 border-indigo-200 rounded-2xl p-6 shadow-xs space-y-5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
+                <div className="space-y-0.5">
+                  <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-indigo-50 border border-indigo-200 text-[11px] font-mono font-bold text-indigo-900 uppercase">
+                    <span>Evaluación y Criterios Curriculares</span>
+                  </div>
+                  <h3 className="text-base sm:text-lg font-extrabold text-slate-900">
+                    Distribución de Calificaciones en %
                   </h3>
-                  <p className="text-xs text-slate-500">
-                    Ponderación porcentual acumulada de los {courseModules.length} módulo(s) del curso
+                  <p className="text-xs text-slate-600">
+                    Ponderación porcentual acumulada de los {courseModules.length} módulo(s) y desglose independiente de evaluación para este curso.
                   </p>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 bg-indigo-50 border border-indigo-200 rounded-xl px-3 py-2">
+                  <span className="text-xs font-bold text-indigo-950">Ponderación Global del Curso:</span>
                   <input
                     type="number"
                     min={0}
@@ -7058,9 +7063,128 @@ export function EditorPanel({
                           : Math.max(0, Math.min(100, parseInt(e.target.value, 10) || 0))
                       )
                     }
-                    className="w-24 px-3 py-2 rounded-xl border border-indigo-300 font-mono font-bold text-center text-indigo-950"
+                    className="w-20 px-2 py-1 rounded-lg border border-indigo-300 bg-white font-mono font-bold text-center text-indigo-950"
                   />
-                  <span className="font-mono font-bold text-sm text-slate-700">%</span>
+                  <span className="font-mono font-bold text-sm text-indigo-900">%</span>
+                </div>
+              </div>
+
+              {/* Matriz o Tabla de Ponderación por Módulo */}
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-slate-800">
+                    Desglose por Módulo (Comportamiento + Sustentación + Exámenes + Retos = 100%):
+                  </span>
+                  {courseModules.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const firstModW = courseModules[0]?.ponderacion || DEFAULT_MODULE_GRADING_WEIGHTS;
+                        setCourseModules((prev) =>
+                          prev.map((m) => ({ ...m, ponderacion: { ...firstModW } }))
+                        );
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-indigo-50 border border-indigo-200 text-indigo-900 hover:bg-indigo-100 text-[11px] font-bold cursor-pointer"
+                      title="Copiar las ponderaciones del Módulo 1 a todos los demás módulos"
+                    >
+                      Copiar Ponderación del Mód. 1 a Todos
+                    </button>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {courseModules.map((mod, mIdx) => {
+                    const w = mod.ponderacion || DEFAULT_MODULE_GRADING_WEIGHTS;
+                    const sumPct =
+                      (Number(w.comportamientoPct) || 0) +
+                      (Number(w.participacionPct) || 0) +
+                      (Number(w.examenPct) || 0) +
+                      (Number(w.trabajoPct) || 0);
+                    return (
+                      <div
+                        key={mIdx}
+                        className={`p-3.5 rounded-xl border space-y-2.5 ${
+                          sumPct === 100
+                            ? 'bg-slate-50/70 border-slate-200'
+                            : 'bg-amber-50/50 border-amber-300'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between border-b border-slate-200/80 pb-1.5 text-xs">
+                          <span className="font-bold text-slate-900">
+                            Módulo {mod.id}: {mod.shortTitle || `Módulo ${mod.id}`}
+                          </span>
+                          <span
+                            className={`px-2 py-0.5 rounded font-mono font-bold text-[10px] ${
+                              sumPct === 100
+                                ? 'bg-emerald-100 text-emerald-900'
+                                : 'bg-amber-200 text-amber-950 font-extrabold'
+                            }`}
+                          >
+                            {sumPct}% {sumPct === 100 ? '✓' : '(Debe ser 100%)'}
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2 text-[10px]">
+                          <div>
+                            <label className="block text-slate-600 font-semibold mb-0.5">Comportamiento:</label>
+                            <input
+                              type="number"
+                              min={0}
+                              max={100}
+                              value={w.comportamientoPct || ''}
+                              onChange={(e) => {
+                                const val = e.target.value === '' ? 0 : Math.max(0, Math.min(100, parseInt(e.target.value, 10) || 0));
+                                updateModuleAt(mIdx, (m) => ({ ...m, ponderacion: { ...w, comportamientoPct: val } }));
+                              }}
+                              className="w-full px-2 py-1 rounded border border-slate-300 bg-white font-mono font-bold text-center"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-slate-600 font-semibold mb-0.5">Sustentación:</label>
+                            <input
+                              type="number"
+                              min={0}
+                              max={100}
+                              value={w.participacionPct || ''}
+                              onChange={(e) => {
+                                const val = e.target.value === '' ? 0 : Math.max(0, Math.min(100, parseInt(e.target.value, 10) || 0));
+                                updateModuleAt(mIdx, (m) => ({ ...m, ponderacion: { ...w, participacionPct: val } }));
+                              }}
+                              className="w-full px-2 py-1 rounded border border-slate-300 bg-white font-mono font-bold text-center"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-slate-600 font-semibold mb-0.5">Examen/es:</label>
+                            <input
+                              type="number"
+                              min={0}
+                              max={100}
+                              value={w.examenPct || ''}
+                              onChange={(e) => {
+                                const val = e.target.value === '' ? 0 : Math.max(0, Math.min(100, parseInt(e.target.value, 10) || 0));
+                                updateModuleAt(mIdx, (m) => ({ ...m, ponderacion: { ...w, examenPct: val } }));
+                              }}
+                              className="w-full px-2 py-1 rounded border border-slate-300 bg-white font-mono font-bold text-center"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-slate-600 font-semibold mb-0.5">Reto/s:</label>
+                            <input
+                              type="number"
+                              min={0}
+                              max={100}
+                              value={w.trabajoPct || ''}
+                              onChange={(e) => {
+                                const val = e.target.value === '' ? 0 : Math.max(0, Math.min(100, parseInt(e.target.value, 10) || 0));
+                                updateModuleAt(mIdx, (m) => ({ ...m, ponderacion: { ...w, trabajoPct: val } }));
+                              }}
+                              className="w-full px-2 py-1 rounded border border-slate-300 bg-white font-mono font-bold text-center"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             </div>
@@ -7130,6 +7254,19 @@ export function EditorPanel({
                     <Database className="w-4 h-4" />
                     <span>Ir a ventana «Banco de preguntas»</span>
                   </button>
+                </div>
+              </div>
+
+              {/* Seguro y Garantía de Asociación por Identificador */}
+              <div className="p-3.5 rounded-xl bg-indigo-50/70 border border-indigo-200/80 flex items-start gap-3 text-xs text-indigo-950">
+                <ShieldCheck className="w-5 h-5 text-indigo-600 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <span className="font-bold">
+                    Asociación por Identificador Único (Garantía de Cero Duplicidad):
+                  </span>
+                  <p className="text-[11px] text-indigo-800 leading-relaxed">
+                    Al crear o editar este curso se vinculan las bases de datos existentes mediante su ID (Nómina: <code className="px-1.5 py-0.5 rounded bg-indigo-100 font-mono font-bold text-indigo-900">{selectedStudentRosterDbId || 'sin-id'}</code>, Banco: <code className="px-1.5 py-0.5 rounded bg-indigo-100 font-mono font-bold text-indigo-900">{selectedQuestionBankDbId || 'sin-id'}</code>). No se vuelven a crear bases de datos para el curso, evitando duplicidad. En los paneles del docente y estudiante se sincronizan automáticamente las preguntas del examen y mini retos, y las calificaciones de los estudiantes sobre estas bases de datos.
+                  </p>
                 </div>
               </div>
 

@@ -308,6 +308,10 @@ export function StudentPortal({
     att2: number | null;
     modalidadLabel?: string;
   } | null>(null);
+  const [teacherBlockedNoticeModal, setTeacherBlockedNoticeModal] = useState<{
+    actividad: 'Examen' | 'Mini Reto';
+    detalle?: string;
+  } | null>(null);
 
   // Step 2: Verified Student Session & Active Student Dashboard Sub-tabs (Persisted via AuthContext + sessionStorageWrapper)
   const {
@@ -948,6 +952,45 @@ export function StudentPortal({
       </div>
     ) : null;
 
+  const teacherBlockedModalNode = teacherBlockedNoticeModal ? (
+    <div className="fixed inset-0 z-[95] bg-slate-900/75 backdrop-blur-xs flex items-center justify-center p-4 no-print animate-in fade-in">
+      <div className="bg-white border-2 border-red-500 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
+        <div className="flex items-start gap-3">
+          <div className="w-12 h-12 rounded-2xl bg-red-100 border border-red-300 text-red-600 flex items-center justify-center shrink-0">
+            <Lock className="w-6 h-6" />
+          </div>
+          <div className="space-y-1">
+            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md bg-red-100 text-red-900 font-mono text-[10px] font-extrabold uppercase">
+              🚫 Restricción Académica
+            </span>
+            <h3 className="text-lg font-extrabold text-slate-900">
+              Acceso bloqueado por el docente de la asignatura
+            </h3>
+          </div>
+        </div>
+
+        <p className="text-xs sm:text-sm text-slate-700 leading-relaxed">
+          {teacherBlockedNoticeModal.detalle ||
+            `El docente de la asignatura ha bloqueado su acceso a ${
+              teacherBlockedNoticeModal.actividad.toLowerCase() === 'examen' ? 'este examen' : 'esta actividad'
+            } para este curso.`}
+        </p>
+
+        <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-800 font-medium">
+          Si considera que esto es un error o requiere autorización extemporánea, comuníquese directamente con el docente de la asignatura para desbloquear su usuario desde la opción «Control de Estudiantes».
+        </div>
+
+        <button
+          type="button"
+          onClick={() => setTeacherBlockedNoticeModal(null)}
+          className="w-full py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold cursor-pointer transition-colors"
+        >
+          Entendido
+        </button>
+      </div>
+    </div>
+  ) : null;
+
   // Effective allowed warnings ("llamados de atención") for this student (individual override or global default)
   const maxLlamadosPermitidos = useMemo(
     () => getEffectiveMaxLlamadosAtencion(currentStudent, config),
@@ -1012,8 +1055,34 @@ export function StudentPortal({
     return () => window.clearInterval(id);
   }, []);
 
-  // Normalize active question bank from server (falls back to INITIAL_QUESTIONS only if empty and not explicitly cleared)
+  // Normalize active question bank from assigned course database or server
   const safeQuestions = useMemo(() => {
+    // 1. Consultar base de datos de preguntas asignada al curso por su identificador exacto
+    const qBankId = activeCourseMeta?.selectedQuestionBankDbId;
+    if (qBankId && Array.isArray(config?.questionBankDatabases)) {
+      const assignedBank = config.questionBankDatabases.find((db) => db && db.id === qBankId);
+      if (assignedBank && Array.isArray(assignedBank.questions) && assignedBank.questions.length > 0) {
+        return normalizeQuestionList(assignedBank.questions);
+      }
+    }
+
+    // 2. Si el catálogo de cursos tiene el workspace de este curso
+    const currentWorkspace = (config?.universalCoursesCatalog || []).find(
+      (w) => w.meta?.courseId === activeCourseMeta?.courseId
+    );
+    if (currentWorkspace?.meta?.selectedQuestionBankDbId && Array.isArray(config?.questionBankDatabases)) {
+      const matched = config.questionBankDatabases.find(
+        (db) => db && db.id === currentWorkspace.meta.selectedQuestionBankDbId
+      );
+      if (matched && Array.isArray(matched.questions) && matched.questions.length > 0) {
+        return normalizeQuestionList(matched.questions);
+      }
+    }
+    if (Array.isArray(currentWorkspace?.questions) && currentWorkspace.questions.length > 0) {
+      return normalizeQuestionList(currentWorkspace.questions);
+    }
+
+    // 3. Fallback a questions prop
     if (Array.isArray(questions) && questions.length > 0) {
       return normalizeQuestionList(questions);
     }
@@ -1021,7 +1090,14 @@ export function StudentPortal({
       return [];
     }
     return normalizeQuestionList(INITIAL_QUESTIONS);
-  }, [questions, questionsBankExplicitlyCleared]);
+  }, [
+    activeCourseMeta?.selectedQuestionBankDbId,
+    activeCourseMeta?.courseId,
+    config?.questionBankDatabases,
+    config?.universalCoursesCatalog,
+    questions,
+    questionsBankExplicitlyCleared
+  ]);
 
   // Student's own completed attempts
   const studentAttempts = useMemo(() => {
@@ -1331,7 +1407,10 @@ export function StudentPortal({
       const att2 = modAttempts[1] || null;
       const bestGrade =
         modAttempts.length > 0 ? Math.max(...modAttempts.map((m) => m.notaColombiana)) : 0;
-      const isBlockedByTeacher = Boolean(currentStudent.examenesBloqueados?.includes(modalityId));
+      const isBlockedByTeacher = Boolean(
+        currentStudent.bloqueadoExamenesDocente ||
+        currentStudent.examenesBloqueados?.includes(modalityId)
+      );
       const hasTwoAttempts = countFromAttempts >= 2;
       const isExhausted = hasTwoAttempts || countFromAttempts >= maxAllowed;
 
@@ -1358,6 +1437,15 @@ export function StudentPortal({
       const modConfig =
         activeModalityOptions.find((m) => m.id === modalityId) || activeModalityOptions[0];
       const st = getModalityAttemptStats(modalityId);
+
+      if (st.isBlockedByTeacher) {
+        setTeacherBlockedNoticeModal({
+          actividad: 'Examen',
+          detalle: 'Acceso bloqueado por el docente de la asignatura'
+        });
+        setInductionModalOpen(false);
+        return;
+      }
 
       if (st.count >= 2 || st.isExhausted) {
         setThirdAttemptBlockedModal({
@@ -1422,7 +1510,11 @@ export function StudentPortal({
     const modStats = getModalityAttemptStats(selectedModality);
 
     if (modStats.isBlockedByTeacher) {
-      setLoginError('Esta modalidad de examen ha sido bloqueada para su usuario por el docente.');
+      setTeacherBlockedNoticeModal({
+        actividad: 'Examen',
+        detalle: 'Acceso bloqueado por el docente de la asignatura'
+      });
+      setLoginError('Acceso bloqueado por el docente de la asignatura');
       return;
     }
 
@@ -3365,6 +3457,7 @@ export function StudentPortal({
           </div>
         )}
         {globalSessionAtRiskModalNode}
+        {teacherBlockedModalNode}
       </div>
     );
   }
@@ -6086,22 +6179,51 @@ export function StudentPortal({
 
         {/* ================= VENTANA 2: ZONA DE MINI RETOS & INSIGNIAS (GAMIFICACIÓN CON IA) ================= */}
         {studentDashboardTab === 'mini_retos' && (
-          <StudentMiniRetosZone
-            student={currentStudent}
-            onUpdateStudentProfile={onUpdateStudentProfile}
-            onRecordRetoAttempt={onRecordRetoAttempt}
-            onRecordAntiCheatEvent={onRecordAntiCheatEvent}
-            questions={safeQuestions}
-            config={config}
-            customMiniRetos={customMiniRetos}
-            initialModulo={selectedRetoModuloJump}
-            onGoToExams={(mod) => {
-              if (mod) {
-                setSelectedModality(`mod${mod}` as ExamModality);
-              }
-              setStudentDashboardTab('modalidades');
-            }}
-          />
+          Boolean(currentStudent.bloqueadoRetosDocente || (config.estudiantesSinMiniRetos || []).includes(currentStudent.id)) ? (
+            <div className="bg-white border-2 border-red-300 rounded-2xl p-8 max-w-xl mx-auto my-12 text-center space-y-4 shadow-sm animate-in fade-in">
+              <div className="w-16 h-16 bg-red-100 border border-red-200 rounded-full flex items-center justify-center mx-auto text-red-600">
+                <Lock className="w-8 h-8" />
+              </div>
+              <div className="space-y-1">
+                <span className="inline-block px-3 py-1 rounded-full bg-red-100 text-red-800 text-xs font-bold uppercase tracking-wider">
+                  Acceso Restringido
+                </span>
+                <h3 className="text-xl font-extrabold text-slate-900">
+                  Acceso bloqueado por el docente de la asignatura
+                </h3>
+                <p className="text-xs text-slate-600">
+                  El docente de la asignatura ha restringido su acceso a la presentación de Mini Retos para este curso.
+                </p>
+              </div>
+              <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-800 font-medium">
+                Si requiere presentar un reto pendiente o justificar una actividad, solicite al docente habilitar su usuario desde la opción «Control de Estudiantes».
+              </div>
+              <button
+                type="button"
+                onClick={() => setStudentDashboardTab('inicio')}
+                className="px-6 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition-colors cursor-pointer"
+              >
+                Volver al Inicio del Curso
+              </button>
+            </div>
+          ) : (
+            <StudentMiniRetosZone
+              student={currentStudent}
+              onUpdateStudentProfile={onUpdateStudentProfile}
+              onRecordRetoAttempt={onRecordRetoAttempt}
+              onRecordAntiCheatEvent={onRecordAntiCheatEvent}
+              questions={safeQuestions}
+              config={config}
+              customMiniRetos={customMiniRetos}
+              initialModulo={selectedRetoModuloJump}
+              onGoToExams={(mod) => {
+                if (mod) {
+                  setSelectedModality(`mod${mod}` as ExamModality);
+                }
+                setStudentDashboardTab('modalidades');
+              }}
+            />
+          )
         )}
         </div>
 
@@ -6845,6 +6967,7 @@ export function StudentPortal({
           </button>
         </nav>
         {globalSessionAtRiskModalNode}
+        {teacherBlockedModalNode}
       </div>
     );
   }
@@ -6868,6 +6991,7 @@ export function StudentPortal({
           </button>
         </div>
         {globalSessionAtRiskModalNode}
+        {teacherBlockedModalNode}
       </div>
     );
   }
@@ -7714,6 +7838,7 @@ export function StudentPortal({
           </div>
         )}
         {globalSessionAtRiskModalNode}
+        {teacherBlockedModalNode}
       </div>
     );
   }
@@ -8195,6 +8320,7 @@ export function StudentPortal({
           )}
         </div>
         {globalSessionAtRiskModalNode}
+        {teacherBlockedModalNode}
       </div>
     );
   }
@@ -8247,6 +8373,7 @@ export function StudentPortal({
         </div>
       </div>
       {globalSessionAtRiskModalNode}
+      {teacherBlockedModalNode}
     </div>
   );
 }
